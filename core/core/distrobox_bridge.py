@@ -83,7 +83,34 @@ class DistroboxBridge:
     def ensure_gh_ready(self, mode: str) -> str:
         box_name = self.ensure_box(mode)
         self.ensure_gh_installed(mode, box_name)
+        self.ensure_git_identity(mode, box_name)
         return box_name
+
+    def ensure_git_identity(self, mode: str, box_name: str) -> None:
+        git_name = os.getenv("HOST_BRIDGE_GIT_NAME", "Userbash")
+        git_email = os.getenv("HOST_BRIDGE_GIT_EMAIL", "wairuste@gmail.com")
+        self._run([
+            "distrobox",
+            "enter",
+            box_name,
+            "--",
+            "git",
+            "config",
+            "--global",
+            "user.name",
+            git_name,
+        ], mode)
+        self._run([
+            "distrobox",
+            "enter",
+            box_name,
+            "--",
+            "git",
+            "config",
+            "--global",
+            "user.email",
+            git_email,
+        ], mode)
 
     def translate_exec(self, mode: str, box_name: str, command: list[str]) -> list[str]:
         if not command:

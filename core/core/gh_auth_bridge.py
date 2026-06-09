@@ -13,7 +13,7 @@ class GhAuthBridgeError(RuntimeError):
 
 @dataclass(slots=True)
 class GhAuthBridge:
-    token_env_keys: tuple[str, ...] = ("HOST_BRIDGE_GH_TOKEN", "GITHUB_TOKEN")
+    token_env_keys: tuple[str, ...] = ("HOST_BRIDGE_GH_TOKEN", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN")
 
     def _host_prefix(self, mode: str) -> list[str]:
         if mode == "flatpak-spawn":
@@ -88,4 +88,4 @@ class GhAuthBridge:
 
         if token:
             raise GhAuthBridgeError("gh auto-login failed inside distrobox")
-        raise GhAuthBridgeError("gh is not authenticated and no token found in HOST_BRIDGE_GH_TOKEN/GITHUB_TOKEN")
+        raise GhAuthBridgeError("gh is not authenticated and no token found in HOST_BRIDGE_GH_TOKEN/GITHUB_API_KEY/GITHUB_TOKEN/GH_TOKEN")

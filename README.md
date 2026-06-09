@@ -90,3 +90,23 @@ See `docs/` for architecture, runtime flow, provider policy, and operational not
 ## License
 
 MIT (see `LICENSE`).
+
+## Recent updates
+
+- GitHub CLI authentication is now bridged through the workspace token flow.
+- The orchestrator can automatically read `GITHUB_API_KEY` and reuse it for `gh` and Git operations.
+- SourceCraft repository workflows are wired into the core routing and API bridge.
+- Host bridge diagnostics now allow common runtime checks such as `env`, `printenv`, `ps`, `df`, and `hostname`.
+
+## Project changes in plain English
+
+This project is the control plane for the workspace. It coordinates work, chooses the right execution path, and keeps the runtime observable.
+
+Recent work focused on making GitHub automation safer and more hands-off:
+
+- `gh` can now log in automatically from the workspace token.
+- The container environment keeps the token available at startup, so users do not need to repeat manual login steps.
+- Git identity inside the container is set to `Userbash <wairuste@gmail.com>` for repository work.
+- SourceCraft is used as the repository-operation layer for repo status, PR, and release workflows.
+
+The result is a workflow where the orchestrator can manage repository tasks, authenticate to GitHub, and keep the experience mostly invisible to the user.

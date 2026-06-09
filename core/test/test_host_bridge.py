@@ -46,3 +46,12 @@ def test_translate_gh_via_distrobox_fallback(monkeypatch):
         "repo",
         "view",
     ]
+
+
+def test_whitelist_includes_common_diagnostics(tmp_path: Path):
+    wl = tmp_path / "whitelist.txt"
+    bridge = HostBridge(whitelist_file=wl)
+    bridge.ensure_whitelist()
+
+    allowed = bridge.allowlist()
+    assert {"ss", "lsof", "ps", "free", "df", "du", "hostname", "whoami"}.issubset(allowed)

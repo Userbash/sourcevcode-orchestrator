@@ -47,6 +47,18 @@ class HostBridge:
         "antigravity",
         "netstat",
         "ss",
+        "lsof",
+        "ps",
+        "top",
+        "free",
+        "df",
+        "du",
+        "uname",
+        "hostname",
+        "whoami",
+        "stat",
+        "env",
+        "printenv",
         "ip",
     ])
 

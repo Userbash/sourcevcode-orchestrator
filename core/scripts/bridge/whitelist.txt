@@ -23,3 +23,15 @@ python3
 python
 agy
 antigravity
+lsof
+ps
+top
+free
+df
+du
+uname
+hostname
+whoami
+stat
+env
+printenv
