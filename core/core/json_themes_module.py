@@ -69,6 +69,10 @@ class JSONThemesModule:
         self.finalize()
 
     def _load_existing(self) -> None:
+        if self._pg_enabled:
+            self._load_postgres()
+            return
+            
         p = Path(self.storage_path)
         if p.exists():
             try:
@@ -77,6 +81,29 @@ class JSONThemesModule:
                     self._events.extend(data)
             except Exception:
                 pass
+
+    def _load_postgres(self) -> None:
+        import psycopg2  # type: ignore
+        
+        dsn = normalize_database_url(self._database_url)
+        try:
+            with psycopg2.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT event_payload 
+                        FROM {AI_BRIDGE_SCHEMA}.json_themes
+                        ORDER BY created_at ASC
+                        """
+                    )
+                    rows = cur.fetchall()
+                    with self._lock:
+                        for row in rows:
+                            self._events.append(row[0])
+                        self._flushed_count = len(self._events)
+        except Exception as e:
+            if self._api:
+                self._api.log("error", f"[THEMES] Failed to load themes from postgres: {e}")
 
     def before_task(self, task: Task, context: dict[str, Any]) -> None:
         pass

@@ -51,6 +51,7 @@ from .tdd_policy_module import StrictTDDModule
 from .qwen_code_module import QwenCodeModule
 from .code_readability_module import CodeReadabilityModule
 from .dev_toolkit_module import DevToolkitModule
+from .dependency_manager import DependencyManager
 
 
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Script to start the Orchestrator as a background voice assistant
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo "=============================================="

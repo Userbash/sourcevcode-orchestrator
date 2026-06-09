@@ -1,36 +1,23 @@
-# API Documentation
+# Orchestrator API Documentation
 
 ## Purpose
 
-This section defines the backend API contracts used by frontend and administrative clients.
+This section defines the API contracts for the SourceVCode Orchestrator, facilitating interaction with the AI Bridge runtime and task orchestration services.
 
 ## Structure
 
-- `routes/*.md`: one document per backend route module in `backend/api/routes/`
+- `openapi.yaml`: The primary OpenAPI specification for the Orchestrator API.
 - `ERRORS.md`: shared error model and status-code conventions
 - `VERSIONING.md`: API versioning and compatibility policy
 
 ## Contract Rules
 
-1. Any endpoint behavior change requires route-doc update in the same pull request.
-2. Any request/response schema change requires examples to be updated.
-3. Any new security requirement must be reflected in route-level access notes.
-4. Breaking changes must be flagged in `CHANGELOG.md` and release notes.
+1. Any API contract change requires an update to the OpenAPI specification in the same pull request.
+2. Breaking changes must be flagged in `CHANGELOG.md` and release notes.
 
-## Current Route Coverage
+## Current Documentation
 
-- `accessControl.ts` -> `routes/accessControl.md`
-- `admin.ts` -> `routes/admin.md`
-- `auditEvents.ts` -> `routes/auditEvents.md`
-- `auth.ts` -> `routes/auth.md`
-- `dictionary.ts` -> `routes/dictionary.md`
-- `items.ts` -> `routes/items.md`
-- `lessons.ts` -> `routes/lessons.md`
-- `logs.ts` -> `routes/logs.md`
-- `profileAvatar.ts` -> `routes/profileAvatar.md`
-- `progress.ts` -> `routes/progress.md`
-- `publications.ts` -> `routes/publications.md`
-- `quizzes.ts` -> `routes/quizzes.md`
-- `systemMetrics.ts` -> `routes/systemMetrics.md`
-- `users.ts` -> `routes/users.md`
+- `openapi.yaml` - Primary API reference.
+- `ERRORS.md` - Standardized error responses.
+- `VERSIONING.md` - Compatibility policy.
 

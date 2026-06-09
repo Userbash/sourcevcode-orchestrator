@@ -85,7 +85,7 @@ adds them to the pool when the declared capability matches the task.
 For a self-contained runtime that launches the orchestrator and local Ollama together, use:
 
 ```bash
-./scripts/start_core_stack.sh
+./core/scripts/start_core_stack.sh
 ```
 
 This stack uses `docker-compose.ai.yml` and starts:

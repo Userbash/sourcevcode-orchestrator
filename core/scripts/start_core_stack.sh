@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BRIDGE_CMD="$PROJECT_ROOT/core/scripts/bridge/exec.sh"
 COMPOSE_FILE="$PROJECT_ROOT/docker-compose.ai.yml"
 

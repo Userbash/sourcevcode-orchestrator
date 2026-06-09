@@ -1,3 +1,5 @@
+> **LEGACY/ECOSYSTEM REFERENCE:** This document describes the broader Hebrew AI Platform ecosystem, which includes components (frontend-react, backend) not present in this specific 'SourceVCode Orchestrator' repository. 
+
 # Full Project Documentation: Hebrew AI Platform
 
 ## 1. Project Purpose

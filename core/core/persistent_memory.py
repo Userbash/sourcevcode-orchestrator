@@ -104,10 +104,56 @@ def ensure_storage_schema(database_url: str) -> bool:
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """,
-        f"CREATE INDEX IF NOT EXISTS idx_core_memories_lookup ON {AI_BRIDGE_SCHEMA}.memories (session_id, agent_id, memory_type, memory_id DESC)",
-        f"CREATE INDEX IF NOT EXISTS idx_core_memories_key ON {AI_BRIDGE_SCHEMA}.memories (session_id, agent_id, memory_type, ((metadata->>'key')), memory_id DESC)",
-        f"CREATE INDEX IF NOT EXISTS idx_core_commands_lookup ON {AI_BRIDGE_SCHEMA}.commands (session_id, agent_id, executed_at DESC)",
-        f"CREATE INDEX IF NOT EXISTS idx_core_themes_lookup ON {AI_BRIDGE_SCHEMA}.json_themes (session_id, created_at DESC)",
+        f"""
+        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.users (
+            user_id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            email TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.user_roles (
+            user_id INTEGER REFERENCES {AI_BRIDGE_SCHEMA}.users(user_id) ON DELETE CASCADE,
+            role TEXT NOT NULL,
+            PRIMARY KEY (user_id, role)
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.vfs_files (
+            file_path TEXT PRIMARY KEY,
+            content BYTEA NOT NULL,
+            checksum TEXT NOT NULL,
+            last_updated TIMESTAMPTZ NOT NULL,
+            owner_agent TEXT NOT NULL,
+            integrity TEXT NOT NULL,
+            metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.task_plans (
+            task_id TEXT PRIMARY KEY,
+            plan JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"""
+        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.agent_performance_metrics (
+            id SERIAL PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            success_rate FLOAT NOT NULL,
+            avg_latency_ms FLOAT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"CREATE INDEX IF NOT EXISTS idx_core_memories_session_lookup ON {AI_BRIDGE_SCHEMA}.memories (session_id, agent_id, memory_type, memory_id DESC)",
+        f"CREATE INDEX IF NOT EXISTS idx_core_memories_importance ON {AI_BRIDGE_SCHEMA}.memories (importance_score DESC)",
+        f"CREATE INDEX IF NOT EXISTS idx_core_commands_session_agent ON {AI_BRIDGE_SCHEMA}.commands (session_id, agent_id, executed_at DESC)",
+        f"CREATE INDEX IF NOT EXISTS idx_core_themes_session_ts ON {AI_BRIDGE_SCHEMA}.json_themes (session_id, created_at DESC)",
+        f"CREATE INDEX IF NOT EXISTS idx_vfs_path_lookup ON {AI_BRIDGE_SCHEMA}.vfs_files (file_path)",
+        f"CREATE INDEX IF NOT EXISTS idx_users_username_idx ON {AI_BRIDGE_SCHEMA}.users (username)",
     ]
 
     conn = None
@@ -205,6 +251,35 @@ class PersistentMemoryManager:
         mapping[session_id] = normalized
         self._write_json(self.session_map_file, mapping)
         return normalized
+
+    def upsert_user(self, username: str, email: str) -> int:
+        if self._pg_enabled:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {AI_BRIDGE_SCHEMA}.users (username, email)
+                        VALUES (%s, %s)
+                        ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email
+                        RETURNING user_id
+                        """,
+                        (username, email),
+                    )
+                    return int(cur.fetchone()[0])
+        return 0
+
+    def assign_role(self, user_id: int, role: str) -> None:
+        if self._pg_enabled:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {AI_BRIDGE_SCHEMA}.user_roles (user_id, role)
+                        VALUES (%s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (user_id, role),
+                    )
 
     def store_memory(self, *, session_id: str, agent_id: str, memory_type: str, content: Any, **kwargs: Any) -> int:
         normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)

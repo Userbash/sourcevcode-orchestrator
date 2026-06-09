@@ -7,7 +7,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 echo "=============================================="
@@ -84,7 +84,7 @@ if [[ -n "$CORE_URL" ]]; then
 else
     echo -e "${YELLOW}OFFLINE${NC}"
     echo "Starting Orchestrator..."
-    ./scripts/start_core_stack.sh
+    ./core/scripts/start_core_stack.sh
 fi
 
 echo "=============================================="

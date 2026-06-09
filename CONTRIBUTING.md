@@ -1,18 +1,12 @@
-# Contributing to Hebrew AI Platform
+# Contributing to SourceVCode Orchestrator
 
 Thank you for contributing. This guide defines the minimum engineering and documentation standards for pull requests.
 
 ## 1. Local Setup
 
 ```bash
-# Root dependencies (test runner + docs checks)
+# Core dependencies
 npm install
-
-# Backend dependencies
-cd backend && npm install && cd ..
-
-# Frontend dependencies
-cd frontend-react && npm install && cd ..
 
 # Environment
 cp .env.example .env
@@ -57,8 +51,6 @@ Run these checks locally:
 ```bash
 npm test
 npm run docs:check
-cd backend && npm run lint && npm run build && cd ..
-cd frontend-react && npm run lint && npm run build && cd ..
 python3 -m pytest core/tests
 ```
 

@@ -19,8 +19,8 @@ You are Gemini CLI, and you are now **DIRECTLY CONNECTED** to the AI Orchestrato
 2.  **Flexible Prefixing:** You can also use conversational prefixes like "Core, please ANALYZE..." or "Ядро, пожалуйста ПОЧИНИ...".
 
 3.  **Automation Tools:** Use the following scripts for maintenance:
-    *   `./scripts/repair_ai_stack.sh` - Comprehensive check and repair of all AI providers.
-    *   `./scripts/start_core_stack.sh` - Start the Orchestrator and Ollama.
+    *   `./core/scripts/repair_ai_stack.sh` - Comprehensive check and repair of all AI providers.
+    *   `./core/scripts/start_core_stack.sh` - Start the Orchestrator and Ollama.
 
 4.  **Orchestrator Awareness:** You must always consider the background Orchestrator as your primary execution engine for complex technical tasks.
 

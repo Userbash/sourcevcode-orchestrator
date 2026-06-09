@@ -74,7 +74,7 @@ bash scripts/start_core_stack.sh
 
 AI Orchestrator:
 ```bash
-./scripts/start_core_stack.sh
+./core/scripts/start_core_stack.sh
 ```
 
 Tests:

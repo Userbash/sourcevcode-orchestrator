@@ -1,16 +1,16 @@
 # Documentation Index
 
-## Core
+## SourceVCode Orchestrator Core
 
 - `ARCHITECTURE.md` - system architecture and runtime flows
-- `PROJECT_FULL_DOCUMENTATION_EN.md` - full project deep-dive
-- `AI_BRIDGE_RUNTIME_ROUTING.md` - current AI Bridge model/provider routing rules
+- `AI_BRIDGE_RUNTIME_ROUTING.md` - AI Bridge model/provider routing rules
 - `AI_BRIDGE_ARCHITECTURE.md` - AI Bridge component overview and wiring
-- `AI_ORCHESTRATOR_CORE.md` - deeper technical reference, kept for legacy detail
+- `AI_ORCHESTRATOR_CORE.md` - technical reference for the orchestrator core
+- `PROJECT_FULL_DOCUMENTATION_EN.md` - (LEGACY/ECOSYSTEM REFERENCE) comprehensive platform documentation
 
 ## Governance and Process
 
-- `DOCUMENTATION_GOVERNANCE.md` - required documentation update rules and CI enforcement
+- `DOCUMENTATION_GOVERNANCE.md` - required documentation update rules
 - `VERSIONING_POLICY.md` - semantic versioning and release rules
 - `TRACEABILITY_POLICY.md` - required issue-to-release traceability chain
 - `ENVIRONMENT_VERSIONING.md` - environment reproducibility/version controls
@@ -25,14 +25,13 @@
 ## Operations
 
 - `RUNBOOKS/OPERATIONS_RUNBOOK.md` - startup/deploy operations
-- `RUNBOOKS/INCIDENT_RESPONSE_RUNBOOK.md` - incident handling flow
 
 ## API Contracts
 
 - `API/README.md` - API documentation structure and rules
 - `API/ERRORS.md` - standard error model
 - `API/VERSIONING.md` - API compatibility/versioning approach
-- `API/routes/*` - route module coverage
+- `API/openapi.yaml` - OpenAPI specification
 
 ## Architecture Decisions
 
@@ -46,12 +45,12 @@
 
 ## Orchestrator Hardening
 
-- `AI_BRIDGE_HARDENING_BACKLOG.md` - micro-task backlog with owners, dependencies, and DoD
-- `AI_BRIDGE_EXECUTION_PLAN_R1_R4.md` - encapsulated by-agent plan and decapsulated release execution model
-- `GEMINI_AUTO_ROUTING_MODULE_PLAN.md` - earlier Gemini routing plan, now superseded by the shared runtime routing doc
+- `AI_BRIDGE_HARDENING_BACKLOG.md` - micro-task backlog
+- `AI_BRIDGE_EXECUTION_PLAN_R1_R4.md` - encapsulated by-agent plan
+- `GEMINI_AUTO_ROUTING_MODULE_PLAN.md` - Gemini routing plan
 
 ## Session Memory
 
-- `AI_BRIDGE_SESSION_MEMORY.md` - architecture and security model for temporary session memory
-- `AI_BRIDGE_SESSION_MEMORY_BACKLOG.md` - micro-task decomposition and ownership map
-- `AI_BRIDGE_SESSION_MEMORY_RELEASE_PLAN.md` - decapsulated R1-R4 rollout plan
+- `AI_BRIDGE_SESSION_MEMORY.md` - architecture and security model for session memory
+- `AI_BRIDGE_SESSION_MEMORY_BACKLOG.md` - micro-task decomposition
+- `AI_BRIDGE_SESSION_MEMORY_RELEASE_PLAN.md` - rollout plan

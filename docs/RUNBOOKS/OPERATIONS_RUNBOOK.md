@@ -2,40 +2,35 @@
 
 ## Scope
 
-Operational procedures for backend, frontend, and observability stack in containerized environments.
+Operational procedures for the SourceVCode Orchestrator core runtime.
 
 ## Standard Startup
 
 1. Validate environment variables (`.env` against `.env.example`).
-2. Build and start services:
-   - `bash scripts/build_abstracted.sh`
-   - `bash scripts/start_manual.sh`
+2. Start the core stack:
+   - `bash scripts/start_core_stack.sh`
 3. Confirm health:
-   - Backend: `GET /api/health`
-   - Frontend: root page health check
-   - Infra: Loki/Grafana readiness endpoints
+   - Orchestrator API: `GET /health` (via `http://localhost:8000/health`)
 
 ## Standard Shutdown
 
-- Use service-specific stop scripts when available.
-- Ensure no in-progress migrations or data backfills before shutdown.
+- Terminate the Orchestrator process gracefully.
+- Ensure no in-progress task orchestrations or data backfills before shutdown.
 
 ## Routine Checks
 
-- Container health status (`healthy` expected)
-- Error-rate spikes in logs
-- Admin API latency trends
-- DB connectivity and lock contention metrics
+- Orchestrator process health (`active` expected)
+- Error-rate spikes in core logs
+- API latency trends
+- AI bridge connectivity
 
 ## Change Deployment Procedure
 
-1. Review changelog and migration plan.
+1. Review changelog.
 2. Run tests:
    - `npm test`
-   - backend lint/build
-   - frontend lint/build
    - `python3 -m pytest core/tests`
-3. Deploy using approved compose flow.
+3. Deploy using approved flow.
 4. Run post-deploy smoke checks.
 5. Record release manifest and rollback notes.
 
