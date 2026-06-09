@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import asyncio
+
+from core.agents.codex_agent import CodexAgent
+from core.agents.planner_agent import PlannerAgent
+from core.agents.reviewer_agent import ReviewerAgent
+from core.agents.tester_agent import TesterAgent
+from core.core.models import Task, TaskContext, TaskInput, TaskType
+from core.core.orchestrator import Orchestrator
+
+
+def test_modprobe_style_load_unload():
+    orchestrator = Orchestrator()
+
+    assert "ai_activity" in orchestrator.loaded_kernel_modules()
+    assert "orchestrator_control" in orchestrator.loaded_kernel_modules()
+    assert "model_availability" in orchestrator.loaded_kernel_modules()
+
+    orchestrator.unload_kernel_module("ai_activity")
+    assert "ai_activity" not in orchestrator.loaded_kernel_modules()
+
+    orchestrator.load_kernel_module("ai_activity")
+    assert "ai_activity" in orchestrator.loaded_kernel_modules()
+
+    orchestrator.unload_kernel_module("model_availability")
+    assert "model_availability" not in orchestrator.loaded_kernel_modules()
+
+    orchestrator.load_kernel_module("model_availability")
+    assert "model_availability" in orchestrator.loaded_kernel_modules()
+
+
+def test_ai_activity_in_final_result():
+    orchestrator = Orchestrator()
+    orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"))
+    orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"))
+    orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"))
+    orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"))
+
+    task = Task(TaskType.PLAN, TaskInput("Build feature", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
+    result = asyncio.run(orchestrator.run(task))
+
+    assert "kernel_modules" in result
+    assert "ai_activity" in result
+    assert "ai_activity" in result["module_state"]
+    assert result["ai_activity"]["total_tasks"] >= 1
+
+
+def test_submit_user_task_uses_orchestrator_as_source_of_truth():
+    orchestrator = Orchestrator()
+    orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"))
+    orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"))
+    orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"))
+    orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"))
+
+    orchestrator.submit_user_task({"type": "plan", "description": "Build feature", "acceptance_criteria": ["tests pass"]}, source="test")
+    snapshot = orchestrator.monitoring_snapshot()
+
+    assert snapshot["source_of_truth"] == "orchestrator"
+    assert snapshot["submitted_total"] >= 1
+    assert snapshot["finished_total"] >= 1
+    assert isinstance(snapshot["tasks"], dict)
+
+
+def test_submit_user_task_idempotency_returns_cached_result():
+    from core.core.orchestrator import Orchestrator
+
+    orchestrator = Orchestrator()
+    payload = {"type": "plan", "description": "Build frontend page", "session_id": "idem-1"}
+    first = orchestrator.submit_user_task(payload, source="test")
+    second = orchestrator.submit_user_task(payload, source="test")
+    assert first.get("status") == second.get("status")
+    assert isinstance(second, dict)

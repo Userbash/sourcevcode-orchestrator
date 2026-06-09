@@ -1,0 +1,74 @@
+{
+  "root": "/var/home/sanya/Hebrew-web",
+  "core_modules": [
+    {
+      "module": "core/core/orchestrator.py",
+      "exists": true,
+      "size": 45979
+    },
+    {
+      "module": "core/core/task_router.py",
+      "exists": true,
+      "size": 8236
+    },
+    {
+      "module": "core/core/smart_scheduler.py",
+      "exists": true,
+      "size": 9416
+    },
+    {
+      "module": "core/core/agent_registry.py",
+      "exists": true,
+      "size": 4195
+    },
+    {
+      "module": "core/core/agent_lifecycle.py",
+      "exists": true,
+      "size": 3108
+    },
+    {
+      "module": "core/core/model_selector.py",
+      "exists": true,
+      "size": 6963
+    },
+    {
+      "module": "core/core/provider_budget_router.py",
+      "exists": true,
+      "size": 4502
+    },
+    {
+      "module": "core/core/api_bridge_module.py",
+      "exists": true,
+      "size": 10940
+    },
+    {
+      "module": "core/core/task_submission_api.py",
+      "exists": true,
+      "size": 4760
+    },
+    {
+      "module": "core/core/session_memory.py",
+      "exists": true,
+      "size": 5666
+    },
+    {
+      "module": "core/core/persistent_memory.py",
+      "exists": true,
+      "size": 25140
+    }
+  ],
+  "venv": "/var/home/sanya/Hebrew-web/.venv_core",
+  "deps": [
+    {
+      "file": "/var/home/sanya/Hebrew-web/core/requirements-ai.txt",
+      "rc": "0",
+      "stderr": ""
+    }
+  ],
+  "tests": {
+    "rc": 0,
+    "stdout": ".......                                                                  [100%]\n=============================== warnings summary ===============================\n.venv_core/lib/python3.13/site-packages/starlette/formparsers.py:12\n  /var/home/sanya/Hebrew-web/.venv_core/lib/python3.13/site-packages/starlette/formparsers.py:12: PendingDeprecationWarning: Please use `import python_multipart` instead.\n    import multipart\n\n.venv_core/lib/python3.13/site-packages/instructor/providers/gemini/client.py:5\n  /var/home/sanya/Hebrew-web/.venv_core/lib/python3.13/site-packages/instructor/providers/gemini/client.py:5: FutureWarning: \n  \n  All support for the `google.generativeai` package has ended. It will no longer be receiving \n  updates or bug fixes. Please switch to the `google.genai` package as soon as possible.\n  See README for more details:\n  \n  https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md\n  \n    import google.generativeai as genai  # type: ignore[import-not-found]\n\ncore/tests/test_kernel_modules.py::test_modprobe_style_load_unload\n  /var/home/sanya/Hebrew-web/.venv_core/lib/python3.13/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions\n    warnings.warn(  # deprecated in 14.0 - 2024-11-09\n\ncore/tests/test_kernel_modules.py::test_modprobe_style_load_unload\n  /var/home/sanya/Hebrew-web/.venv_core/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py:16: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated\n    from websockets.server import WebSocketServerProtocol\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n7 passed, 4 warnings in 1.57s\n",
+    "stderr": ""
+  },
+  "ok": true
+}

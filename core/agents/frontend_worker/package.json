@@ -1,0 +1,26 @@
+{
+  "name": "frontend-worker-agents",
+  "version": "1.0.0",
+  "description": "Decoupled AI agents for frontend development and UX validation",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "ioredis": "^5.3.2",
+    "ts-morph": "^20.0.0",
+    "zod": "^3.22.4",
+    "dotenv": "^16.3.1",
+    "@langchain/anthropic": "^0.0.5",
+    "@langchain/core": "^0.1.16",
+    "eslint": "^8.56.0",
+    "axe-core": "^4.8.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.11.0"
+  }
+}

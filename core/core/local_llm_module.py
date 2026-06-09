@@ -1,0 +1,694 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from typing import Any
+
+import requests
+
+from .kernel_protocol import KernelAPI, KernelModule
+
+logger = logging.getLogger("local_llm_module")
+
+HIGH_RISK_KEYWORDS = (
+    "security",
+    "auth",
+    "rbac",
+    "payment",
+    "secret",
+    "production",
+    "migration",
+    "destructive",
+)
+LOCAL_LLM_TASK_KEYWORDS = {
+    "repo_ops": ("repo", "repository", "worktree", "branch", "status", "diff", "clone", "checkout"),
+    "docs_workflow": ("docs", "documentation", "summary", "explain", "commit message", "commit log"),
+    "verification": ("test", "tests", "ci", "verification", "checklist", "health", "workflow"),
+    "planning": ("plan", "plan:", "break down", "decompose", "roadmap"),
+    "analysis": ("research", "review", "analysis", "compare", "investigate"),
+}
+
+
+class LocalLLMModule(KernelModule):
+    def __init__(
+        self,
+        endpoint: str | None = None,
+        model_name: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> None:
+        self.name = "local_llm"
+        self._api: KernelAPI | None = None
+        self.endpoint = (endpoint or os.getenv("AI_BRIDGE_LOCAL_LLM_ENDPOINT") or "http://host.containers.internal:11434").rstrip("/")
+
+        self.model_name = model_name or os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL") or "qwen2.5:32b-instruct-q4_k_m"
+        raw_timeout = os.getenv("AI_BRIDGE_LOCAL_LLM_HEALTH_TIMEOUT_SEC")
+        if timeout_sec is not None:
+            self.timeout_sec = max(0.2, timeout_sec)
+        elif raw_timeout:
+            try:
+                self.timeout_sec = max(0.2, float(raw_timeout))
+            except ValueError:
+                self.timeout_sec = 1.0
+        else:
+            self.timeout_sec = 1.0
+        self.last_probe: dict[str, Any] = {}
+        self.last_advisory: dict[str, Any] = {}
+
+    def can_use_model(self, model_name: str | None = None) -> dict[str, Any]:
+        target_model = (model_name or self.model_name).strip()
+        probe = self._probe()
+        model_present = bool(probe.get("model_present"))
+        return {
+            "ok": bool(probe.get("ok")) and model_present,
+            "service_reachable": bool(probe.get("ok")),
+            "model_present": model_present,
+            "model_name": target_model,
+            "status_code": probe.get("status_code"),
+            "available_models": probe.get("available_models", []),
+            "error": probe.get("error"),
+        }
+
+    @staticmethod
+    def _model_matches(expected: str, candidate: str) -> bool:
+        expected_base = expected.split(":", 1)[0]
+        candidate_base = candidate.split(":", 1)[0]
+        return candidate == expected or candidate_base == expected_base
+
+    @staticmethod
+    def _task_text(task: Any, context: dict[str, Any] | None = None) -> str:
+        pieces: list[str] = []
+        if context:
+            for key in ("description", "objective", "message", "prompt", "summary"):
+                value = context.get(key)
+                if isinstance(value, str) and value.strip():
+                    pieces.append(value.strip())
+        description = str(getattr(getattr(task, "input", None), "description", "") or "").strip()
+        if description:
+            pieces.append(description)
+        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))).strip()
+        if task_type:
+            pieces.append(task_type)
+        files = getattr(getattr(task, "input", None), "files", []) or []
+        if isinstance(files, list):
+            pieces.extend(str(item) for item in files if str(item).strip())
+        constraints = getattr(getattr(task, "input", None), "constraints", []) or []
+        if isinstance(constraints, list):
+            pieces.extend(str(item) for item in constraints if str(item).strip())
+        return " ".join(pieces).lower()
+
+    @staticmethod
+    def _task_family(task_text: str) -> str:
+        for family, keywords in LOCAL_LLM_TASK_KEYWORDS.items():
+            if any(keyword in task_text for keyword in keywords):
+                return family
+        return "general"
+
+    @staticmethod
+    def _high_risk(task_text: str) -> bool:
+        return any(keyword in task_text for keyword in HIGH_RISK_KEYWORDS)
+
+    @staticmethod
+    def _recommended_actions(task_family: str) -> list[str]:
+        mapping = {
+            "repo_ops": [
+                "summarize the worktree and recent repository changes",
+                "prepare a concise handoff for the orchestrator",
+                "highlight immediate repo actions without mutating state",
+            ],
+            "docs_workflow": [
+                "draft the documentation or commit text",
+                "compress the change into a readable summary",
+                "surface the outcome for the reviewer and orchestrator",
+            ],
+            "verification": [
+                "prepare a test plan or checklist",
+                "summarize verification steps for the core",
+                "highlight likely failure points before execution",
+            ],
+            "planning": [
+                "break the task into smaller steps",
+                "produce a lightweight execution outline",
+                "identify which parts remain in the core",
+            ],
+            "analysis": [
+                "summarize the options and tradeoffs",
+                "prepare a comparison of likely approaches",
+                "extract the useful context for the next agent",
+            ],
+        }
+        return mapping.get(task_family, [
+            "summarize the task",
+            "compress context for the core",
+        ])
+
+    @staticmethod
+    def _core_retained_actions() -> list[str]:
+        return [
+            "security enforcement",
+            "provider routing",
+            "scheduler decisions",
+            "budget controls",
+            "mutating execution",
+            "failover and retries",
+        ]
+
+    @staticmethod
+    def _safe_offload_actions() -> dict[str, list[str]]:
+        return {
+            "full_offload": ["docs_workflow", "analysis"],
+            "partial_offload": ["planning", "verification", "review"],
+            "core_only": ["security", "auth", "destructive", "migration", "sourcecraft"],
+        }
+
+    def build_offload_profile(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        advisory = self._advisory_base(task, context)
+        family = str(advisory.get("task_family") or "general")
+        should_delegate = bool(advisory.get("should_delegate"))
+        offload = self._safe_offload_actions()
+        can_offload_fully = should_delegate and family in set(offload["full_offload"])
+        can_offload_partially = should_delegate or family in set(offload["partial_offload"])
+        return {
+            **advisory,
+            "offload": {
+                "can_offload_fully": can_offload_fully,
+                "can_offload_partially": can_offload_partially,
+                "full_offload": offload["full_offload"],
+                "partial_offload": offload["partial_offload"],
+                "core_only": offload["core_only"],
+                "recommended_boundary": "local_llm" if can_offload_partially else "core",
+            },
+        }
+
+    def _probe(self) -> dict[str, Any]:
+        endpoints = [self.endpoint]
+        if "host.containers.internal" in self.endpoint:
+            endpoints.append(self.endpoint.replace("host.containers.internal", "127.0.0.1"))
+        elif "127.0.0.1" in self.endpoint or "localhost" in self.endpoint:
+            endpoints.append(self.endpoint.replace("127.0.0.1", "host.containers.internal").replace("localhost", "host.containers.internal"))
+
+        last_exc = "no endpoints tried"
+        for url in endpoints:
+            try:
+                response = requests.get(f"{url}/api/tags", timeout=self.timeout_sec)
+                response.raise_for_status()
+                payload = response.json() if response.content else {}
+                models = payload.get("models", []) if isinstance(payload, dict) else []
+                available_models: list[str] = []
+                if isinstance(models, list):
+                    for item in models:
+                        if isinstance(item, dict):
+                            name = item.get("name")
+                            if isinstance(name, str) and name.strip():
+                                available_models.append(name.strip())
+                model_present = any(self._model_matches(self.model_name, candidate) for candidate in available_models)
+                
+                # If we successfully probed an alternative endpoint, update self.endpoint
+                if url != self.endpoint:
+                    logger.info(f"[LOCAL_LLM] Switching endpoint to {url} after successful probe")
+                    self.endpoint = url
+
+                return {
+                    "ok": True,
+                    "status_code": response.status_code,
+                    "available_models": available_models,
+                    "model_present": model_present,
+                    "error": None,
+                }
+            except Exception as exc:
+                last_exc = str(exc)
+                continue
+
+        return {
+            "ok": False,
+            "status_code": None,
+            "available_models": [],
+            "model_present": False,
+            "error": last_exc,
+        }
+
+    def query(self, prompt: str, model_name: str | None = None) -> str:
+        target_model = (model_name or self.model_name).strip()
+        readiness = self.can_use_model(target_model)
+        if not readiness["ok"]:
+            raise RuntimeError(
+                f"local LLM is not ready: service_reachable={readiness['service_reachable']}, model_present={readiness['model_present']} (endpoint={self.endpoint})"
+            )
+
+        start_time = time.perf_counter()
+        try:
+            response = requests.post(
+                f"{self.endpoint}/api/generate",
+                json={
+                    "model": target_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.2,
+                        "top_p": 0.9,
+                    },
+                },
+                timeout=max(2.0, self.timeout_sec * 10),
+            )
+            response.raise_for_status()
+            duration = time.perf_counter() - start_time
+            logger.info(f"[LLM_TELEMETRY] Query to {target_model} at {self.endpoint} took {duration:.3f}s")
+        except Exception as exc:
+            logger.error(f"[LLM_ERROR] Query to {target_model} at {self.endpoint} failed: {exc}")
+            raise
+
+        payload = response.json() if response.content else {}
+        if isinstance(payload, dict):
+            text = payload.get("response")
+            if isinstance(text, str):
+                return text.strip()
+        return ""
+
+    def _advisory_base(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        probe = self.can_use_model(self.model_name)
+        ready = bool(probe.get("ok"))
+        task_text = self._task_text(task, context)
+        task_family = self._task_family(task_text)
+        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))).lower() or None
+        complexity = str(getattr(getattr(task, "complexity", None), "value", getattr(task, "complexity", "")) or "").lower() or None
+        priority = str(getattr(getattr(task, "priority", None), "value", getattr(task, "priority", "")) or "").lower() or None
+        high_risk = self._high_risk(task_text) or priority == "critical"
+        should_delegate = ready and not high_risk and task_family in {"docs_workflow", "verification", "planning", "analysis"}
+        preferred_model = self.model_name if ready else None
+        return {
+            "enabled": ready,
+            "ready": ready,
+            "status": probe.get("status", "unknown") if isinstance(probe, dict) else "unknown",
+            "endpoint": self.endpoint,
+            "model_name": self.model_name,
+            "task_family": task_family,
+            "task_type": task_type,
+            "priority": priority,
+            "complexity": complexity,
+            "high_risk": high_risk,
+            "should_delegate": should_delegate,
+            "recommended_owner": "local_llm" if should_delegate else "core",
+            "recommended_model": preferred_model,
+            "source_context": {
+                "files": list(getattr(getattr(task, "input", None), "files", []) or []),
+                "constraints": list(getattr(getattr(task, "input", None), "constraints", []) or []),
+            },
+            "actions": self._recommended_actions(task_family),
+            "core_retained_actions": self._core_retained_actions(),
+            "safe_offload": self._safe_offload_actions(),
+            "summary": None,
+            "task_text": task_text,
+        }
+
+    def _heuristic_decomposition_draft(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        task_text = self._task_text(task, context)
+        task_family = self._task_family(task_text)
+        plan_layers = [
+            {
+                "name": "intake",
+                "objective": "Normalize the request and extract constraints",
+                "capability": "plan",
+                "tasks": ["summarize the request", "list explicit constraints", "capture acceptance criteria"],
+                "sub_agents": ["planner"],
+                "dependencies": [],
+            },
+            {
+                "name": "analysis",
+                "objective": "Identify implementation surfaces and risks",
+                "capability": "research",
+                "tasks": ["identify affected modules", "list integration points", "flag risk areas"],
+                "sub_agents": ["research", "review"],
+                "dependencies": ["intake"],
+            },
+            {
+                "name": "implementation",
+                "objective": "Create implementation chunks for the core agents",
+                "capability": "code",
+                "tasks": ["backend changes", "frontend changes", "data changes"],
+                "sub_agents": ["backend", "frontend", "database"],
+                "dependencies": ["analysis"],
+                "parallel_group": True,
+            },
+            {
+                "name": "verification",
+                "objective": "Prepare test and validation work",
+                "capability": "test",
+                "tasks": ["unit tests", "integration tests", "verification checklist"],
+                "sub_agents": ["tester", "review"],
+                "dependencies": ["implementation"],
+            },
+            {
+                "name": "documentation",
+                "objective": "Prepare the human-readable handoff",
+                "capability": "docs",
+                "tasks": ["update README", "write PR summary", "write commit summary"],
+                "sub_agents": ["docs"],
+                "dependencies": ["verification"],
+            },
+        ]
+        if task_family == "repo_ops":
+            plan_layers.insert(1, {
+                "name": "repo_scan",
+                "objective": "Inspect repository state and worktree changes",
+                "capability": "docs",
+                "tasks": ["repo status", "worktree diff", "changed files summary"],
+                "sub_agents": ["sourcecraft"],
+                "dependencies": ["intake"],
+            })
+        if task_family == "analysis":
+            plan_layers[1]["tasks"] = ["compare approaches", "summarize tradeoffs", "identify risks"]
+        return {
+            "status": "heuristic",
+            "task_family": task_family,
+            "layers": plan_layers,
+            "agent_map": {
+                "planner": ["intake"],
+                "research": ["analysis"],
+                "backend": ["implementation"],
+                "frontend": ["implementation"],
+                "database": ["implementation"],
+                "tester": ["verification"],
+                "docs": ["documentation"],
+                "sourcecraft": ["repo_scan"],
+            },
+            "sub_agents": ["planner", "research", "backend", "frontend", "database", "tester", "docs"],
+        }
+
+    def _parallel_strategy_prompt(self, task_text: str) -> str:
+        return (
+            "Return JSON only. You are a Senior Architect. Decompose this task into 3 independent parallel strategy drafts: "
+            "1. Functional (focus on features), 2. Risk-Oriented (focus on safety), 3. Resource-Oriented (focus on speed/parallelism). "
+            "Then synthesize them into a final 'layers' plan. "
+            "Each layer must have: name, objective, capability, tasks (list), sub_agents (list), dependencies (list), parallel_group (bool). "
+            "Task: " + task_text
+        )
+
+    def build_decomposition_draft(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        advisory = self._advisory_base(task, context)
+        if not advisory.get("ready"):
+            advisory["decomposition"] = self._heuristic_decomposition_draft(task, context)
+            return advisory
+
+        task_text = advisory.get("task_text") or self._task_text(task, context)
+        prompt = self._parallel_strategy_prompt(task_text)
+        
+        parsed: dict[str, Any] | None = None
+        try:
+            response = self.query(prompt, self.model_name)
+            if response:
+                try:
+                    # Strip markdown markers if any
+                    clean_response = response.strip()
+                    if clean_response.startswith("```json"):
+                        clean_response = clean_response[7:-3].strip()
+                    elif clean_response.startswith("{"):
+                        pass # already clean enough
+                    
+                    raw = json.loads(clean_response)
+                    if isinstance(raw, dict):
+                        parsed = raw
+                except json.JSONDecodeError:
+                    parsed = None
+        except Exception as exc:
+            advisory["decomposition_error"] = str(exc)
+
+        if not parsed or "layers" not in parsed:
+            parsed = self._heuristic_decomposition_draft(task, context)
+            parsed["status"] = "heuristic"
+        else:
+            parsed.setdefault("status", "model")
+            parsed.setdefault("task_family", advisory["task_family"])
+            parsed.setdefault("sub_agents", [])
+            parsed.setdefault("agent_map", {})
+            parsed.setdefault("layers", [])
+
+        advisory.update({
+            "summary": parsed.get("summary") if isinstance(parsed.get("summary"), str) else advisory.get("summary"),
+            "context_digest": parsed.get("context_digest") if isinstance(parsed.get("context_digest"), str) else None,
+            "next_steps": parsed.get("next_steps") if isinstance(parsed.get("next_steps"), list) else advisory.get("actions", []),
+            "model_hint": parsed.get("model_hint") if isinstance(parsed.get("model_hint"), str) else advisory.get("recommended_model"),
+        })
+        advisory["decomposition"] = parsed
+        return advisory
+
+    def build_advisory(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        probe = self.check_health()
+        ready = bool(probe.get("ok")) and bool(probe.get("model_present"))
+        task_text = self._task_text(task, context)
+        task_family = self._task_family(task_text)
+        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))).lower() or None
+        complexity = str(getattr(getattr(task, "complexity", None), "value", getattr(task, "complexity", "")) or "").lower() or None
+        priority = str(getattr(getattr(task, "priority", None), "value", getattr(task, "priority", "")) or "").lower() or None
+        high_risk = self._high_risk(task_text) or priority == "critical"
+        should_delegate = ready and not high_risk and task_family in {"docs_workflow", "verification", "planning", "analysis"}
+        preferred_model = self.model_name if ready else None
+        advisory: dict[str, Any] = {
+            "enabled": ready,
+            "ready": ready,
+            "status": probe.get("status", "unknown") if isinstance(probe, dict) else "unknown",
+            "endpoint": self.endpoint,
+            "model_name": self.model_name,
+            "task_family": task_family,
+            "task_type": task_type,
+            "priority": priority,
+            "complexity": complexity,
+            "high_risk": high_risk,
+            "should_delegate": should_delegate,
+            "recommended_owner": "local_llm" if should_delegate else "core",
+            "recommended_model": preferred_model,
+            "source_context": {
+                "files": list(getattr(getattr(task, "input", None), "files", []) or []),
+                "constraints": list(getattr(getattr(task, "input", None), "constraints", []) or []),
+            },
+            "actions": self._recommended_actions(task_family),
+            "core_retained_actions": self._core_retained_actions(),
+            "summary": None,
+        }
+
+        if should_delegate:
+            prompt = (
+                "You are assisting an orchestrator. Return one short JSON object with keys summary, "
+                "context_digest, next_steps, and model_hint. Keep it concise. Task: "
+                f"{task_text}"
+            )
+            try:
+                response = self.query(prompt, self.model_name)
+                if response:
+                    try:
+                        parsed = json.loads(response)
+                        if isinstance(parsed, dict):
+                            advisory.update({
+                                "summary": parsed.get("summary") if isinstance(parsed.get("summary"), str) else advisory.get("summary"),
+                                "context_digest": parsed.get("context_digest") if isinstance(parsed.get("context_digest"), str) else None,
+                                "next_steps": parsed.get("next_steps") if isinstance(parsed.get("next_steps"), list) else advisory["actions"],
+                                "model_hint": parsed.get("model_hint") if isinstance(parsed.get("model_hint"), str) else preferred_model,
+                            })
+                    except json.JSONDecodeError:
+                        advisory["summary"] = response[:240]
+            except Exception as exc:
+                advisory["summary"] = f"local_llm_unavailable: {exc}"
+
+        self.last_advisory = advisory
+        return advisory
+
+    def pull_model(self, model_name: str | None = None) -> bool:
+        """Seamlessly pulls the requested model from Ollama."""
+        target_model = (model_name or self.model_name).strip()
+        if self._api:
+            self._api.log("info", f"[LOCAL_LLM] Pulling model {target_model}... This may take a while.")
+        
+        try:
+            resp = requests.post(
+                f"{self.endpoint}/api/pull",
+                json={"name": target_model, "stream": False},
+                timeout=600 # 10 minute timeout for large models
+            )
+            if resp.status_code == 200:
+                if self._api:
+                    self._api.log("info", f"[LOCAL_LLM] Model {target_model} successfully PULLED.")
+                return True
+            else:
+                if self._api:
+                    self._api.log("error", f"[LOCAL_LLM] Pull failed with status {resp.status_code}: {resp.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to pull local model {target_model}: {e}")
+            return False
+
+    def on_load(self, api: KernelAPI) -> None:
+        self._api = api
+        api.log("info", f"[LOCAL_LLM] Probing Ollama at {self.endpoint} for model {self.model_name}...")
+
+        self.last_probe = self.check_health()
+        
+        if self.last_probe.get("ok") and self.last_probe.get("model_present"):
+            api.log("info", f"[LOCAL_LLM] Local model {self.model_name} is reachable and ready.")
+        elif self.last_probe.get("ok"):
+            api.log("warning", f"[LOCAL_LLM] Ollama is reachable, but model {self.model_name} is not found. Attempting seamless update...")
+            if self.pull_model():
+                self.last_probe = self.check_health()
+            else:
+                api.log("error", f"[LOCAL_LLM] Seamless update failed for {self.model_name}.")
+        else:
+            api.log("error", f"[LOCAL_LLM] Local model endpoint is unreachable: {self.last_probe.get('error', 'unknown error')}")
+
+
+    def unload_model(self, model_name: str | None = None) -> bool:
+        """Gracefully unloads the model from VRAM (Ollama specific)."""
+        target_model = (model_name or self.model_name).strip()
+        try:
+            # Ollama: keep_alive: 0 in a generation request unloads the model
+            requests.post(
+                f"{self.endpoint}/api/generate",
+                json={
+                    "model": target_model,
+                    "prompt": "",
+                    "template": "",
+                    "stream": False,
+                    "keep_alive": 0
+                },
+                timeout=5
+            )
+            if self._api:
+                self._api.log("info", f"[LOCAL_LLM] Model {target_model} successfully UNLOADED from VRAM.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to unload local model {target_model}: {e}")
+            return False
+
+    def hot_reload(self, new_model_name: str) -> bool:
+        """Dynamically switches the active model and pulls it if missing."""
+        if self._api:
+            self._api.log("info", f"[LOCAL_LLM] Hot-reloading model to {new_model_name}...")
+        
+        # Unload old model
+        self.unload_model()
+        
+        # Update model name
+        self.model_name = new_model_name
+        
+        # Re-probe and pull if needed
+        self.last_probe = self.check_health()
+        if not self.last_probe.get("model_present"):
+            if not self.pull_model():
+                return False
+                
+        if self._api:
+            self._api.log("info", f"[LOCAL_LLM] Hot-reload successful. Active model: {self.model_name}")
+        return True
+
+    def on_unload(self) -> None:
+
+
+        self.last_probe = {}
+        self.last_advisory = {}
+
+    def before_task(self, task: Any, context: dict[str, Any]) -> None:
+        advisory = self.build_offload_profile(task, context)
+        context["local_llm"] = advisory
+        if advisory.get("should_delegate"):
+            context["local_llm"]["automation"] = {
+                "owner": "local_llm",
+                "task_family": advisory.get("task_family"),
+                "actions": advisory.get("actions", []),
+                "core_retained_actions": advisory.get("core_retained_actions", []),
+            }
+
+    def after_task(self, task: Any, result: Any, context: dict[str, Any]) -> None:
+        local_llm = context.get("local_llm")
+        if not isinstance(local_llm, dict):
+            return
+        output = getattr(result, "output", {})
+        summary = ""
+        if isinstance(output, dict):
+            summary = str(output.get("summary", "") or "")
+        local_llm["last_result"] = {
+            "task_id": getattr(task, "task_id", None),
+            "status": getattr(getattr(result, "status", None), "value", getattr(result, "status", None)),
+            "summary": summary,
+        }
+
+    @property
+    def ready(self) -> bool:
+        try:
+            resp = requests.get(f"{self.endpoint}/api/tags", timeout=self.timeout_sec)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def query(self, prompt: str, system: str = "You are a specialized AI Kernel Optimizer.") -> str:
+        """Synchronous query for internal kernel tasks."""
+        if not self.ready:
+            return ""
+        try:
+            payload = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "system": system,
+                "stream": False,
+                "options": {"temperature": 0.1}
+            }
+            resp = requests.post(f"{self.endpoint}/api/generate", json=payload, timeout=300)
+            return resp.json().get("response", "").strip()
+        except Exception as e:
+            logger.error(f"Local LLM query failed: {e}")
+            return ""
+
+    def compact_memory(self, raw_data: list[dict[str, Any]]) -> str:
+        """Uses local LLM to turn raw logs/history into a dense semantic summary."""
+        prompt = f"Compact the following activity trace into a dense technical summary for another AI. Keep keys, schemas, and logic decisions. Data: {json.dumps(raw_data)}"
+        return self.query(prompt, system="Summarize memory for context efficiency.")
+
+    def generate_embedding_keywords(self, text: str) -> list[str]:
+        """Generates semantic tags for indexing without calling expensive cloud APIs."""
+        prompt = f"Return 10 technical keywords for indexing this code/task: {text[:1000]}"
+        resp = self.query(prompt, system="Return only comma-separated keywords.")
+        return [k.strip() for k in resp.split(",") if k.strip()]
+
+    def analyze_p2p_intent(self, sender: str, receiver: str, payload: dict) -> bool:
+        """Security: Analyze if a direct P2P message is safe and logical."""
+        prompt = f"Analyze P2P message from {sender} to {receiver}. Payload: {json.dumps(payload)}. Is this safe and architecturaly sound? Return 'SAFE' or 'RISK: reason'."
+        resp = self.query(prompt).upper()
+        return "SAFE" in resp
+
+    def check_health(self) -> dict[str, Any]:
+        try:
+            self.last_probe = self._probe()
+        except Exception as exc:
+            self.last_probe = {
+                "ok": False,
+                "status_code": None,
+                "available_models": [],
+                "model_present": False,
+                "error": str(exc),
+            }
+        return self.last_probe
+
+    def finalize(self) -> dict[str, Any]:
+        probe = self.last_probe or self.check_health()
+        ok = bool(probe.get("ok"))
+        model_present = bool(probe.get("model_present"))
+        if ok and model_present:
+            status = "ready"
+        elif ok:
+            status = "degraded"
+        else:
+            status = "error"
+        return {
+            "status": status,
+            "endpoint": self.endpoint,
+            "model": self.model_name,
+            "health_timeout_sec": self.timeout_sec,
+            "service_reachable": ok,
+            "model_present": model_present,
+            "available_models": probe.get("available_models", []),
+            "last_error": probe.get("error"),
+            "advisory_examples": {
+                "docs_workflow": self._recommended_actions("docs_workflow"),
+                "verification": self._recommended_actions("verification"),
+                "planning": self._recommended_actions("planning"),
+                "analysis": self._recommended_actions("analysis"),
+            },
+            "last_advisory": self.last_advisory,
+        }

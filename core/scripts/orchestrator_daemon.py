@@ -1,0 +1,75 @@
+import asyncio
+import logging
+import sys
+import os
+
+try:
+    import core.core.fix_imports
+except ImportError:
+    pass
+
+sys.path.insert(0, '/app')
+
+from core.core.env_loader import load_env_file
+
+load_env_file()
+load_env_file(".env.bridge", override=True)
+load_env_file(".env.gemini.local", override=True)
+load_env_file("/app/.env.bridge")
+
+from core.core.orchestrator import Orchestrator
+from core.agents.planner_agent import PlannerAgent
+from core.agents.codex_agent import CodexAgent
+from core.agents.antigravity_cli_agent import AntigravityCLIAgent
+from core.agents.mistral_agent import MistralAgent
+from core.agents.reviewer_agent import ReviewerAgent
+from core.agents.tester_agent import TesterAgent
+from core.agents.frontend_dev_agent import FrontendDevAgent
+from core.agents.frontend_design_agent import FrontendDesignAgent
+from core.core.orchestration_config import OrchestrationConfig
+from core.core.security import SecurityManager, SecurityPolicy
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("orchestrator_daemon")
+
+
+async def main():
+    logger.info("Initializing Orchestrator daemon and binding agents...")
+
+    orchestrator = Orchestrator()
+    orchestrator.orchestration_config = OrchestrationConfig.from_env()
+
+    security_manager = SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=["agy -p", "antigravity -p"]))
+
+    # Prefer mistral for codex-main when MISTRAL key exists (cost-saving mode).
+    mistral_key = (os.getenv("MISTRAL_API_KEY") or "").strip()
+    openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    openai_auto = os.getenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if openai_auto and openai_key:
+        codex_provider = "openai"
+        codex_model = os.getenv("CODEX_OPENAI_MODEL", "gpt-5-mini")
+    elif mistral_key:
+        codex_provider = "mistral"
+        codex_model = "mistral-large-latest"
+    elif openai_key:
+        codex_provider = "openai"
+        codex_model = os.getenv("CODEX_OPENAI_MODEL", "gpt-4o")
+    else:
+        codex_provider = "local"
+        codex_model = "local-small"
+
+    orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="custom", critical=True, model_name="gpt-planner", provider="openai")
+    orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="custom", critical=True, model_name=codex_model, provider=codex_provider)
+    orchestrator.attach_local_agent("antigravity-cli-1", AntigravityCLIAgent("antigravity-cli-1", security_manager), agent_type="custom", critical=False, model_name="antigravity-cli", provider="google")
+    orchestrator.attach_local_agent("mistral-1", MistralAgent("mistral-1", security_manager), agent_type="custom", critical=False, model_name="mistral-large-latest", provider="mistral")
+    orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="custom", model_name="gpt-test-standard", provider="openai")
+    orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="custom", model_name="gpt-review-large", provider="openai")
+    orchestrator.attach_local_agent("frontend-dev-1", FrontendDevAgent("frontend-dev-1"), agent_type="custom", model_name=codex_model, provider=codex_provider)
+    orchestrator.attach_local_agent("frontend-design-1", FrontendDesignAgent("frontend-design-1"), agent_type="custom", model_name="design-spec", provider="local")
+
+    logger.info(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")
+    await orchestrator.listen_for_tasks()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

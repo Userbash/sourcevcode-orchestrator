@@ -1,0 +1,98 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build artifacts
+build/
+dist/
+*.o
+*.so
+
+# Data and logs
+/data/
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+backend_pid.txt
+log/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Database backups
+*.sql
+*.dump
+
+# SSL certificates (for production use only)
+certs/
+acme-data/
+ssl/*.key
+ssl/*.crt
+ssl/*.pem
+ssl/*.csr
+
+
+# Generated Files
+tests/.nginx-detection-results.json
+tests/.test-results.json
+
+# Backend specific node modules
+backend/node_modules/
+.env
+
+# Keep backend schema migrations in git
+!backend/database/migrations/*.sql
+
+# Generated email blocklist cache
+backend/database/email-domain-blocklist.cache.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# AI Bridge & Orchestrator
+.env.bridge
+.env.gemini.local
+.cache
+.tooling
+.agent/bridge_results/
+.agent/bridge_queue.json
+.agent/tasks/
+.agent/reports/
+memory_store/
+system_test_report.py
+.agent/orchestrator.pid
+
+# AI Bridge bootstrap artifacts
+.venv_ai_bridge/
+ai_bridge/runtime_report.json

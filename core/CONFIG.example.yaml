@@ -1,0 +1,40 @@
+project:
+  name: "ai-bridge"
+  mode: "local"
+
+orchestrator:
+  max_parallel_tasks: 5
+  retry_limit: 3
+  task_timeout_sec: 900
+
+orchestration:
+  enabled_by_default: true
+  ask_confirmation: false
+  default_mode: "core"
+  auto_route_tasks: true
+  auto_start_agents: true
+  auto_retry: true
+  auto_review: true
+  auto_test: true
+
+agents:
+  - id: "codex-main"
+    type: "codex"
+    endpoint: "local://codex"
+    capabilities: ["code", "fix", "refactor"]
+
+load_balancing:
+  strategy: "weighted_score"
+  healthcheck_interval_sec: 30
+  overload_threshold: 0.85
+
+security:
+  allow_shell: true
+  shell_allowlist:
+    - "pytest"
+    - "ruff check"
+    - "python -m pytest"
+  block_commands:
+    - "sudo"
+    - "rm -rf /"
+    - "chmod 777"
