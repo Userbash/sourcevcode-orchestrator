@@ -102,6 +102,29 @@ class APIBridgeModule:
         matrix = snapshot.get("delegation_matrix") or []
         return matrix if isinstance(matrix, list) else []
 
+    def _tdd_snapshot(self) -> dict[str, Any]:
+        if not self._api:
+            return {"status": "inactive", "enforcement": "unknown"}
+        try:
+            module = self._api.get_module("tdd_policy")
+        except Exception:
+            module = None
+        if module and hasattr(module, "finalize"):
+            snapshot = module.finalize()
+            if isinstance(snapshot, dict):
+                return snapshot
+        return {"status": "inactive", "enforcement": "unknown"}
+
+    def _delivery_trace(self, *, source_label: str, provider_label: str, transport: str, endpoint: str) -> dict[str, Any]:
+        return {
+            "source": source_label,
+            "provider": provider_label,
+            "transport": transport,
+            "endpoint": endpoint,
+            "orchestrator": "submit_user_task",
+            "visibility": "full",
+        }
+
     def _health_full_snapshot(self) -> dict[str, Any]:
         if not self._api:
             return {"status": "error", "message": "Kernel API not available"}
@@ -246,11 +269,14 @@ class APIBridgeModule:
             elif isinstance(merged, str):
                 merged = meta_header + "\n" + merged
 
+            delivery = self._delivery_trace(source_label=source_label, provider_label=provider_label, transport="websocket", endpoint="/chat/ws")
             return {
                 "task_id": result.get("task_id", "unknown"),
                 "status": "completed",
                 "source": source_label,
                 "provider": provider_label,
+                "delivery": delivery,
+                "tdd": self._tdd_snapshot(),
                 "result": merged if merged else result.get("results", []),
             }
         except Exception as e:
@@ -309,10 +335,14 @@ class APIBridgeModule:
                 last = next((item for item in reversed(decisions) if getattr(item, "task_id", None) == result_task_id), decisions[-1])
                 scheduler_trace = last.as_dict() if hasattr(last, "as_dict") else last
 
+        tdd_snapshot = self._tdd_snapshot()
+        delivery = self._delivery_trace(source_label=source_label, provider_label=provider_label, transport="http", endpoint="/chat/fulltrace")
         return {
             "status": "completed",
             "source": source_label,
             "provider": provider_label,
+            "delivery": delivery,
+            "tdd": tdd_snapshot,
             "input": raw_payload,
             "normalized": normalized,
             "task": {

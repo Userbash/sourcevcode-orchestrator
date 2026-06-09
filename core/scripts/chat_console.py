@@ -165,8 +165,26 @@ def _print_result(user_input: str, data: dict) -> None:
         print("=" * 50)
         return
 
-    task_id = data.get("task_id")
+    task_id = data.get("task_id") or data.get("task", {}).get("task_id")
     status = data.get("status")
+    delivery = data.get("delivery") if isinstance(data.get("delivery"), dict) else {}
+    route = data.get("route") if isinstance(data.get("route"), dict) else {}
+    tdd = data.get("tdd") if isinstance(data.get("tdd"), dict) else {}
+
+    if delivery:
+        transport = str(delivery.get("transport", "unknown"))
+        endpoint = str(delivery.get("endpoint", "unknown"))
+        orchestrator = str(delivery.get("orchestrator", "unknown"))
+        print(f"\n[DELIVERY] {transport.upper()} -> {endpoint} -> {orchestrator}")
+        print(f"[DELIVERY] visible_to_user=true source={delivery.get('source', 'unknown')} provider={delivery.get('provider', 'unknown')}")
+
+    if tdd:
+        print(f"[TDD] status={tdd.get('status', 'unknown')} enforcement={tdd.get('enforcement', 'unknown')}")
+
+    if route:
+        router_agent = route.get("router_agent") or route.get("agent_id") or route.get("provider")
+        if router_agent:
+            print(f"[TRACE] route={router_agent}")
 
     if status == "completed":
         result = data.get("result")

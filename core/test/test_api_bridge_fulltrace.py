@@ -66,6 +66,12 @@ def test_chat_fulltrace_reports_actual_task_path(monkeypatch):
     ))
 
     assert response["status"] == "completed"
+    assert response["delivery"]["transport"] == "http"
+    assert response["delivery"]["endpoint"] == "/chat/fulltrace"
+    assert response["delivery"]["orchestrator"] == "submit_user_task"
+    assert response["delivery"]["visibility"] == "full"
+    assert response["tdd"]["status"] == "active"
+    assert response["tdd"]["enforcement"] == "hard"
     assert response["task"]["task_id"] == "trace-task-123"
     assert response["input"]["message"] == "trace me"
     assert response["normalized"]["message"] == "trace me"

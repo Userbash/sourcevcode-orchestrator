@@ -106,7 +106,6 @@ Recent work focused on making GitHub automation safer and more hands-off:
 
 - `gh` can now log in automatically from the workspace token.
 - The container environment keeps the token available at startup, so users do not need to repeat manual login steps.
-- Git identity inside the container is set to `Userbash <wairuste@gmail.com>` for repository work.
 - SourceCraft is used as the repository-operation layer for repo status, PR, and release workflows.
 
 The result is a workflow where the orchestrator can manage repository tasks, authenticate to GitHub, and keep the experience mostly invisible to the user.
