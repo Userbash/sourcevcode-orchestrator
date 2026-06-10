@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from core.core.host_bridge import HostBridge, HostBridgeError
@@ -19,16 +20,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        result = bridge.execute(argv, check=False)
+        bridge.validate(argv)
+        mode = bridge.detect_mode()
+        if argv[0] == "gh":
+            bridge.gh_auth_bridge.ensure_authenticated(mode, bridge.distrobox_bridge, bridge._host_has_binary)
+            
+        translated = bridge._translate_gh(argv, mode) if argv[0] == "gh" else bridge.translate(argv)
     except HostBridgeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
-    if result.stdout:
-        sys.stdout.write(result.stdout)
-    if result.stderr:
-        sys.stderr.write(result.stderr)
-    return result.returncode
+    os.execvp(translated[0], translated)
 
 
 if __name__ == "__main__":

@@ -412,6 +412,27 @@ class ModelParams:
     max_tokens: int = 4096
 
 
+class ResultPayload(CompatModel):
+    task_id: str
+    status: TaskStatus
+    output: dict[str, Any] = Field(default_factory=dict)
+    artifacts: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    completed_criteria: list[str] = Field(default_factory=list)
+    failed_criteria: list[str] = Field(default_factory=list)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if args:
+            fields = ["task_id", "status", "output", "artifacts", "errors", "warnings", "confidence", "completed_criteria", "failed_criteria"]
+            merged = dict(kwargs)
+            for name, value in zip(fields, args):
+                merged.setdefault(name, value)
+            kwargs = merged
+        super().__init__(**kwargs)
+
+
 class ResultEnvelope(CompatModel):
     protocol_version: str = "1.0"
     result_id: str

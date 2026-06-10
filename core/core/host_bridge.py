@@ -24,6 +24,11 @@ class HostBridge:
         "git",
         "gh",
         "distrobox",
+        "distrobox-enter",
+        "distrobox-list",
+        "distrobox-create",
+        "distrobox-stop",
+        "distrobox-rm",
         "distrobox-host-exec",
         "podman",
         "docker",
@@ -48,6 +53,7 @@ class HostBridge:
         "netstat",
         "ss",
         "lsof",
+        "lsfo",
         "ps",
         "top",
         "free",
@@ -60,13 +66,18 @@ class HostBridge:
         "env",
         "printenv",
         "ip",
+        "nmcli",
     ])
 
     def ensure_whitelist(self) -> None:
         self.whitelist_file.parent.mkdir(parents=True, exist_ok=True)
+        # If exists, we merge default with existing to not lose user changes
         if self.whitelist_file.exists():
+            existing = {line.strip() for line in self.whitelist_file.read_text().splitlines() if line.strip()}
+            merged = existing | set(self.default_allowlist)
+            self.whitelist_file.write_text("\n".join(sorted(merged)) + "\n")
             return
-        self.whitelist_file.write_text("\n".join(self.default_allowlist) + "\n")
+        self.whitelist_file.write_text("\n".join(sorted(self.default_allowlist)) + "\n")
 
     def allowlist(self) -> set[str]:
         self.ensure_whitelist()
@@ -75,7 +86,11 @@ class HostBridge:
     def validate(self, command: list[str]) -> None:
         if not command:
             raise HostBridgeError("Empty command")
-        if command[0] not in self.allowlist():
+        # Check both the command itself and its basename to be more robust
+        cmd0 = command[0]
+        basename = Path(cmd0).name
+        allowed = self.allowlist()
+        if cmd0 not in allowed and basename not in allowed:
             raise HostBridgeError(f"Command '{command[0]}' is not in host bridge whitelist")
 
     def detect_mode(self) -> str:
@@ -86,12 +101,15 @@ class HostBridge:
         return "direct"
 
     def _host_has_binary(self, binary: str) -> bool:
-        result = subprocess.run(
-            ["flatpak-spawn", "--host", "sh", "-lc", f"command -v {shlex.quote(binary)} >/dev/null 2>&1"],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0
+        mode = self.detect_mode()
+        if mode == "flatpak-spawn":
+            result = subprocess.run(
+                ["flatpak-spawn", "--host", "sh", "-lc", f"command -v {shlex.quote(binary)} >/dev/null 2>&1"],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        return shutil.which(binary) is not None
 
     def _translate_podman_compose(self, command: list[str]) -> list[str]:
         compose_args = command[2:]
@@ -137,7 +155,7 @@ class HostBridge:
                 return self._translate_podman_compose(command)
             return ["flatpak-spawn", "--host", *command]
 
-        if mode == "direct":
+        if mode == "direct" or mode == "container":
             if len(command) >= 2 and command[0] == "podman" and command[1] == "compose":
                 if shutil.which("docker"):
                     return ["docker", "compose", *command[2:]]
@@ -167,5 +185,5 @@ class HostBridge:
             except GhAuthBridgeError as exc:
                 raise HostBridgeError(str(exc)) from exc
 
-        translated = self._translate_gh(command, mode) if command[0] == "gh" else self.translate(command)
+        translated = self.translate(command)
         return subprocess.run(translated, timeout=timeout, capture_output=capture_output, text=text, check=check)
