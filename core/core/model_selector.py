@@ -74,23 +74,27 @@ class ModelSelector:
     def classify(self, task: Task) -> Complexity:
         if task.complexity:
             return task.complexity
-        
+
         # Try AI-powered advisor first
         advisor_eval = self._evaluate_with_advisor(task)
         if advisor_eval and advisor_eval.high_risk:
             return Complexity.CRITICAL
 
-        text = task.input.description.lower()
-        risk = evaluate_risk_context(text)
+        text: str = task.input.description.lower()
+        risk: RiskEvaluation = evaluate_risk_context(text)
         if task.priority == Priority.CRITICAL or risk.high_risk:
             return Complexity.CRITICAL
-        if task.type in {TaskType.PLAN, TaskType.REVIEW} or any(w in text for w in ("architecture", "distributed", "debugging")):
+
+        # Plan/Review only HIGH if complex keywords are present
+        if task.priority == Priority.HIGH or (task.type in {TaskType.PLAN, TaskType.REVIEW} and any(w in text for w in ("architecture", "distributed", "debugging"))):
             return Complexity.HIGH
+
         if risk.matched_low_risk_exemptions and task.type in {TaskType.DOCS, TaskType.FIX} and len(task.input.files) <= 2 and len(text) < 120:
             return Complexity.LOW
         if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX, TaskType.DOCS, TaskType.RESEARCH} or len(task.input.files) > 2:
             return Complexity.MEDIUM
         return Complexity.LOW
+
 
     @staticmethod
     def _local_llm_advisory(advisory_context: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -133,33 +137,28 @@ class ModelSelector:
         local_choice = self._local_llm_choice(task, complexity, advisory_context)
         if local_choice is not None:
             return local_choice
-        if complexity == Complexity.CRITICAL:
+        
+        # Risk Check (High risk always to Cloud)
+        risk = evaluate_risk_context(task.input.description.lower())
+        if complexity == Complexity.CRITICAL or risk.high_risk:
             return self._openai_choice(task, complexity, True, "critical_risk_openai_escalation", "gpt-senior-secure")
-        if complexity == Complexity.HIGH:
-            if task.type == TaskType.PLAN:
-                return self._openai_choice(task, complexity, True, "high_complexity_openai_escalation", "gpt-coding-large")
-            if task.type == TaskType.REVIEW:
-                return self._openai_choice(task, complexity, True, "high_review_openai_escalation", "gpt-review-large")
-            return ModelChoice("antigravity-cli", "antigravity", complexity, True, reason="high_reasoning_antigravity")
-        if complexity == Complexity.LOW:
-            return ModelChoice("local-small", "local", complexity, False, reason="low_simple_local_routing")
+        
+        # Route based on TaskType to optimized local models
+        if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}:
+            if complexity == Complexity.HIGH:
+                # Complex FIX/CODE -> DeepSeek-R1 (Local, strong reasoning)
+                return ModelChoice("deepseek-r1:14b", "local", complexity, True, reason="complex_code_fix_deepseek_local")
+            # Standard CODE -> Qwen-Coder (Local)
+            return ModelChoice("qwen2.5-coder:14b", "local", complexity, False, reason="standard_code_qwen_local")
 
-        if task.type in {TaskType.CODE, TaskType.TEST}:
-            qwen_plan = self.qwen_router.build_plan(task, task.input.description)
-            return ModelChoice(qwen_plan.models[0], "qwen", complexity, False, reason=f"qwen_auto_{qwen_plan.reason}")
-
-        if task.type == TaskType.CODE:
-            if advisory_context and advisory_context.get("prefer_openai"):
-                return self._openai_choice(task, complexity, False, "medium_code_openai_selected", "gpt-coding-standard")
-            return ModelChoice("antigravity-cli", "antigravity", complexity, False, reason="medium_code_antigravity_routing")
-
+        if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}:
+            # Planning/Docs -> Mistral-Nemo (Local)
+            return ModelChoice("mistral-nemo:12b", "local", complexity, False, reason="planning_docs_mistral_local")
+        
         if task.type == TaskType.REVIEW:
-            return self._openai_choice(task, complexity, False, "medium_review_openai_selected", "gpt-review-large")
-        if task.type in {TaskType.FIX, TaskType.TEST}:
-            return ModelChoice("antigravity-cli", "antigravity", complexity, False, reason="medium_fix_test_antigravity_routing")
-        if task.type in {TaskType.DOCS, TaskType.RESEARCH}:
-            return ModelChoice("antigravity-cli", "antigravity", complexity, False, reason="medium_docs_research_antigravity_routing")
-        return ModelChoice("local-small", "local", complexity, False, reason="policy_default")
+            return ModelChoice("deepseek-r1:14b", "local", complexity, True, reason="review_deepseek_local")
+
+        return ModelChoice("llama3.2:3b", "local", complexity, False, reason="policy_default_utility")
 
     def _select_strict(self, task: Task, complexity: Complexity, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
         # strict minimizes OpenAI except explicit critical/high-risk.
@@ -178,33 +177,26 @@ class ModelSelector:
 
     def select(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
         complexity = self.classify(task)
-        if self.policy_mode == "strict":
-            choice = self._select_strict(task, complexity, advisory_context)
-        else:
-            choice = self._select_legacy(task, complexity, advisory_context)
+        risk = evaluate_risk_context(task.input.description.lower())
+        
+        # 1. HIGH/CRITICAL Complexity or High Risk -> Cloud
+        if complexity in {Complexity.CRITICAL, Complexity.HIGH} or risk.high_risk:
+            return self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o")
 
-        # SOFT UNLOADING CHECK
-        if not self.model_lifecycle.is_available(choice.model_name):
-            logger.warning(f"[ROUTER] Model {choice.model_name} is UNAVAILABLE ({self.model_lifecycle.get_status(choice.model_name)}). Finding emergency fallback...")
-            
-            # 1. Specialized Coding Fallback
-            if choice.provider == "qwen" and task.type in {TaskType.CODE, TaskType.TEST}:
-                # If Qwen fails, use Claude via Antigravity as the most competent alternative
-                choice = ModelChoice("antigravity-cli", "antigravity", complexity, False, reason="qwen_unloading_fallback_to_claude")
-            
-            # 2. General Cloud Fallback to Local
-            elif choice.provider in {"openai", "mistral", "qwen"} and choice.model_name != "qwen2.5:32b-instruct-q4_k_m":
-                choice = ModelChoice("qwen2.5:32b-instruct-q4_k_m", "local", complexity, False, reason="cloud_unloading_fallback_to_local")
-            
-            # 3. Last Resort
-            elif choice.model_name != "local-small":
-                choice = ModelChoice("local-small", "local", complexity, False, reason="emergency_unloading_fallback")
-            else:
-                logger.error("[ROUTER] All fallback models are exhausted!")
+        # 2. CODE/FIX/TEST -> Qwen-Coder (Local)
+        if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}:
+            return ModelChoice("qwen2.5-coder:14b", "local", complexity, False, reason="standard_code_qwen_local")
+        
+        # 3. PLAN/DOCS/RESEARCH -> Mistral-Nemo (Local)
+        if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}:
+             return ModelChoice("mistral-nemo:12b", "local", complexity, False, reason="planning_docs_mistral_local")
+        
+        # 4. REVIEW -> DeepSeek (Local)
+        if task.type == TaskType.REVIEW:
+            return ModelChoice("deepseek-r1:14b", "local", complexity, True, reason="review_deepseek_local")
 
-
-        logger.info("[MODEL_SELECTOR] complexity=%s task_type=%s preferred_provider=%s assigned_model=%s policy_mode=%s", choice.complexity.value, task.type.value, choice.provider, choice.model_name, self.policy_mode)
-        return choice
+        # Default fallback
+        return ModelChoice("llama3.2:3b", "local", complexity, False, reason="policy_default_utility")
 
 
 
