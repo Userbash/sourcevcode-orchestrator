@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from .models import Complexity, Priority, Task, TaskType
+from .models import Complexity, Priority, Task, TaskType, ModelParams
 from .openai_runtime_router import OpenAIRuntimeRouter
 from .qwen_runtime_router import QwenRuntimeRouter
 from .model_lifecycle import ModelLifecycleManager
@@ -32,6 +32,7 @@ class ModelChoice:
     model_name: str
     provider: str
     complexity: Complexity
+    params: ModelParams = field(default_factory=ModelParams)
     requires_secondary_review: bool = False
     detected_keywords: list[str] | None = None
     matched_high_risk_rules: list[str] | None = None
@@ -46,8 +47,6 @@ class ModelSelector:
         self.qwen_router = QwenRuntimeRouter()
         self.model_lifecycle = ModelLifecycleManager()
         self._api: Any | None = None
-
-
 
     def set_api(self, api: Any) -> None:
         self._api = api
@@ -95,7 +94,6 @@ class ModelSelector:
             return Complexity.MEDIUM
         return Complexity.LOW
 
-
     @staticmethod
     def _local_llm_advisory(advisory_context: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(advisory_context, dict):
@@ -116,64 +114,22 @@ class ModelSelector:
             return None
 
         if task.type in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} and complexity in {Complexity.LOW, Complexity.MEDIUM}:
-            return ModelChoice("local-small", "local", complexity, False, reason=f"local_llm_advisory_{task_family}")
+            return ModelChoice("local-small", "local", complexity, params=ModelParams(temperature=0.5, context_depth=1), requires_secondary_review=False, reason=f"local_llm_advisory_{task_family}")
 
         if task.type == TaskType.PLAN and should_delegate and complexity in {Complexity.LOW, Complexity.MEDIUM}:
-            return ModelChoice("local-small", "local", complexity, True, reason=f"local_llm_plan_hand_off_{task_family}")
+            return ModelChoice("local-small", "local", complexity, params=ModelParams(temperature=0.8, context_depth=3), requires_secondary_review=True, reason=f"local_llm_plan_hand_off_{task_family}")
 
         return None
 
     def _openai_choice(self, task: Task, complexity: Complexity, secondary_review: bool, reason: str, fallback_model: str) -> ModelChoice:
         if not OpenAIRuntimeRouter.enabled():
-            return ModelChoice(fallback_model, "openai", complexity, secondary_review, reason=reason)
+            return ModelChoice(fallback_model, "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=reason)
         if not os.getenv("OPENAI_API_KEY", "").strip():
             if os.getenv("MISTRAL_API_KEY", "").strip():
-                return ModelChoice("mistral-large-latest", "mistral", complexity, secondary_review, reason=f"openai_auto_no_key_mistral_fallback:{reason}")
-            return ModelChoice("antigravity-cli", "antigravity", complexity, secondary_review, reason=f"openai_auto_no_key_antigravity_fallback:{reason}")
+                return ModelChoice("mistral-large-latest", "mistral", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_mistral_fallback:{reason}")
+            return ModelChoice("antigravity-cli", "antigravity", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_antigravity_fallback:{reason}")
         plan = self.openai_router.build_plan(task, task.input.description)
-        return ModelChoice(plan.models[0], "openai", complexity, secondary_review, reason=f"openai_auto_{plan.reason}:{reason}")
-
-    def _select_legacy(self, task: Task, complexity: Complexity, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
-        local_choice = self._local_llm_choice(task, complexity, advisory_context)
-        if local_choice is not None:
-            return local_choice
-        
-        # Risk Check (High risk always to Cloud)
-        risk = evaluate_risk_context(task.input.description.lower())
-        if complexity == Complexity.CRITICAL or risk.high_risk:
-            return self._openai_choice(task, complexity, True, "critical_risk_openai_escalation", "gpt-senior-secure")
-        
-        # Route based on TaskType to optimized local models
-        if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}:
-            if complexity == Complexity.HIGH:
-                # Complex FIX/CODE -> DeepSeek-R1 (Local, strong reasoning)
-                return ModelChoice("deepseek-r1:14b", "local", complexity, True, reason="complex_code_fix_deepseek_local")
-            # Standard CODE -> Qwen-Coder (Local)
-            return ModelChoice("qwen2.5-coder:14b", "local", complexity, False, reason="standard_code_qwen_local")
-
-        if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}:
-            # Planning/Docs -> Mistral-Nemo (Local)
-            return ModelChoice("mistral-nemo:12b", "local", complexity, False, reason="planning_docs_mistral_local")
-        
-        if task.type == TaskType.REVIEW:
-            return ModelChoice("deepseek-r1:14b", "local", complexity, True, reason="review_deepseek_local")
-
-        return ModelChoice("llama3.2:3b", "local", complexity, False, reason="policy_default_utility")
-
-    def _select_strict(self, task: Task, complexity: Complexity, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
-        # strict minimizes OpenAI except explicit critical/high-risk.
-        local_choice = self._local_llm_choice(task, complexity, advisory_context)
-        if local_choice is not None and task.type in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}:
-            return local_choice
-        if complexity == Complexity.CRITICAL:
-            return self._openai_choice(task, complexity, True, "critical_openai_only", "gpt-senior-secure")
-        if complexity == Complexity.HIGH:
-            if task.type in {TaskType.PLAN, TaskType.REVIEW}:
-                return ModelChoice("antigravity-cli", "antigravity", complexity, True, reason="high_plan_review_antigravity")
-            return ModelChoice("mistral-large-latest", "mistral", complexity, True, reason="high_noncritical_mistral")
-        if task.type in {TaskType.CODE, TaskType.FIX, TaskType.TEST}:
-            return ModelChoice("mistral-small-or-medium", "mistral", complexity, False, reason="strict_code_mistral")
-        return ModelChoice("antigravity-cli", "antigravity", complexity, False, reason="strict_docs_research_antigravity")
+        return ModelChoice(plan.models[0], "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_{plan.reason}:{reason}")
 
     def select(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
         complexity = self.classify(task)
@@ -185,20 +141,18 @@ class ModelSelector:
 
         # 2. CODE/FIX/TEST -> Qwen-Coder (Local)
         if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}:
-            return ModelChoice("qwen2.5-coder:14b", "local", complexity, False, reason="standard_code_qwen_local")
+            return ModelChoice("qwen2.5-coder:14b", "local", complexity, params=ModelParams(temperature=0.2, context_depth=2), requires_secondary_review=False, reason="standard_code_qwen_local")
         
         # 3. PLAN/DOCS/RESEARCH -> Mistral-Nemo (Local)
         if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}:
-             return ModelChoice("mistral-nemo:12b", "local", complexity, False, reason="planning_docs_mistral_local")
+             return ModelChoice("mistral-nemo:12b", "local", complexity, params=ModelParams(temperature=0.6, context_depth=3), requires_secondary_review=False, reason="planning_docs_mistral_local")
         
         # 4. REVIEW -> DeepSeek (Local)
         if task.type == TaskType.REVIEW:
-            return ModelChoice("deepseek-r1:14b", "local", complexity, True, reason="review_deepseek_local")
+            return ModelChoice("deepseek-r1:14b", "local", complexity, params=ModelParams(temperature=0.2, context_depth=4), requires_secondary_review=True, reason="review_deepseek_local")
 
         # Default fallback
-        return ModelChoice("llama3.2:3b", "local", complexity, False, reason="policy_default_utility")
-
-
+        return ModelChoice("llama3.2:3b", "local", complexity, params=ModelParams(temperature=0.5, context_depth=1), requires_secondary_review=False, reason="policy_default_utility")
 
 def evaluate_risk_context(text: str) -> RiskEvaluation:
     normalized = text.lower()

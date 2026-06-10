@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -403,25 +404,12 @@ class TaskGraph(CompatModel):
     edges: dict[str, list[str]] = Field(default_factory=dict)
 
 
-class ResultPayload(CompatModel):
-    task_id: str
-    status: TaskStatus
-    output: dict[str, Any] = Field(default_factory=dict)
-    artifacts: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-    confidence: float = 0.0
-    completed_criteria: list[str] = Field(default_factory=list)
-    failed_criteria: list[str] = Field(default_factory=list)
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        if args:
-            fields = ["task_id", "status", "output", "artifacts", "errors", "warnings", "confidence", "completed_criteria", "failed_criteria"]
-            merged = dict(kwargs)
-            for name, value in zip(fields, args):
-                merged.setdefault(name, value)
-            kwargs = merged
-        super().__init__(**kwargs)
+@dataclass(slots=True)
+class ModelParams:
+    temperature: float = 0.7
+    context_depth: int = 1  # Logic recursion/reasoning depth
+    max_tokens: int = 4096
 
 
 class ResultEnvelope(CompatModel):
