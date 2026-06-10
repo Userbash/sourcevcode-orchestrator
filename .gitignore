@@ -96,3 +96,11 @@ system_test_report.py
 # AI Bridge bootstrap artifacts
 .venv_ai_bridge/
 ai_bridge/runtime_report.json
+
+# Temporary AI Bridge files
+memory_store/
+core/.cache/
+*.tmp
+list_models.py
+analyze_tokens.py
+get_stats.py
