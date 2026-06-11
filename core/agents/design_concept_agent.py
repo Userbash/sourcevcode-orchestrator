@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.agents.base_agent import BaseAgent
+from core.core.models import ResultOutput
 
 
 class DesignConceptAgent(BaseAgent):
@@ -44,13 +45,13 @@ class DesignConceptAgent(BaseAgent):
 
         if not self._is_design_task(task):
             return AgentResult(
-                task.task_id,
-                self.agent_id,
-                TaskStatus.FAILED,
-                {"status": "error", "message": "Task is not routed for design generation"},
-                0.0,
-                ["task_not_routed_for_design_generation"],
-                [],
+                task_id=task.task_id,
+                agent_id=self.agent_id,
+                status=TaskStatus.FAILED,
+                output=ResultOutput(summary="Task is not routed for design generation"),
+                confidence=0.0,
+                errors=["task_not_routed_for_design_generation"],
+                next_recommendations=[],
             )
 
         if not self.manager:
@@ -66,4 +67,12 @@ class DesignConceptAgent(BaseAgent):
         status = TaskStatus.DONE if result.get("status") == "success" else TaskStatus.FAILED
         confidence = 1.0 if status == TaskStatus.DONE else 0.0
         errors = [] if status == TaskStatus.DONE else [str(result.get("message") or "design_generation_failed")]
-        return AgentResult(task.task_id, self.agent_id, status, result, confidence, errors, [])
+        return AgentResult(
+            task_id=task.task_id,
+            agent_id=self.agent_id,
+            status=status,
+            output=ResultOutput(**result) if isinstance(result, dict) else result,
+            confidence=confidence,
+            errors=errors,
+            next_recommendations=[],
+        )

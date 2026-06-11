@@ -1,7 +1,7 @@
 from core.core.agent_registry import AgentRegistry
 from core.core.message_bus import MessageBus
 from core.core.metrics import MetricsCollector
-from core.core.models import AgentHealth, AgentResult, AgentStatus, P2PMessage, P2PMessageType, TaskStatus
+from core.core.models import AgentHealth, AgentResult, AgentStatus, P2PMessage, P2PMessageType, ResultOutput, TaskStatus
 
 
 def test_registry_registration_capability_status_and_metrics_update():
@@ -32,8 +32,8 @@ def test_metrics_collector_records_results_and_snapshot():
     agent = registry.register("coder-1", "codex", "local://coder", ["code"])
     metrics = MetricsCollector()
 
-    metrics.record_result(agent, AgentResult("task-1", "coder-1", TaskStatus.DONE, {"summary": "ok"}, 0.9), latency_ms=50)
-    metrics.record_result(agent, AgentResult("task-2", "coder-1", TaskStatus.FAILED, {"summary": "bad"}, 0.2, ["failed"], []), latency_ms=150)
+    metrics.record_result(agent, AgentResult(task_id="task-1", agent_id="coder-1", status=TaskStatus.DONE, output=ResultOutput(summary="ok"), confidence=0.9), latency_ms=50)
+    metrics.record_result(agent, AgentResult(task_id="task-2", agent_id="coder-1", status=TaskStatus.FAILED, output=ResultOutput(summary="bad"), confidence=0.2, errors=["failed"], next_recommendations=[]), latency_ms=150)
     snapshot = metrics.snapshot()
 
     assert snapshot["counters"] == {"task.done": 1, "task.failed": 1}

@@ -55,7 +55,12 @@ class LoadBalancer:
         specialization_score = 1.0 if capability in agent.capabilities else 0.0
         
         overload_penalty = self._overload_penalty(agent)
-        
+        secure_bonus = 0.0
+        if priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
+            secure_hint = f"{agent.id} {agent.model_name}".lower()
+            if any(token in secure_hint for token in ("secure", "senior")):
+                secure_bonus = 0.12
+
         return (
             quality_score * 0.30
             + success_rate * 0.25
@@ -64,6 +69,7 @@ class LoadBalancer:
             + speed_score * 0.10
             + cost_score * 0.05
             + specialization_score * 0.05
+            + secure_bonus
             - overload_penalty
         ) * agent.metrics.priority_score
 

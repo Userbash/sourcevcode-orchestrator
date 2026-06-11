@@ -30,8 +30,15 @@ class MistralAgent(ExternalAIAgent):
 
     def health(self) -> AgentHealth:
         if not self.api_key:
-            return AgentHealth(self.agent_id, AgentStatus.FAILED, self.capabilities, last_error="auth_missing")
-        return AgentHealth(self.agent_id, AgentStatus.READY, self.capabilities)
+            return AgentHealth(
+                agent_id=self.agent_id,
+                status=AgentStatus.FAILED,
+                capabilities=self.capabilities,
+                last_error="auth_missing",
+            )
+        return AgentHealth(
+            agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities
+        )
 
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
         if not self.api_key:

@@ -389,10 +389,6 @@ class PersistentMemoryManager:
 
     def retrieve_memory_by_key(self, *, session_id: str, agent_id: str, memory_type: str, key: str) -> MemoryRecord | None:
         normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
-        if self._etcd_enabled:
-            row = self._etcd_get_json(self._memory_key_lookup_key(normalized_session_id, agent_id, memory_type, key))
-            return self._record_from_dict(row) if row else None
-
         if self._pg_enabled:
             with self._connect() as conn:
                 with conn.cursor() as cur:
@@ -445,10 +441,6 @@ class PersistentMemoryManager:
 
     def store_command(self, *, session_id: str, agent_id: str, command: str, result: dict[str, Any], success: bool, **kwargs: Any) -> None:
         normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
-        if self._etcd_enabled:
-            row = self._etcd_get_json(self._memory_key_lookup_key(normalized_session_id, agent_id, memory_type, key))
-            return self._record_from_dict(row) if row else None
-
         if self._pg_enabled:
             from psycopg2.extras import Json  # type: ignore
 

@@ -90,6 +90,32 @@ class TaskDecomposer:
             return "code"
         return "code"
 
+    @staticmethod
+    def _capability_from_agent_hint(agent_hint: Any, fallback: str) -> str:
+        hint = str(agent_hint or "").strip().lower()
+        if not hint:
+            return fallback
+        for marker, capability in (
+            ("design", "ux"),
+            ("ux", "ux"),
+            ("frontend", "frontend"),
+            ("component", "frontend"),
+            ("validator", "review"),
+            ("review", "review"),
+            ("tester", "test"),
+            ("test", "test"),
+            ("security", "review"),
+            ("research", "research"),
+            ("planner", "plan"),
+            ("plan", "plan"),
+            ("code", "code"),
+            ("fix", "fix"),
+            ("docs", "docs"),
+        ):
+            if marker in hint:
+                return capability
+        return fallback
+
     def _local_llm_decomposition(self, advisory_context: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(advisory_context, dict):
             return None
@@ -156,6 +182,7 @@ class TaskDecomposer:
                 group_task_ids = []
                 for agent_hint in sub_agents:
                     agent_objective = f"[{agent_hint}] {objective}"
+                    agent_capability = self._capability_from_agent_hint(agent_hint, capability)
                     agent_atomic = Task(
                         task_type,
                         TaskInput(agent_objective, files=files, constraints=constraints, acceptance_criteria=acceptance),
@@ -166,10 +193,11 @@ class TaskDecomposer:
                         routing_hints={
                             "layer": layer_name,
                             "agent_hint": agent_hint,
+                            "parallel_group": True,
                             "source": "local_llm" if draft.get("status") == "model" else "heuristic",
                         },
                     )
-                    agent_atomic.required_capability = capability # or derived from agent_hint
+                    agent_atomic.required_capability = agent_capability
                     id_by_layer[f"{layer_name}_{agent_hint}"] = agent_atomic.task_id
                     group_task_ids.append(agent_atomic.task_id)
                     tasks.append(agent_atomic)
@@ -195,6 +223,7 @@ class TaskDecomposer:
                 },
             )
             atomic.required_capability = capability
+            atomic.routing_hints["parallel_group"] = bool(group_execution and len(sub_agents) > 1)
             id_by_layer[layer_name] = atomic.task_id
             tasks.append(atomic)
             pending_dependencies.append((atomic, self._ensure_list(layer.get("dependencies"))))
@@ -221,7 +250,7 @@ class TaskDecomposer:
         for atomic in tasks:
             self._decorate(atomic)
 
-        return ExecutionPlan(root_task_id=task.task_id, atomic_tasks=tasks, draft_layers=draft_layers)
+        return ExecutionPlan(root_task_id=task.task_id, atomic_tasks=tasks, draft_layers=draft_layers or layers)
 
     def _default_plan(self, task: Task) -> ExecutionPlan:
         context = task.context

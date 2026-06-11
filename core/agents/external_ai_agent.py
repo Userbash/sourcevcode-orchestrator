@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core.agents.base_agent import BaseAgent
-from core.core.models import AgentResult, Task, TaskStatus
+from core.core.models import AgentResult, ResultOutput, Task, TaskStatus
 from core.core.security import SecurityManager
 from core.protocols.rest_protocol import RestProtocol
 
@@ -34,4 +34,4 @@ class ExternalAIAgent(BaseAgent):
         try:
             return self.protocol.post_task(self.endpoint, payload, expected_agent_id=self.agent_id)
         except Exception as exc:  # pragma: no cover - network edge path
-            return AgentResult(task.task_id, self.agent_id, TaskStatus.FAILED, {"summary": "External AI request failed", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, [str(exc)], [])
+            return AgentResult(task_id=task.task_id, agent_id=self.agent_id, status=TaskStatus.FAILED, output=ResultOutput(summary="External AI request failed", files_changed=[], commands_run=[], test_results=[], diff=""), confidence=0.0, errors=[str(exc)], next_recommendations=[], provider=getattr(self.protocol, "provider", None), model_name=None)

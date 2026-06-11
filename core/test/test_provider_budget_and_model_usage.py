@@ -43,6 +43,24 @@ def test_provider_budget_router_prefers_primary_provider_for_normal_code():
     assert providers[0] == "mistral"
 
 
+def test_provider_budget_router_normalizes_antigravity_aliases():
+    router = ProviderBudgetRouter()
+
+    class _Choice:
+        provider = "google"
+
+    task = Task(
+        TaskType.DOCS,
+        TaskInput("Write docs"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+
+    providers = router.preferred_providers(task, _Choice())
+
+    assert providers[0] == "antigravity"
+
+
 def test_orchestrator_exposes_model_usage_snapshot():
     orchestrator = Orchestrator()
     sec = SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=["agy -p", "antigravity -p"]))
