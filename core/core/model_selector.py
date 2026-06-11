@@ -9,12 +9,17 @@ from .models import Complexity, Priority, Task, TaskType, ModelParams
 from .openai_runtime_router import OpenAIRuntimeRouter
 from .qwen_runtime_router import QwenRuntimeRouter
 from .model_lifecycle import ModelLifecycleManager
+from .mimo_bridge import MimoBridge, MimoModel
 
 logger = logging.getLogger(__name__)
 
-
+# Model Definitions
+MODEL_QWEN_CODER = "qwen2.5:32b-instruct-q4_k_m"
+MODEL_DEEPSEEK_R1 = "deepseek-r1:14b"
+MODEL_LOCAL_SMALL = "qwen-2.5-7b-instruct"
 
 BASE_HIGH_RISK_KEYWORDS = ["security", "auth", "rbac", "payment", "secret", "production", "migration", "destructive"]
+
 PERMISSION_CONTEXT_KEYWORDS = ["auth", "authorization", "role", "rbac", "admin", "security", "token", "database", "migration", "tenant"]
 LOW_RISK_PERMISSION_EXEMPTIONS = ["permissions-sync-fix", "permission docs cleanup", "permission ui label", "permission comments", "permission formatting"]
 
@@ -47,6 +52,11 @@ class ModelSelector:
         self.qwen_router = QwenRuntimeRouter()
         self.model_lifecycle = ModelLifecycleManager()
         self._api: Any | None = None
+        self.mimo_bridge = MimoBridge()
+        self.mimo_models: list[MimoModel] = []
+
+    def sync_with_mimo(self) -> None:
+        self.mimo_models = self.mimo_bridge.get_models()
 
     def set_api(self, api: Any) -> None:
         self._api = api
@@ -74,17 +84,15 @@ class ModelSelector:
         if task.complexity:
             return task.complexity
 
-        # Try AI-powered advisor first
         advisor_eval = self._evaluate_with_advisor(task)
         if advisor_eval and advisor_eval.high_risk:
             return Complexity.CRITICAL
 
-        text: str = task.input.description.lower()
+        text: str = self._task_text(task)
         risk: RiskEvaluation = evaluate_risk_context(text)
         if task.priority == Priority.CRITICAL or risk.high_risk:
             return Complexity.CRITICAL
 
-        # Plan/Review only HIGH if complex keywords are present
         if task.priority == Priority.HIGH or (task.type in {TaskType.PLAN, TaskType.REVIEW} and any(w in text for w in ("architecture", "distributed", "debugging"))):
             return Complexity.HIGH
 
@@ -93,6 +101,65 @@ class ModelSelector:
         if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX, TaskType.DOCS, TaskType.RESEARCH} or len(task.input.files) > 2:
             return Complexity.MEDIUM
         return Complexity.LOW
+
+    @staticmethod
+    def _task_text(task: Task) -> str:
+        return task.input.description.lower().strip()
+
+    def _should_escalate_to_cloud(self, task: Task, complexity: Complexity, risk: RiskEvaluation) -> bool:
+        return complexity in {Complexity.CRITICAL, Complexity.HIGH} or task.priority == Priority.CRITICAL or risk.high_risk
+
+    @staticmethod
+    def _local_code_choice(complexity: Complexity) -> ModelChoice:
+        return ModelChoice(
+            MODEL_QWEN_CODER,
+            "local",
+            complexity,
+            params=ModelParams(temperature=0.2, context_depth=2),
+            requires_secondary_review=False,
+            reason="standard_code_qwen_local",
+        )
+
+    @staticmethod
+    def _local_planning_choice(task: Task, complexity: Complexity) -> ModelChoice:
+        if task.type == TaskType.REVIEW:
+            return ModelChoice(
+                MODEL_DEEPSEEK_R1,
+                "local",
+                complexity,
+                params=ModelParams(temperature=0.2, context_depth=4),
+                requires_secondary_review=True,
+                reason="review_deepseek_local",
+            )
+
+        return ModelChoice(
+            MODEL_DEEPSEEK_R1,
+            "local",
+            complexity,
+            params=ModelParams(temperature=0.6, context_depth=3),
+            requires_secondary_review=False,
+            reason="planning_docs_deepseek_local",
+        )
+
+    def _local_policy_choice(self, task: Task, complexity: Complexity, advisory_context: dict[str, Any] | None) -> ModelChoice | None:
+        local_choice = self._local_llm_choice(task, complexity, advisory_context)
+        if local_choice is not None:
+            return local_choice
+
+        if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}:
+            return self._local_code_choice(complexity)
+
+        if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}:
+            return self._local_planning_choice(task, complexity)
+
+        return ModelChoice(
+            MODEL_QWEN_CODER,
+            "local",
+            complexity,
+            params=ModelParams(temperature=0.5, context_depth=1),
+            requires_secondary_review=False,
+            reason="policy_default_utility_qwen",
+        )
 
     @staticmethod
     def _local_llm_advisory(advisory_context: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -114,10 +181,10 @@ class ModelSelector:
             return None
 
         if task.type in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} and complexity in {Complexity.LOW, Complexity.MEDIUM}:
-            return ModelChoice("local-small", "local", complexity, params=ModelParams(temperature=0.5, context_depth=1), requires_secondary_review=False, reason=f"local_llm_advisory_{task_family}")
+            return ModelChoice(MODEL_LOCAL_SMALL, "local", complexity, params=ModelParams(temperature=0.5, context_depth=1), requires_secondary_review=False, reason=f"local_llm_advisory_{task_family}")
 
         if task.type == TaskType.PLAN and should_delegate and complexity in {Complexity.LOW, Complexity.MEDIUM}:
-            return ModelChoice("local-small", "local", complexity, params=ModelParams(temperature=0.8, context_depth=3), requires_secondary_review=True, reason=f"local_llm_plan_hand_off_{task_family}")
+            return ModelChoice(MODEL_LOCAL_SMALL, "local", complexity, params=ModelParams(temperature=0.8, context_depth=3), requires_secondary_review=True, reason=f"local_llm_plan_hand_off_{task_family}")
 
         return None
 
@@ -133,26 +200,24 @@ class ModelSelector:
 
     def select(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
         complexity = self.classify(task)
-        risk = evaluate_risk_context(task.input.description.lower())
-        
-        # 1. HIGH/CRITICAL Complexity or High Risk -> Cloud
-        if complexity in {Complexity.CRITICAL, Complexity.HIGH} or risk.high_risk:
+        task.complexity = complexity
+        risk = evaluate_risk_context(self._task_text(task))
+
+        if self._should_escalate_to_cloud(task, complexity, risk):
             return self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o")
 
-        # 2. CODE/FIX/TEST -> Qwen-Coder (Local)
-        if task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}:
-            return ModelChoice("qwen2.5-coder:14b", "local", complexity, params=ModelParams(temperature=0.2, context_depth=2), requires_secondary_review=False, reason="standard_code_qwen_local")
-        
-        # 3. PLAN/DOCS/RESEARCH -> Mistral-Nemo (Local)
-        if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}:
-             return ModelChoice("mistral-nemo:12b", "local", complexity, params=ModelParams(temperature=0.6, context_depth=3), requires_secondary_review=False, reason="planning_docs_mistral_local")
-        
-        # 4. REVIEW -> DeepSeek (Local)
-        if task.type == TaskType.REVIEW:
-            return ModelChoice("deepseek-r1:14b", "local", complexity, params=ModelParams(temperature=0.2, context_depth=4), requires_secondary_review=True, reason="review_deepseek_local")
+        local_choice = self._local_policy_choice(task, complexity, advisory_context)
+        if local_choice:
+            return local_choice
 
-        # Default fallback
-        return ModelChoice("llama3.2:3b", "local", complexity, params=ModelParams(temperature=0.5, context_depth=1), requires_secondary_review=False, reason="policy_default_utility")
+        return ModelChoice(
+            MODEL_QWEN_CODER,
+            "local",
+            complexity,
+            params=ModelParams(temperature=0.5, context_depth=1),
+            requires_secondary_review=False,
+            reason="policy_default_utility_qwen",
+        )
 
 def evaluate_risk_context(text: str) -> RiskEvaluation:
     normalized = text.lower()

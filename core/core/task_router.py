@@ -7,7 +7,7 @@ from datetime import datetime, UTC
 from .agent_registry import AgentRegistry
 from .load_balancer import LoadBalancer, UNROUTABLE_AGENT_STATUSES, is_agent_routable
 from .model_selector import evaluate_risk_context
-from .models import AgentRecord, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType, TaskEnvelope
+from .models import AgentRecord, Complexity, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType, TaskEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,10 @@ class TaskRouter:
             return TaskAcceptance(task.task_id, TaskStatus.REJECTED, None, self.estimate_complexity(task), f"No available agent for capability {capability}")
 
         chosen_pool = self._apply_economy_policy(task, candidates)
+        secure_pool = self._preferred_secure_agents(chosen_pool, task)
+        scoring_pool = secure_pool or chosen_pool
 
-        agent = self.load_balancer.choose(chosen_pool, capability, task.priority)
+        agent = self.load_balancer.choose(scoring_pool, capability, task.priority)
         if not agent:
             if capability == "sourcecraft" or sourcecraft_task:
                 return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", self.estimate_complexity(task), "SourceCraft role handled by orchestrator module")
@@ -118,6 +120,19 @@ class TaskRouter:
             for agent in self.registry.list_agents()
             if capability in agent.capabilities and agent.status not in UNROUTABLE_AGENT_STATUSES
         ]
+
+    @staticmethod
+    def _preferred_secure_agents(candidates: list[AgentRecord], task: Task) -> list[AgentRecord]:
+        if not task.complexity:
+            return []
+        if task.complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not task.priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
+            return []
+        secure = [
+            agent
+            for agent in candidates
+            if agent.critical or any(token in f"{agent.id} {agent.model_name}".lower() for token in ("secure", "senior"))
+        ]
+        return secure
 
     def _apply_economy_policy_envelope(self, envelope: TaskEnvelope, candidates: list[AgentRecord]) -> list[AgentRecord]:
         if not self.codex_economy_mode:

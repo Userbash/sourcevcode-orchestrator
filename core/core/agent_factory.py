@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 
 from ..agents.frontend_subagents import DesignAgent, FrontendComponentAgent, UXValidatorAgent
+from ..agents.qt_dev_box_agent import QtDevBoxAgent
 
 from .agent_autoscaler import AgentAutoscaler
 from .agent_lifecycle import AgentLifecycleManager
@@ -68,6 +69,7 @@ class AgentFactory:
         reg.register("design_agent", "custom", "internal", ["design_conceptualization", "style_guide_generation", "ux_strategy"])
         reg.register("frontend_component_agent", "custom", "internal", ["react_component_development", "tailwind_styling", "semantic_html"])
         reg.register("ux_validator_agent", "custom", "internal", ["ux_heuristics_audit", "accessibility_audit", "usability_testing"])
+        reg.register("qt_dev_box_worker", "custom", "internal", ["qt_build", "cpp_compile", "container_exec", "code", "test"])
         
         lifecycle = AgentLifecycleManager(idle_shutdown_sec=idle_shutdown_sec)
 

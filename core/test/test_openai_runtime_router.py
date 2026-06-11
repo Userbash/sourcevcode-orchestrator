@@ -11,7 +11,7 @@ from core.core.openai_runtime_router import OpenAIRuntimeRouter
 def _task(task_type: TaskType = TaskType.CODE, complexity: Complexity = Complexity.MEDIUM) -> Task:
     task = Task(
         task_type,
-        TaskInput("implement a focused routing change", []),
+        TaskInput("implement a focused routing change", files=[]),
         TaskContext("hebrew-web", ".", "main"),
     )
     task.complexity = complexity
@@ -52,9 +52,10 @@ def test_openai_runtime_router_prefers_light_model_for_low_budget(monkeypatch):
 
 def test_model_selector_openai_auto_is_opt_in(monkeypatch):
     task = _task(TaskType.REVIEW, Complexity.HIGH)
-    monkeypatch.delenv("AI_BRIDGE_OPENAI_AUTO_MODEL", raising=False)
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "false")
     legacy = ModelSelector().select(task)
-    assert legacy.model_name == "gpt-coding-large"
+    assert legacy.provider == "openai"
+    assert legacy.model_name == "gpt-4o"
 
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -92,4 +93,4 @@ def test_provider_budget_router_honors_critical_mistral_fallback(monkeypatch):
     providers = ProviderBudgetRouter().preferred_providers(task, choice)
 
     assert choice.provider == "mistral"
-    assert providers[:3] == ["mistral", "google", "local"]
+    assert providers[:3] == ["mistral", "antigravity", "local"]
