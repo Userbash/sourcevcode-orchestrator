@@ -52,6 +52,7 @@ from .qwen_code_module import QwenCodeModule
 from .code_readability_module import CodeReadabilityModule
 from .dev_toolkit_module import DevToolkitModule
 from .dependency_manager import DependencyManager
+from .self_diagnostic_module import SelfDiagnosticModule
 
 
 
@@ -209,6 +210,7 @@ class Orchestrator:
         self.module_manager.register(QwenCodeModule())
         self.module_manager.register(CodeReadabilityModule())
         self.module_manager.register(DevToolkitModule())
+        self.module_manager.register(SelfDiagnosticModule())
 
 
 
@@ -251,6 +253,7 @@ class Orchestrator:
         self.module_manager.load("qwen_code")
         self.module_manager.load("readability_policy")
         self.module_manager.load("dev_toolkit")
+        self.module_manager.load("self_diagnostic")
 
 
 

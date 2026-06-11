@@ -54,7 +54,7 @@ services:
       - sh
       - -lc
       - |
-        export PATH=$PATH:/app/.local/bin
+        export PATH=$$PATH:/app/.local/bin
         export PYTHONPATH=/app
         export AI_BRIDGE_MEMORY_ENABLED=true
         export AI_BRIDGE_MEMORY_DATABASE_URL=postgresql+psycopg2://ai_bridge:ai_bridge_password@db:5432/ai_bridge
@@ -62,7 +62,7 @@ services:
         # Run migration if needed (simplified check)
         python3 scripts/migrate_themes_to_pg.py || echo "Migration failed or unnecessary."
         
-        exec python -m core.scripts.orchestrator_daemon
+        exec python3 -m core.scripts.orchestrator_daemon
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
     volumes:

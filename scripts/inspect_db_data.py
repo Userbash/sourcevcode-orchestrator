@@ -9,17 +9,17 @@ def inspect_db():
         with conn.cursor() as cur:
             # Inspect memories
             print("--- MEMORIES SAMPLE (Last 3) ---")
-            cur.execute(f"SELECT agent_id, memory_type, content, importance_score FROM {AI_BRIDGE_SCHEMA}.memories ORDER BY memory_id DESC LIMIT 3")
+            cur.execute(f"SELECT agent_id, memory_type, content, importance_score, created_at FROM {AI_BRIDGE_SCHEMA}.memories ORDER BY memory_id DESC LIMIT 3")
             for row in cur.fetchall():
-                print(f"Agent: {row[0]} | Type: {row[1]} | Importance: {row[3]}")
+                print(f"Agent: {row[0]} | Type: {row[1]} | Importance: {row[3]} | Added: {row[4]}")
                 print(f"Content snippet: {json.dumps(row[2])[:200]}...")
                 print("-" * 40)
 
             # Inspect VFS
             print("\n--- VFS FILES SAMPLE (Last 3) ---")
-            cur.execute(f"SELECT file_path, metadata FROM {AI_BRIDGE_SCHEMA}.vfs_files ORDER BY updated_at DESC LIMIT 3")
+            cur.execute(f"SELECT file_path, metadata, updated_at FROM {AI_BRIDGE_SCHEMA}.vfs_files ORDER BY updated_at DESC LIMIT 3")
             for row in cur.fetchall():
-                print(f"Path: {row[0]}")
+                print(f"Path: {row[0]} | Updated: {row[2]}")
                 print(f"Metadata: {row[1]}")
                 print("-" * 40)
 

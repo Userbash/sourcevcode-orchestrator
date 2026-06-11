@@ -52,9 +52,11 @@ class UnifiedVFSModule:
         self._db_pool: asyncpg.Pool | None = None
         self._database_url: str = ""
         self._pg_enabled: bool = False
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def on_load(self, api: KernelAPI) -> None:
         self._api = api
+        self._loop = asyncio.get_running_loop()
         self._database_url = os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip()
         self._pg_enabled = bool(self._database_url)
         if self._pg_enabled:
@@ -78,7 +80,7 @@ class UnifiedVFSModule:
             return False
             
         checksum = self._calculate_checksum(content)
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)
         
         try:
             async with self._db_pool.acquire() as conn:
@@ -207,9 +209,13 @@ class UnifiedVFSModule:
 
     def before_task(self, task: Task, context: Dict[str, Any]) -> None:
         resume_path = f"active_tasks/{task.task_id}/checkpoint"
-        # Run async read_state synchronously because before_task is sync
+        if self._loop is None:
+             return
+
+        # Run async read_state synchronously in the main loop from current thread
         try:
-            node = asyncio.run(self.read_state(resume_path))
+            future = asyncio.run_coroutine_threadsafe(self.read_state(resume_path), self._loop)
+            node = future.result(timeout=5)
             if node and node.integrity == StateIntegrity.VALID:
                 context["recovered_state"] = node.content
                 if self._api:
@@ -219,6 +225,9 @@ class UnifiedVFSModule:
 
     def after_task(self, task: Task, result: AgentResult, context: Dict[str, Any]) -> None:
         path = f"active_tasks/{task.task_id}/checkpoint"
+        if self._loop is None:
+             return
+
         output = result.output.as_dict() if hasattr(result.output, "as_dict") else result.output
         state = {
             "status": result.status.value,
@@ -226,8 +235,12 @@ class UnifiedVFSModule:
             "intermediate_artifacts": context.get("intermediate_artifacts", []),
             "last_step": context.get("last_step", "completed")
         }
-        # Run async write_state synchronously because after_task is sync
-        asyncio.run(self.write_state(path, state, result.agent_id))
+        # Run async write_state synchronously in the main loop from current thread
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.write_state(path, state, result.agent_id), self._loop)
+            future.result(timeout=5)
+        except Exception as e:
+            logger.error(f"[VFS] Sync write failed in after_task: {e}")
 
     def finalize(self) -> Dict[str, Any]:
         return {

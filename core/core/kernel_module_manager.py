@@ -24,7 +24,19 @@ class KernelModuleManager:
         module = self._modules.get(name)
         if not module or name in self._loaded:
             return
-        module.on_load(self._api)
+            
+        import asyncio
+        import inspect
+        
+        if inspect.iscoroutinefunction(module.on_load):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(module.on_load(self._api))
+            except RuntimeError:
+                asyncio.run(module.on_load(self._api))
+        else:
+            module.on_load(self._api)
+            
         self._loaded.add(name)
 
     def unload(self, name: str) -> None:
