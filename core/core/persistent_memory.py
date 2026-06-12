@@ -31,6 +31,20 @@ class MemoryRecord:
     updated_at: str = ""
 
 
+@dataclass(slots=True)
+class TrainedMemoryRecord:
+    trained_memory_id: int
+    session_id: str
+    agent_id: str
+    source_memory_ids: list[int]
+    memory_domain: str
+    content: Any
+    metadata: dict[str, Any]
+    quality_score: float = 0.0
+    created_at: str = ""
+    updated_at: str = ""
+
+
 def normalize_database_url(database_url: str) -> str:
     if database_url.startswith("postgresql+asyncpg://"):
         return "postgresql://" + database_url.removeprefix("postgresql+asyncpg://")
@@ -132,6 +146,21 @@ def ensure_storage_schema(database_url: str) -> bool:
         )
         """,
         f"""
+        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.trained_memories (
+            trained_memory_id BIGSERIAL PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source_memory_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+            memory_domain TEXT NOT NULL,
+            content JSONB NOT NULL,
+            metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            quality_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        f"""
         CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.task_plans (
             task_id TEXT PRIMARY KEY,
             plan JSONB NOT NULL,
@@ -154,6 +183,7 @@ def ensure_storage_schema(database_url: str) -> bool:
         f"CREATE INDEX IF NOT EXISTS idx_core_themes_session_ts ON {AI_BRIDGE_SCHEMA}.json_themes (session_id, created_at DESC)",
         f"CREATE INDEX IF NOT EXISTS idx_vfs_path_lookup ON {AI_BRIDGE_SCHEMA}.vfs_files (file_path)",
         f"CREATE INDEX IF NOT EXISTS idx_users_username_idx ON {AI_BRIDGE_SCHEMA}.users (username)",
+        f"CREATE INDEX IF NOT EXISTS idx_trained_memories_session_domain ON {AI_BRIDGE_SCHEMA}.trained_memories (session_id, agent_id, memory_domain, trained_memory_id DESC)",
     ]
 
     conn = None
@@ -523,12 +553,96 @@ class PersistentMemoryManager:
         rows.sort(key=lambda row: str(row.get("executed_at", "")), reverse=True)
         return rows[:bounded_limit]
 
+    def store_trained_memory(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        memory_domain: str,
+        content: Any,
+        source_memory_ids: list[int] | None = None,
+        **kwargs: Any,
+    ) -> int:
+        normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
+        metadata = kwargs.get("metadata") or {}
+        quality_score = float(kwargs.get("quality_score", 0.0))
+
+        if self._pg_enabled:
+            from psycopg2.extras import Json  # type: ignore
+
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {AI_BRIDGE_SCHEMA}.trained_memories (
+                            session_id, source_session_id, agent_id, source_memory_ids, memory_domain,
+                            content, metadata, quality_score
+                        )
+                        VALUES (%s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s)
+                        RETURNING trained_memory_id
+                        """,
+                        (
+                            normalized_session_id,
+                            session_id,
+                            agent_id,
+                            Json(source_memory_ids or []),
+                            memory_domain,
+                            Json(content),
+                            Json(metadata),
+                            quality_score,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    return int(row[0])
+
+        return 0
+
+    def retrieve_trained_memories(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int = 8) -> list[TrainedMemoryRecord]:
+        normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
+        limit = max(1, int(top_k))
+        if self._pg_enabled:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT trained_memory_id, session_id, agent_id, source_memory_ids, memory_domain,
+                               content, metadata, quality_score, created_at, updated_at
+                        FROM {AI_BRIDGE_SCHEMA}.trained_memories
+                        WHERE session_id = %s AND agent_id = %s AND memory_domain = %s
+                        ORDER BY trained_memory_id DESC
+                        LIMIT %s
+                        """,
+                        (normalized_session_id, agent_id, memory_domain, limit),
+                    )
+                    return [self._trained_record_from_row(row) for row in cur.fetchall()]
+        return []
+
     def flush_all(self) -> int:
         return 0
 
     def consolidate_episodic(self, *, session_id: str, agent_id: str, chunk_size: int = 5) -> str | None:
-        _ = (session_id, agent_id, chunk_size)
-        return "Consolidation placeholder"
+        normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
+        memories = self.retrieve_memories(session_id=session_id, agent_id=agent_id, memory_type="episodic", top_k=max(1, int(chunk_size)))
+        if not memories:
+            return None
+        summary = {
+            "session_id": normalized_session_id,
+            "source_session_id": session_id,
+            "agent_id": agent_id,
+            "source_memory_ids": [item.memory_id for item in memories],
+            "memory_count": len(memories),
+            "highlights": [str(item.content)[:240] for item in memories[:5]],
+        }
+        self.store_trained_memory(
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_domain="episodic_summary",
+            content=summary,
+            source_memory_ids=summary["source_memory_ids"],
+            metadata={"source": "consolidate_episodic"},
+            quality_score=min(1.0, 0.4 + 0.1 * len(memories)),
+        )
+        return json.dumps(summary, ensure_ascii=True, default=str)
 
     @staticmethod
     def serialize_payload(payload: Any) -> str:
@@ -613,6 +727,21 @@ class PersistentMemoryManager:
             importance_score=float(row.get("importance_score", 0.5)),
             created_at=str(row.get("created_at", "")),
             updated_at=str(row.get("updated_at", "")),
+        )
+
+    @staticmethod
+    def _trained_record_from_row(row: tuple[Any, ...]) -> TrainedMemoryRecord:
+        return TrainedMemoryRecord(
+            trained_memory_id=int(row[0]),
+            session_id=str(row[1]),
+            agent_id=str(row[2]),
+            source_memory_ids=list(row[3] or []),
+            memory_domain=str(row[4]),
+            content=row[5],
+            metadata=dict(row[6] or {}),
+            quality_score=float(row[7]),
+            created_at=row[8].isoformat() if hasattr(row[8], "isoformat") else str(row[8]),
+            updated_at=row[9].isoformat() if hasattr(row[9], "isoformat") else str(row[9]),
         )
 
     @staticmethod

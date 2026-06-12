@@ -151,3 +151,54 @@ class SessionMemory(MemoryProtocol):
         # Here we just log the request.
         pass
 
+
+    def diagnostic_snapshot(self, *, session_id: str | None = None, identifier: str | None = None) -> dict[str, Any]:
+        """Return a compact, local-only snapshot of the memory topology."""
+        keys = self.list_keys()
+        scoped_keys = keys
+        if session_id is not None:
+            scoped_keys = [key for key in scoped_keys if f":{session_id}:" in key]
+        if identifier is not None:
+            scoped_keys = [key for key in scoped_keys if f":{identifier}:" in key]
+
+        backend_keys = []
+        backend = getattr(self.hybrid, 'backend', None)
+        if backend is not None and hasattr(backend, 'keys'):
+            try:
+                backend_keys = list(backend.keys())
+            except Exception:
+                backend_keys = []
+
+        hot_keys = []
+        hot = getattr(self.hybrid, '_hot', {})
+        if isinstance(hot, dict):
+            hot_keys = list(hot.keys())
+
+        return {
+            'memory_backend': type(self.backend).__name__,
+            'hot_count': len(hot_keys),
+            'backend_count': len(backend_keys),
+            'key_count': len(keys),
+            'scoped_key_count': len(scoped_keys),
+            'hot_keys': hot_keys[:25],
+            'backend_keys': backend_keys[:25],
+            'sample_keys': scoped_keys[:25],
+            'persistent_enabled': bool(getattr(getattr(self.hybrid, 'persistent', None), '_pg_enabled', False)),
+        }
+
+    def roundtrip_check(self, *, session_id: str, key: str, value: Any, scope: MemoryScope | str = MemoryScope.SESSION) -> dict[str, Any]:
+        """Write a probe value and verify it can be read back through the full stack."""
+        if isinstance(scope, MemoryScope):
+            scope_val = scope
+        elif str(scope) in {m.value for m in MemoryScope}:
+            scope_val = MemoryScope(str(scope))
+        else:
+            scope_val = MemoryScope.SESSION
+        self.set(scope_val, session_id, key, value)
+        read_back = self.get(scope_val, session_id, key)
+        return {
+            'ok': read_back == self.policy.redact(value),
+            'stored': read_back,
+            'key': self.make_key(scope_val, session_id, key),
+        }
+

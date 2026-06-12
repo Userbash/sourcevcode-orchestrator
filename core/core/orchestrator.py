@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -29,6 +30,7 @@ from .smart_scheduler import SmartScheduler
 from .session_memory import MemoryScope, SessionMemory
 from .availability import ModelAvailability, ModelAvailabilityModule, ProviderStatus
 from .ai_activity_module import AIActivityModule
+from .data_plane_monitor import build_data_plane_snapshot
 from .antigravity_status_module import AntigravityStatusModule
 from .api_bridge_module import APIBridgeModule
 from .smart_decomposer_module import SmartDecomposerModule
@@ -196,6 +198,8 @@ class Orchestrator:
         self.memory_consolidator = components.memory_consolidator
         self.provider_budget_router = ProviderBudgetRouter()
         self.kpi_events = KPIEventLogger.from_env()
+        self._postgres_watchdog_stop = threading.Event()
+        self._postgres_watchdog_thread: threading.Thread | None = None
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
         self.mimo_director = MimoOrchestrationDirector()
         self.mimo_director.set_memory_source(self.session_memory)
@@ -295,6 +299,51 @@ class Orchestrator:
             self.module_manager.load("local_llm")
         self._autostart_local_llm()
         self._autostart_easy_diffusion()
+        self._start_postgres_watchdog()
+
+    def _start_postgres_watchdog(self) -> None:
+        interval_raw = os.getenv("AI_BRIDGE_POSTGRES_WATCHDOG_INTERVAL_SEC", "30").strip()
+        try:
+            interval = max(5, int(interval_raw))
+        except ValueError:
+            interval = 30
+        if os.getenv("AI_BRIDGE_POSTGRES_WATCHDOG_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return
+        if self._postgres_watchdog_thread and self._postgres_watchdog_thread.is_alive():
+            return
+
+        def _watchdog() -> None:
+            while not self._postgres_watchdog_stop.is_set():
+                try:
+                    snapshot = build_data_plane_snapshot(
+                        database_url=os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip(),
+                        rabbitmq_url=os.getenv("AI_BRIDGE_RABBITMQ_URL", "").strip(),
+                    )
+                    payload = {
+                        "type": "postgres_watchdog",
+                        "status": snapshot.postgres_state,
+                        "ok": snapshot.ok,
+                        "details": snapshot.details,
+                        "probe": snapshot.probe,
+                        "tables": [item.__dict__ for item in snapshot.tables],
+                    }
+                    self.kpi_events.write(payload)
+                    if not snapshot.ok and self.console:
+                        self.console.emit("POSTGRES_ALERT", f"state={snapshot.postgres_state} details={snapshot.details}")
+                except Exception as exc:
+                    try:
+                        self.kpi_events.write({"type": "postgres_watchdog", "status": "error", "error": str(exc)})
+                    except Exception:
+                        pass
+                    if self.console:
+                        self.console.emit("POSTGRES_ALERT", f"watchdog_error={exc}")
+                self._postgres_watchdog_stop.wait(interval)
+
+        self._postgres_watchdog_thread = threading.Thread(target=_watchdog, name="postgres-watchdog", daemon=True)
+        self._postgres_watchdog_thread.start()
+
+    def _stop_postgres_watchdog(self) -> None:
+        self._postgres_watchdog_stop.set()
 
     def _init_original(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900) -> None:
         self.local_agents = {}
@@ -326,6 +375,8 @@ class Orchestrator:
         self.session_memory = components.session_memory
         self.provider_budget_router = ProviderBudgetRouter()
         self.kpi_events = KPIEventLogger.from_env()
+        self._postgres_watchdog_stop = threading.Event()
+        self._postgres_watchdog_thread: threading.Thread | None = None
 
         self.module_manager = KernelModuleManager()
         self.module_manager.set_api(self)
@@ -384,6 +435,9 @@ class Orchestrator:
 
     def unload_kernel_module(self, name: str) -> None:
         self.module_manager.unload(name)
+
+    def shutdown(self) -> None:
+        self._stop_postgres_watchdog()
 
     def loaded_kernel_modules(self) -> list[str]:
         return self.module_manager.loaded_modules()

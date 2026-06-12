@@ -81,3 +81,27 @@ def test_hybrid_memory_restore_by_key_ignores_top_k_window():
     restored = memory.get("session", "s-index", "target")
     assert restored is not None
     assert "old" in str(restored)
+
+
+
+def test_hybrid_memory_trained_memory_brief_and_context():
+    memory = HybridMemory()
+
+    class _TrainedRecord:
+        def __init__(self):
+            self.content = {"pattern": "split into phases"}
+            self.source_memory_ids = [10, 11]
+            self.quality_score = 0.9
+            self.memory_domain = "prompt:code"
+
+    memory.persistent.retrieve_trained_memories = lambda **kwargs: [_TrainedRecord()]
+
+    brief = memory.retrieve_trained_memory_brief(session_id="s1", agent_id="a1", memory_domain="prompt:code")
+    ctx = memory.get_trained_memory_context(session_id="s1", agent_id="a1", memory_domain="prompt:code")
+    reused = memory.use_trained_memory(session_id="s1", agent_id="a1", memory_domain="prompt:code")
+
+    assert "TRAINED MEMORY BRIEF" in brief
+    assert "split into phases" in brief
+    assert ctx["has_trained_memory"] is True
+    assert ctx["brief"] == brief
+    assert reused == brief
