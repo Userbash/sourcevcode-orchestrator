@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ from .json_themes_module import JSONThemesModule
 from .unified_vfs import UnifiedVFSModule
 from .kernel_module_manager import KernelModuleManager
 from .orchestrator_control_module import OrchestratorControlModule
+from .qt_dev_box_module import QtDevBoxModule
 from .model_usage_module import ModelUsageModule
 from .provider_budget_router import ProviderBudgetRouter
 from .cold_boot_module import ColdBootModule
@@ -171,7 +173,7 @@ class Orchestrator:
         else:
             self.log("warning", "[EASY_DIFFUSION] Autostart could not confirm readiness.")
 
-    def __init__(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900) -> None:
+    def __init__(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900, verbose_orchestrator: bool = False, json_console: bool = False) -> None:
         self.local_agents: dict[str, BaseAgent] = {}
         self.results: dict[str, AgentResult] = {}
         self.live_trace_rows: list[dict[str, object]] = []
@@ -199,6 +201,19 @@ class Orchestrator:
         self.quality = components.quality
         self.merger = components.merger
         self.console = components.console
+        log_file = os.getenv("ORCHESTRATOR_LOG_FILE") or os.getenv("ORCHESTRATOR_JSONL_LOG")
+        env_json = os.getenv("ORCHESTRATOR_JSON_CONSOLE", "").strip().lower() in {"1", "true", "yes", "on"}
+        env_color = os.getenv("ORCHESTRATOR_COLOR_LOGS", "").strip().lower()
+        color_mode = env_color in {"1", "true", "yes", "on"} if env_color else (sys.stdout.isatty() and not json_console)
+        self.console.set_mode(
+            json_mode=json_console or env_json,
+            verbose=verbose_orchestrator,
+            color_mode=color_mode,
+            log_path=log_file,
+        )
+        self.verbose_orchestrator = verbose_orchestrator
+        self.json_console = json_console or env_json
+        self.console.emit("START", f"Orchestrator ready | verbose={self.verbose_orchestrator} | json={self.json_console} | color={color_mode} | log_file={log_file or 'off'}")
         self.security_gate = components.security_gate
         self.host_bridge = components.host_bridge
         self.session_memory = components.session_memory
@@ -244,6 +259,7 @@ class Orchestrator:
         self.module_manager.register(JSONThemesModule())
         self.module_manager.register(UnifiedVFSModule())
         self.module_manager.register(ColdBootModule())
+        self.module_manager.register(QtDevBoxModule())
         self.module_manager.register(UIDesignSystemModule())
         self.module_manager.register(UIAntiTemplateModule())
         self.module_manager.register(FrontendEngineeringBridgeModule())
@@ -522,6 +538,7 @@ class Orchestrator:
         self.module_manager.register(ChatBusModule())
         self.module_manager.register(TriggerDispatcherModule())
         self.module_manager.register(ColdBootModule())
+        self.module_manager.register(QtDevBoxModule())
         self.module_manager.register(SourceCraftModule())
         self.module_manager.register(VoiceListenerModule())
         self.module_manager.load("ai_activity")
@@ -534,12 +551,15 @@ class Orchestrator:
         self.module_manager.load("chat_bus")
         self.module_manager.load("trigger_dispatcher")
         self.module_manager.load("cold_boot")
+        self.module_manager.load("qt_dev_box")
         self.module_manager.load("sourcecraft")
         self.module_manager.load("voice_listener")
         
     def attach_local_agent(self, agent_id: str, agent: BaseAgent, agent_type: str = "custom", critical: bool = False, model_name: str = "local-small", provider: str = "local") -> None:
         self.local_agents[agent_id] = agent
         agent.set_host_bridge(self.host_bridge)
+        if hasattr(agent, "set_api"):
+            agent.set_api(self)
         if not self.registry.get(agent_id):
             self.registry.register(agent_id, agent_type, f"local://{agent_id}", agent.capabilities, critical=critical, model_name=model_name, provider=provider)
             self.metrics.register_agent(self.registry.get(agent_id))  # type: ignore[arg-type]
@@ -548,6 +568,12 @@ class Orchestrator:
         if hasattr(self.message_bus, "register_pod"):
             self.message_bus.register_pod(agent_id, agent.capabilities)
         self.log("info", f"[KERNEL] Attached local agent pod: {agent_id} (TPP Enabled)")
+
+    def qt_dev_box(self) -> QtDevBoxModule | None:
+        module = self.module_manager.get_module("qt_dev_box")
+        if isinstance(module, QtDevBoxModule):
+            return module
+        return None
 
     def _broadcast_pod_state(self, agent_id: str, status: AgentStatus, task_id: str | None = None) -> None:
         """Updates the TPP mesh with the current pod state."""
@@ -1424,37 +1450,67 @@ class Orchestrator:
         self.live_trace_rows = []
         self.console.emit("AGENTS", f"Найдено агентов: {len(self.registry.list_agents())}, доступно: {len(self.registry.ready_agents())}")
         self.healthcheck.check_all()
-        
+
         completed: set[str] = set()
         pending = {task.task_id: task for task in plan.atomic_tasks}
         final_results: list[AgentResult] = []
-        
+        batch_no = 0
+        total_tasks = len(plan.atomic_tasks)
+
         while pending:
             ready_tasks = [task for task in pending.values() if all(dep in completed for dep in task.dependencies)]
             if not ready_tasks:
                 raise RuntimeError("Task graph has unresolved dependencies or cycles")
-                
+
             usage_module = self._model_usage_module()
             if usage_module is not None and usage_module.should_reduce_parallelism() and len(ready_tasks) > 1:
                 self.console.emit("THROTTLE", f"Token budget is low; reducing parallel batch from {len(ready_tasks)} to 1")
                 ready_tasks = ready_tasks[:1]
 
-            self.console.emit("PARALLEL", f"Запуск {len(ready_tasks)} задач параллельно...")
+            batch_no += 1
+            ready_ids = ", ".join(task.task_id[:8] for task in ready_tasks)
+            self.console.emit(
+                "PARALLEL",
+                f"Batch {batch_no}: starting {len(ready_tasks)} task(s) in parallel | ready={ready_ids} | completed={len(completed)}/{total_tasks}",
+            )
+            self.console.progress(
+                "Parallel batches",
+                len(completed),
+                total_tasks,
+                details=f"batch {batch_no} queued {len(ready_tasks)} task(s)",
+            )
 
             results = await asyncio.gather(*(self.run_task_async(t) for t in ready_tasks))
-            
+
             final_results.extend(results)
-            
+
+            succeeded = sum(1 for r in results if r.status == TaskStatus.DONE)
+            failed = len(results) - succeeded
+            self.console.emit(
+                "PARALLEL",
+                f"Batch {batch_no}: finished | ok={succeeded} | failed={failed} | total_done={len(final_results)}",
+            )
+            self.console.progress(
+                "Parallel batches",
+                len(completed) + len(ready_tasks),
+                total_tasks,
+                details=f"batch {batch_no} finished ok={succeeded} failed={failed}",
+            )
+            if failed:
+                failed_ids = ", ".join(r.task_id[:8] for r in results if r.status != TaskStatus.DONE)
+                self.console.emit("ERROR", f"Batch {batch_no}: failed task(s): {failed_ids}")
+
             if any(r.status != TaskStatus.DONE for r in results):
                 merged = self.merger.merge(final_results)
                 module_state = self.module_state()
                 return {"status": "failed", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
-                
+
             for task in ready_tasks:
                 completed.add(task.task_id)
                 pending.pop(task.task_id)
 
         merged = self.merger.merge(final_results)
+        self.console.progress("Parallel batches", total_tasks, total_tasks, details="orchestration complete")
         self.console.emit("DONE", "Все критерии выполнены (Асинхронный параллельный режим)")
         module_state = self.module_state()
         return {"status": "done", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "disabled_agents": self.autoscaler.disabled_agents, "enabled_agents": self.autoscaler.enabled_agents, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}

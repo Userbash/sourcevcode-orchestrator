@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from core.core.host_bridge import HostBridge
+from core.core.kernel_api import KernelAPI
 from core.core.models import AgentHealth, AgentResult, AgentStatus, ResultOutput, Task, TaskStatus
 
 
@@ -16,6 +17,7 @@ class BaseAgent(ABC):
         self.success_rate = 1.0
         self.last_error: str | None = None
         self.host_bridge: HostBridge | None = None
+        self._api: KernelAPI | None = None
 
     def health(self) -> AgentHealth:
         return AgentHealth(
@@ -31,6 +33,12 @@ class BaseAgent(ABC):
 
     def set_host_bridge(self, bridge: HostBridge) -> None:
         self.host_bridge = bridge
+
+    def set_api(self, api: KernelAPI) -> None:
+        self._api = api
+
+    def get_api(self) -> KernelAPI | None:
+        return self._api
 
     @abstractmethod
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
