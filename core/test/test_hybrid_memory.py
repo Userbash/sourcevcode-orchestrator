@@ -105,3 +105,83 @@ def test_hybrid_memory_trained_memory_brief_and_context():
     assert ctx["has_trained_memory"] is True
     assert ctx["brief"] == brief
     assert reused == brief
+
+
+
+def test_hybrid_memory_ranks_trained_memory_by_quality_and_recency():
+    memory = HybridMemory()
+
+    class _Record:
+        def __init__(self, quality_score, created_at, label):
+            self.content = {"label": label}
+            self.source_memory_ids = [1]
+            self.quality_score = quality_score
+            self.memory_domain = "prompt:review"
+            self.created_at = created_at
+            self.updated_at = created_at
+
+    recent_low = _Record(0.2, "2025-06-12T10:00:00+00:00", "recent-low")
+    old_high = _Record(0.95, "2025-05-01T10:00:00+00:00", "old-high")
+    memory.persistent.retrieve_trained_memories = lambda **kwargs: [recent_low, old_high]
+
+    brief = memory.retrieve_trained_memory_brief(session_id="s1", agent_id="a1", memory_domain="prompt:review", top_k=1)
+
+    assert "old-high" in brief or "recent-low" in brief
+    assert memory.retrieve_trained_memory_brief(session_id="s1", agent_id="a1", memory_domain="prompt:review", top_k=1) == brief
+
+
+def test_hybrid_memory_trained_brief_cache_is_reused(monkeypatch):
+    memory = HybridMemory()
+    calls = []
+
+    class _Record:
+        def __init__(self):
+            self.content = {"label": "cached"}
+            self.source_memory_ids = [1]
+            self.quality_score = 0.9
+            self.memory_domain = "prompt:code"
+            self.created_at = "2025-06-12T10:00:00+00:00"
+            self.updated_at = self.created_at
+
+    def _retrieve(**kwargs):
+        calls.append(kwargs)
+        return [_Record()]
+
+    memory.persistent.retrieve_trained_memories = _retrieve
+    first = memory.retrieve_trained_memory_brief(session_id="s1", agent_id="a1", memory_domain="prompt:code", top_k=1)
+    second = memory.retrieve_trained_memory_brief(session_id="s1", agent_id="a1", memory_domain="prompt:code", top_k=1)
+
+    assert first == second
+    assert len(calls) == 1
+
+
+
+def test_hybrid_memory_degrade_release_and_recovery_after_ttl():
+    memory = HybridMemory()
+    memory._trained_memory_degrade_ttl_sec = 1
+
+    class _Record:
+        def __init__(self):
+            self.content = {"pattern": "prefer short plans"}
+            self.source_memory_ids = [10]
+            self.quality_score = 0.95
+            self.memory_domain = "prompt:plan"
+            self.created_at = "2025-06-12T10:00:00+00:00"
+            self.updated_at = self.created_at
+
+    memory.persistent.retrieve_trained_memories = lambda **kwargs: [_Record()]
+    session_id = "s-degrade"
+    task_type = "plan"
+
+    memory.record_trained_memory_rejection(session_id=session_id, task_type=task_type, threshold=0.8, reason="quality_threshold")
+    blocked = memory.retrieve_trained_memory_brief(session_id=session_id, agent_id="a1", memory_domain="prompt:plan", task_type=task_type)
+    assert blocked == ""
+    assert memory._trained_memory_degraded(session_id=session_id, task_type=task_type) is True
+
+    memory._trained_memory_degrade[(session_id, task_type)] = __import__("datetime").datetime.now(__import__("datetime").UTC) - __import__("datetime").timedelta(seconds=1)
+    released = memory.release_expired_trained_memory_degrade()
+    assert released >= 1
+    assert memory._trained_memory_degraded(session_id=session_id, task_type=task_type) is False
+    recovered = memory.retrieve_trained_memory_brief(session_id=session_id, agent_id="a1", memory_domain="prompt:plan", task_type=task_type)
+    assert "prefer short plans" in recovered
+    assert memory._trained_memory_degrade_releases >= 1

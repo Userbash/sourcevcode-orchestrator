@@ -15,6 +15,12 @@ class MetricsCollector:
     def increment(self, name: str, amount: int = 1) -> None:
         self.counters[name] += amount
 
+    def record_trained_memory_outcome(self, *, task_type: str, accepted: bool, reason: str | None = None) -> None:
+        base = f"trained_memory.{task_type.lower()}"
+        self.increment(f"{base}.accepted" if accepted else f"{base}.rejected")
+        if reason:
+            self.increment(f"{base}.reason.{reason}")
+
     def observe_latency(self, agent_id: str, latency_ms: float) -> None:
         self.latencies[agent_id].append(latency_ms)
         if agent_id in self.agent_metrics:

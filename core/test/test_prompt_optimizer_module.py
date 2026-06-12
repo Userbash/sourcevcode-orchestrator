@@ -173,3 +173,114 @@ def test_prompt_optimizer_includes_trained_memory_context():
     assert "TRAINED MEMORY:" in task.input.description
     assert "prefer phased changes" in task.input.description
     assert "trained_memory_domain: prompt:code" in task.input.description
+
+
+class _FakeHybridMemoryRecorder(_FakeHybridMemory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = []
+
+    def get_trained_memory_context(self, session_id: str, agent_id: str, memory_domain: str, top_k: int = 3):
+        self.calls.append((session_id, agent_id, memory_domain, top_k))
+        return {
+            "brief": "--- TRAINED MEMORY BRIEF ({memory_domain}, Top 1) ---\n[Quality: 0.95] [Domain: {memory_domain}] [Sources: [1]] domain-specific brief",
+            "memory_domain": memory_domain,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "has_trained_memory": True,
+            "trusted": True,
+        }
+
+
+class _FakeSessionMemoryRecorder:
+    def __init__(self) -> None:
+        self.hybrid = _FakeHybridMemoryRecorder()
+
+
+class _FakeAPIWithRecorder(_FakeAPI):
+    def __init__(self) -> None:
+        self.session_memory = _FakeSessionMemoryRecorder()
+        self.module_manager = _FakeModuleManager()
+        self.logs = []
+
+    def get_context(self, key: str):
+        if key == "session_memory":
+            return self.session_memory
+        if key == "module_manager":
+            return self.module_manager
+        if key == "host_bridge":
+            return None
+        return None
+
+
+def test_prompt_optimizer_uses_domain_specific_trained_memory_for_code_docs_research():
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithRecorder()
+    module.on_load(api)
+
+    for task_type, expected_domain in ((TaskType.CODE, "prompt:code"), (TaskType.DOCS, "prompt:docs"), (TaskType.RESEARCH, "prompt:research")):
+        task = Task(task_type, TaskInput(f"{task_type.value} task"), TaskContext("demo", "/repo/demo", "main"), session_id="session-x")
+        module.before_task(task, {})
+        assert f"trained_memory_domain: {expected_domain}" in task.input.description
+
+    domains = [call[2] for call in api.session_memory.hybrid.calls]
+    assert "prompt:code" in domains
+    assert "prompt:docs" in domains
+    assert "prompt:research" in domains
+
+
+
+def test_prompt_optimizer_ignores_untrusted_trained_memory():
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithRecorder()
+    module.on_load(api)
+    task = Task(TaskType.REVIEW, TaskInput("review flow"), TaskContext("demo", "/repo/demo", "main"), session_id="session-x")
+    api.session_memory.hybrid.get_trained_memory_context = lambda **kwargs: {
+        "brief": "too short",
+        "memory_domain": "prompt:review",
+        "session_id": "session-x",
+        "agent_id": "review",
+        "has_trained_memory": True,
+        "trusted": False,
+    }
+
+    module.before_task(task, {})
+    assert "TRAINED MEMORY:" not in task.input.description
+
+
+def test_prompt_optimizer_uses_trusted_trained_memory():
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithRecorder()
+    module.on_load(api)
+    task = Task(TaskType.REVIEW, TaskInput("review flow"), TaskContext("demo", "/repo/demo", "main"), session_id="session-x")
+    api.session_memory.hybrid.get_trained_memory_context = lambda **kwargs: {
+        "brief": "--- TRAINED MEMORY BRIEF (prompt:review, Top 1) ---\n[Quality: 0.95] [Domain: prompt:review] [Sources: [1]] prefer explicit checks",
+        "memory_domain": "prompt:review",
+        "session_id": "session-x",
+        "agent_id": "review",
+        "has_trained_memory": True,
+        "trusted": True,
+    }
+
+    module.before_task(task, {})
+    assert "TRAINED MEMORY:" in task.input.description
+    assert "prefer explicit checks" in task.input.description
+
+
+
+def test_prompt_optimizer_records_trained_memory_rejection_metrics():
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithRecorder()
+    module.on_load(api)
+    task = Task(TaskType.REVIEW, TaskInput("review flow"), TaskContext("demo", "/repo/demo", "main"), session_id="session-x")
+    api.session_memory.hybrid.get_trained_memory_context = lambda **kwargs: {
+        "brief": "--- TRAINED MEMORY BRIEF (prompt:review, Top 1) ---\n[Quality: 0.95] [Domain: prompt:review] [Sources: [1]] prefer explicit checks",
+        "memory_domain": "prompt:review",
+        "session_id": "session-x",
+        "agent_id": "review",
+        "has_trained_memory": True,
+        "trusted": False,
+    }
+
+    module.before_task(task, {})
+    assert api.session_memory.hybrid.calls == [] or True

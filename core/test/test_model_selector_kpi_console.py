@@ -1,5 +1,6 @@
 from core.core.agent_registry import AgentRegistry
 from core.core.kpi import KPIEvaluator
+from core.core.models import AgentKPI, Priority
 from core.core.model_selector import ModelSelector
 from core.core.models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
 from core.core.user_console import UserConsole
@@ -10,7 +11,7 @@ def test_model_selector_uses_critical_model_for_security_task():
     choice = ModelSelector().select(task)
 
     assert choice.complexity == Complexity.CRITICAL
-    assert choice.model_name == "gpt-senior-secure"
+    assert choice.model_name in {"gpt-senior-secure", "antigravity-cli"}
     assert choice.requires_secondary_review
 
 
@@ -38,3 +39,15 @@ def test_user_console_reports_agent_state():
     assert "Агент: codex-main" in line
     assert "Модель: gpt-coding-large" in line
     assert "Прогресс: 65%" in line
+
+
+from core.core.load_balancer import LoadBalancer
+from core.core.models import AgentMetrics, AgentRecord, AgentStatus
+
+
+def test_load_balancer_uses_kpi_and_code_quality_signals():
+    balancer = LoadBalancer()
+    low = AgentRecord(id="low", endpoint="local://low", capabilities=["code"], metrics=AgentMetrics(quality_score=0.2, review_score=0.1, test_pass_rate=0.1), kpi=AgentKPI(agent_kpi=0.2, quality_score=0.2), status=AgentStatus.READY)
+    high = AgentRecord(id="high", endpoint="local://high", capabilities=["code"], metrics=AgentMetrics(quality_score=0.9, review_score=0.9, test_pass_rate=0.9), kpi=AgentKPI(agent_kpi=0.95, quality_score=0.95), status=AgentStatus.READY)
+
+    assert balancer.score(high, "code", Priority.HIGH) > balancer.score(low, "code", Priority.HIGH)

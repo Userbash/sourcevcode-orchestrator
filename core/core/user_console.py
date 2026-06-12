@@ -27,7 +27,7 @@ class UserConsole:
             f"Агент: {agent.id}\n"
             f"Статус: {agent.status.value}\n"
             f"Задача: {task_text}\n"
-            f"Модель: {agent.metrics.model_name}\n"
+            f"Модель: {agent.metrics.model_name or getattr(agent, 'model_name', None) or 'unknown'}\n"
             f"Прогресс: {progress}%\n"
             f"Текущий этап: {stage}\n"
             f"Ошибки: {agent.disabled_reason or 'нет'}"
