@@ -1,0 +1,49 @@
+{
+  "profile_type": "combo",
+  "profile_key": "combo::openai::gpt-4o",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.4,
+      "budget": 0.86,
+      "vfs": 0.95
+    },
+    "local": {
+      "quality": 1.0,
+      "budget": 1.0,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 1.08,
+      "budget": 0.97,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "gpt": {
+      "quality": 1.32,
+      "budget": 0.85
+    },
+    "deepseek": {
+      "quality": 1.1,
+      "budget": 0.95
+    },
+    "qwen": {
+      "quality": 1.02,
+      "budget": 0.98
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.9,
+    "avg_latency_ms": 1300,
+    "quality_min_confidence": 0.94
+  },
+  "default_context_depth": 6,
+  "budget_pressure": {
+    "high": 2600,
+    "medium": 5000
+  },
+  "quality_pressure": {
+    "high": 0.96,
+    "medium": 0.9
+  }
+}

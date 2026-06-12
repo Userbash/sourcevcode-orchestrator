@@ -27,12 +27,20 @@ def test_availability_init() -> None:
     assert avail is not None
 
 
-@patch("core.core.availability.AntigravityManager")
+@patch("core.core.antigravity_status_module.shared_antigravity_snapshot")
 @patch("socket.create_connection", side_effect=_ok_socket)
-def test_check_antigravity_success(mock_manager: MagicMock, _mock_socket: MagicMock) -> None:
-    instance = mock_manager.return_value
-    instance.is_ready.return_value = True
-    instance.list_models.return_value = ["model1", "model2"]
+def test_check_antigravity_success(mock_snapshot: MagicMock, _mock_socket: MagicMock) -> None:
+    mock_snapshot.return_value = {
+        "ready": True,
+        "ok": True,
+        "models": ["model1", "model2"],
+        "models_probe": {"ok": True},
+        "generation_probe": {"ok": True},
+        "auth_probe": {"ok": True},
+        "api_probe": {},
+        "auth_mode": "agy_oauth",
+        "status": "ready",
+    }
 
     avail = ModelAvailability()
     health = avail.check_antigravity()

@@ -1,0 +1,49 @@
+{
+  "profile_type": "provider",
+  "profile_key": "provider::mistral",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.06,
+      "budget": 0.98,
+      "vfs": 1.0
+    },
+    "local": {
+      "quality": 1.0,
+      "budget": 1.06,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 0.98,
+      "budget": 1.1,
+      "vfs": 1.03
+    }
+  },
+  "model_class_weights": {
+    "gpt": {
+      "quality": 1.04,
+      "budget": 0.97
+    },
+    "deepseek": {
+      "quality": 1.0,
+      "budget": 1.0
+    },
+    "qwen": {
+      "quality": 1.0,
+      "budget": 1.06
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.74,
+    "avg_latency_ms": 2200,
+    "quality_min_confidence": 0.72
+  },
+  "default_context_depth": 2,
+  "budget_pressure": {
+    "high": 1100,
+    "medium": 2400
+  },
+  "quality_pressure": {
+    "high": 0.78,
+    "medium": 0.68
+  }
+}

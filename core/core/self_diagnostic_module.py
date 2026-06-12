@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from .kernel_api import KernelAPI
 from .models import Task, AgentResult
 from .availability import ModelAvailability
+from .antigravity_status_module import shared_antigravity_snapshot
 
 logger = logging.getLogger("self_diagnostic")
 
@@ -55,6 +56,7 @@ class SelfDiagnosticModule:
 
         # 1. Component (Module) Discovery & Health
         if self._api:
+            module_state = self._api.module_state() if hasattr(self._api, "module_state") else {}
             module_manager = self._api.get_context("module_manager")
             if module_manager:
                 for mod_name in module_manager.loaded_modules():
@@ -62,7 +64,9 @@ class SelfDiagnosticModule:
                         continue
                     try:
                         mod = module_manager.get_module(mod_name)
-                        mod_report = mod.finalize() if hasattr(mod, "finalize") else {"status": "active"}
+                        mod_report = module_state.get(mod_name, {}) if isinstance(module_state, dict) else {}
+                        if not mod_report and hasattr(mod, "finalize"):
+                            mod_report = mod.finalize()
                         report["components"][mod_name] = {
                             "status": "ok",
                             "details": mod_report
@@ -97,6 +101,7 @@ class SelfDiagnosticModule:
             # ModelAvailability.check_all() is sync but probes network/processes
             provider_health = self._availability.check_all()
             report["ai_models"] = {p: h.as_dict() for p, h in provider_health.items()}
+            report["antigravity_status"] = shared_antigravity_snapshot(force=False)
             
             # Check for local LLM (Ollama) specifically if not in provider_health
             local_model = os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL")

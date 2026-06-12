@@ -26,23 +26,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-id", default=USER_ID, help="User identifier")
     parser.add_argument("--session-id", default=SESSION_ID, help="Session identifier")
     parser.add_argument("--relay", action="store_true", default=True, help="Read stdin and relay each line to the orchestrator")
-    parser.add_argument("--transport", choices=("auto", "http", "queue", "parallel"), default="auto", help="Transport used to deliver user text to the orchestrator")
+    parser.add_argument("--transport", choices=("auto", "websocket", "queue", "parallel"), default="auto", help="Transport used to deliver user text to the orchestrator")
     parser.add_argument("--trace", action="store_true", help="Request fulltrace payloads")
     return parser
 
 
-def _default_transport() -> str:
-    return "http"
 
-
-def _build_payload(message: str, *, user_id: str, session_id: str) -> dict[str, str]:
+def _build_payload(message: str, *, user_id: str, session_id: str) -> dict[str, object]:
     return {
-        "user_id": user_id,
-        "message": message,
-        "session_id": session_id,
-        "source": "chat_relay",
-        "provider": "cli",
-        "mode": "orchestrator",
+        "v": 1,
+        "u": user_id,
+        "m": message,
+        "s": session_id,
+        "o": "chat_relay",
+        "p": "cli",
     }
 
 
@@ -62,13 +59,16 @@ def _send_via_websocket(message: str, *, bridge_url: str, user_id: str, session_
         return None
 
     ws_url = bridge_url.replace("http://", "ws://").replace("https://", "wss://") + ("/chat/ws")
-    payload = _build_payload(message, user_id=user_id, session_id=session_id)
+    payload = {"c": _build_payload(message, user_id=user_id, session_id=session_id) | {"t": 1 if trace else 0}}
 
     async def _round_trip() -> dict:
-        async with websockets.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
-            await ws.send(json.dumps(payload))
-            response = await asyncio.wait_for(ws.recv(), timeout=40)
-            return json.loads(response)
+        async with websockets.connect(ws_url, open_timeout=10, close_timeout=5, subprotocols=["chat.v1", "chat.json"]) as ws:
+            await ws.send(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
+            while True:
+                response = await asyncio.wait_for(ws.recv(), timeout=40)
+                data = json.loads(response)
+                if data.get("type") == "final_result":
+                    return data
 
     try:
         return asyncio.run(_round_trip())
@@ -79,10 +79,6 @@ def _send_via_websocket(message: str, *, bridge_url: str, user_id: str, session_
 
 def _send_parallel(message: str, *, bridge_url: str, user_id: str, session_id: str, trace: bool = False) -> Optional[dict]:
     results: list[dict] = []
-
-    http_result = send_to_orchestrator(message, bridge_url=bridge_url, user_id=user_id, session_id=session_id, trace=trace, transport="http")
-    if http_result:
-        results.append(http_result)
 
     queue_result = _send_via_queue(message, user_id=user_id, session_id=session_id)
     if queue_result:
@@ -111,17 +107,9 @@ def send_to_orchestrator(message: str, *, bridge_url: str, user_id: str, session
             print(f"\n[!] Error fetching stats: {exc}")
             return None
 
-    payload = _build_payload(message, user_id=user_id, session_id=session_id)
-
     selected_transport = transport
     if selected_transport == "auto":
-        # WebSocket-first with HTTP fallback
-        ws_result = _send_via_websocket(message, bridge_url=bridge_url, user_id=user_id, session_id=session_id, trace=trace)
-        if ws_result:
-            return ws_result
-        
-        # Fallback to HTTP
-        selected_transport = "http"
+        selected_transport = "websocket"
 
     if selected_transport == "parallel":
         return _send_parallel(message, bridge_url=bridge_url, user_id=user_id, session_id=session_id, trace=trace)
@@ -129,18 +117,11 @@ def send_to_orchestrator(message: str, *, bridge_url: str, user_id: str, session
     if selected_transport == "queue":
         return _send_via_queue(message, user_id=user_id, session_id=session_id)
 
-    # HTTP Transport
-    endpoint = "/chat/fulltrace" if trace else "/chat"
-    try:
-        response = requests.post(f"{bridge_url}{endpoint}", json=payload, timeout=40)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.Timeout:
-        print("\n[!] Error: Bridge timeout (task is still running in background).")
-    except requests.exceptions.ConnectionError:
-        print("\n[!] Error: Could not connect to Bridge. Is the orchestrator running?")
-    except Exception as exc:
-        print(f"\n[!] Unexpected error: {exc}")
+    ws_result = _send_via_websocket(message, bridge_url=bridge_url, user_id=user_id, session_id=session_id, trace=trace)
+    if ws_result is not None:
+        return ws_result
+
+    print("\n[!] WebSocket delivery failed.")
     return None
 
 

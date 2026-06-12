@@ -1,0 +1,45 @@
+{
+  "task_type": "docs_release",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.12,
+      "budget": 0.96
+    },
+    "local": {
+      "budget": 1.14,
+      "quality": 0.97
+    },
+    "mistral": {
+      "budget": 1.06,
+      "quality": 0.96
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "budget": 1.08,
+      "quality": 0.96
+    },
+    "deepseek": {
+      "quality": 1.04,
+      "budget": 1.0
+    },
+    "gpt": {
+      "quality": 1.05,
+      "budget": 0.97
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.8,
+    "avg_latency_ms": 1200,
+    "quality_min_confidence": 0.74
+  },
+  "default_context_depth": 2,
+  "budget_pressure": {
+    "high": 650,
+    "medium": 1300
+  },
+  "quality_pressure": {
+    "high": 0.76,
+    "medium": 0.66
+  }
+}

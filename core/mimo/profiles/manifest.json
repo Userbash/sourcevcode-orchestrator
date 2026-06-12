@@ -1,0 +1,46 @@
+{
+  "profile_mode": "expanded",
+  "task_profiles": [
+    "plan.json",
+    "plan_high.json",
+    "plan_critical.json",
+    "plan_research.json",
+    "code.json",
+    "code_fast.json",
+    "code_senior.json",
+    "code_fix.json",
+    "code_refactor.json",
+    "test.json",
+    "test_regression.json",
+    "review.json",
+    "review_senior.json",
+    "review_security.json",
+    "docs.json",
+    "docs_light.json",
+    "docs_api.json",
+    "docs_release.json",
+    "fix.json",
+    "fix_regression.json",
+    "research.json",
+    "research_deep.json"
+  ],
+  "provider_profiles": [
+    "providers/provider__openai.json",
+    "providers/provider__local.json",
+    "providers/provider__mistral.json"
+  ],
+  "model_profiles": [
+    "models/model__qwen-2.5-7b-instruct.json",
+    "models/model__qwen2.5-32b-instruct-q4_k_m.json",
+    "models/model__deepseek-r1-14b.json",
+    "models/model__gpt-4o.json",
+    "models/model__gpt-4.1.json",
+    "models/model__claude-3.5-sonnet.json"
+  ],
+  "combo_profiles": [
+    "combinations/combo__openai__gpt-4o.json",
+    "combinations/combo__local__qwen2.5-32b-instruct-q4_k_m.json",
+    "combinations/combo__local__qwen-2.5-7b-instruct.json",
+    "combinations/combo__openai__deepseek-r1-14b.json"
+  ]
+}

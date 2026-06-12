@@ -26,6 +26,7 @@ class ChatRequest(BaseModel):
     session_id: str
     source: Optional[str] = None
     provider: Optional[str] = None
+    trace: bool = False
 
 
 class RegistrationRequest(BaseModel):
@@ -67,6 +68,9 @@ class APIBridgeModule:
         self._api.log("info", f"[API] {self.name} module loading...")
         if not enabled:
             self._api.log("info", "[API] api_bridge disabled by AI_BRIDGE_API_ENABLED")
+            return
+        if os.getenv("TESTING") == "true" or os.getenv("PYTEST_CURRENT_TEST"):
+            self._api.log("info", "[API] api_bridge server start skipped in test runtime")
             return
 
         # We run the FastAPI server in a separate thread to not block the Orchestrator
@@ -211,6 +215,31 @@ class APIBridgeModule:
             return False
         return True
 
+    @staticmethod
+    def _unwrap_chat_payload(data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("c"), dict):
+            return data["c"]
+        return data
+
+    @staticmethod
+    def _chat_request_from_payload(data: Any) -> tuple[ChatRequest | None, list[str]]:
+        if not isinstance(data, dict):
+            return None, ["payload_not_object"]
+
+        compact = {
+            "user_id": data.get("user_id") or data.get("u"),
+            "message": data.get("message") or data.get("m"),
+            "session_id": data.get("session_id") or data.get("s"),
+            "source": data.get("source") or data.get("o"),
+            "provider": data.get("provider") or data.get("p"),
+            "trace": bool(data.get("trace") if "trace" in data else data.get("t")),
+        }
+
+        try:
+            return ChatRequest(**compact), []
+        except Exception as exc:
+            return None, [f"invalid_payload:{exc}"]
+
     def _validate_chat_request(self, request: ChatRequest) -> tuple[bool, list[str]]:
         issues: list[str] = []
         if not self._meaningful_chat_text(request.message):
@@ -220,6 +249,31 @@ class APIBridgeModule:
         if not str(request.user_id or "").strip():
             issues.append("empty_user_id")
         return len(issues) == 0, issues
+
+    def _antigravity_snapshot(self) -> dict[str, Any] | None:
+        if not self._api:
+            return None
+        module_manager = self._api.get_context("module_manager")
+        if not module_manager or not hasattr(module_manager, "finalize"):
+            return None
+        state = module_manager.finalize().get("antigravity_status") or {}
+        if isinstance(state, dict):
+            snapshot = state.get("snapshot")
+            if isinstance(snapshot, dict):
+                return snapshot
+            return state
+        return None
+
+    def _chat_ws_frames(self, request: ChatRequest, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        frames: list[dict[str, Any]] = []
+        antigravity_status = self._antigravity_snapshot()
+        if antigravity_status is not None:
+            frames.append({"type": "antigravity_status", "antigravity_status": antigravity_status})
+        response: dict[str, Any] = {"type": "final_result", **payload}
+        if request.trace:
+            response["trace"] = payload.get("trace")
+        frames.append(response)
+        return frames
 
     async def _chat_payload(self, request: ChatRequest, *, source_label: str, provider_label: str) -> dict[str, Any]:
         if not self._api:
@@ -270,7 +324,7 @@ class APIBridgeModule:
                 merged = meta_header + "\n" + merged
 
             delivery = self._delivery_trace(source_label=source_label, provider_label=provider_label, transport="websocket", endpoint="/chat/ws")
-            return {
+            response: dict[str, Any] = {
                 "task_id": result.get("task_id", "unknown"),
                 "status": "completed",
                 "source": source_label,
@@ -279,88 +333,16 @@ class APIBridgeModule:
                 "tdd": self._tdd_snapshot(),
                 "result": merged if merged else result.get("results", []),
             }
+            if request.trace:
+                response["trace"] = {
+                    "input": raw_payload,
+                    "normalized": normalize_user_payload(raw_payload),
+                    "raw_result": result,
+                }
+            return response
         except Exception as e:
             logger.exception("Error in API Bridge endpoint: %s", e)
             return {"status": "error", "message": str(e)}
-
-    async def _chat_trace_payload(self, request: ChatRequest, *, source_label: str, provider_label: str) -> dict[str, Any]:
-        if not self._api:
-            return {"status": "error", "message": "Kernel API not available"}
-
-        ok, issues = self._validate_chat_request(request)
-        if not ok:
-            return {
-                "status": "rejected",
-                "source": source_label,
-                "provider": provider_label,
-                "issues": issues,
-                "message": "invalid or empty chat payload",
-            }
-
-        raw_payload = {
-            "user_id": request.user_id,
-            "message": request.message,
-            "session_id": request.session_id,
-            "source": source_label,
-            "provider": provider_label,
-        }
-        normalized = normalize_user_payload(raw_payload)
-        task = create_standard_task(normalized)
-
-        control = self._api.get_module("orchestrator_control") if hasattr(self._api, "get_module") else None
-        control_before = control.task_status(task.task_id) if control and hasattr(control, "task_status") else None
-        result = self._api.submit_user_task(raw_payload, source=source_label)  # type: ignore[arg-type]
-        result_task_id = task.task_id
-        if isinstance(result, dict):
-            submitted_task_id = result.get("task_id")
-            if isinstance(submitted_task_id, str) and submitted_task_id.strip():
-                result_task_id = submitted_task_id.strip()
-        control_after = control.task_status(result_task_id) if control and hasattr(control, "task_status") else None
-        if control_after is None and control and hasattr(control, "finalize"):
-            snapshot = control.finalize()
-            if isinstance(snapshot, dict):
-                tasks = snapshot.get("tasks", {})
-                if isinstance(tasks, dict):
-                    control_after = tasks.get(result_task_id)
-
-        live_trace = None
-        if hasattr(self._api, "live_trace_rows") and getattr(self._api, "live_trace_rows", None):
-            rows = list(getattr(self._api, "live_trace_rows"))
-            live_trace = next((row for row in reversed(rows) if row.get("task_id") == result_task_id), rows[-1])
-
-        scheduler_trace = None
-        if hasattr(self._api, "scheduler") and getattr(self._api, "scheduler", None):
-            decisions = list(getattr(self._api.scheduler, "decisions", []))
-            if decisions:
-                last = next((item for item in reversed(decisions) if getattr(item, "task_id", None) == result_task_id), decisions[-1])
-                scheduler_trace = last.as_dict() if hasattr(last, "as_dict") else last
-
-        tdd_snapshot = self._tdd_snapshot()
-        delivery = self._delivery_trace(source_label=source_label, provider_label=provider_label, transport="http", endpoint="/chat/fulltrace")
-        return {
-            "status": "completed",
-            "source": source_label,
-            "provider": provider_label,
-            "delivery": delivery,
-            "tdd": tdd_snapshot,
-            "input": raw_payload,
-            "normalized": normalized,
-            "task": {
-                "task_id": result_task_id,
-                "type": task.type.value,
-                "priority": task.priority.value,
-                "required_capability": task.required_capability,
-                "repo_path": task.context.repo_path,
-                "branch": task.context.branch,
-            },
-            "control": {
-                "before": control_before,
-                "after": control_after,
-            },
-            "route": live_trace,
-            "schedule": scheduler_trace,
-            "result": result,
-        }
 
     def _sourcecraft_delegate(self, request: SourceCraftDelegateRequest) -> dict[str, Any]:
         if not self._api:
@@ -486,6 +468,13 @@ class APIBridgeModule:
         async def health_full_endpoint():
             return self._health_full_snapshot()
 
+        @app.get("/antigravity/status")
+        async def antigravity_status_endpoint():
+            module = self._api.get_module("antigravity_status") if self._api and hasattr(self._api, "get_module") else None
+            if module and hasattr(module, "snapshot"):
+                return {"status": "ok", "antigravity": module.snapshot()}
+            return {"status": "error", "message": "Antigravity status module not available"}
+
         @app.post("/register_chat")
         async def register_endpoint(request: RegistrationRequest):
             if not self._api:
@@ -503,89 +492,26 @@ class APIBridgeModule:
             )
             return {"status": "success", "message": msg}
 
-        @app.post("/chat")
-        async def chat_endpoint(request: ChatRequest):
-            source_label = request.source or "http_api"
-            provider_label = request.provider or "auto"
-            return await self._chat_payload(request, source_label=source_label, provider_label=provider_label)
-
         async def _chat_websocket_handler(websocket: WebSocket):
             requested_subprotocols = websocket.headers.get("sec-websocket-protocol", "").split(",")
-            subprotocol = "chat.json" if "chat.json" in [s.strip() for s in requested_subprotocols] else None
+            subprotocol = "chat.v1" if "chat.v1" in [s.strip() for s in requested_subprotocols] else "chat.json" if "chat.json" in [s.strip() for s in requested_subprotocols] else None
             await websocket.accept(subprotocol=subprotocol)
             print("[API_BRIDGE_WS] WebSocket accepted connection")
             try:
                 while True:
                     data = await websocket.receive_json()
                     print(f"[API_BRIDGE_WS] Received JSON: {data}")
-                    request = ChatRequest(**data)
+                    request, issues = self._chat_request_from_payload(self._unwrap_chat_payload(data))
+                    if request is None:
+                        await websocket.send_json({"type": "final_result", "task_id": "rejected", "status": "rejected", "issues": issues, "message": "invalid or empty chat payload"})
+                        continue
+
                     source_label = request.source or "ws_api"
                     provider_label = request.provider or "auto"
-                    
-                    if not self._api:
-                        await websocket.send_json({"type": "final_result", "status": "error", "message": "Kernel API not available"})
-                        continue
+                    payload = await self._chat_payload(request, source_label=source_label, provider_label=provider_label)
+                    for frame in self._chat_ws_frames(request, payload):
+                        await websocket.send_json(frame)
 
-                    ok, issues = self._validate_chat_request(request)
-                    if not ok:
-                        await websocket.send_json({
-                            "type": "final_result",
-                            "task_id": "rejected",
-                            "status": "rejected",
-                            "source": source_label,
-                            "provider": provider_label,
-                            "issues": issues,
-                            "message": "invalid or empty chat payload",
-                        })
-                        continue
-
-                    raw_payload = {
-                        "user_id": request.user_id,
-                        "message": request.message,
-                        "session_id": request.session_id,
-                        "source": source_label,
-                        "provider": provider_label,
-                    }
-
-                    async for event in self._api.stream_user_task(raw_payload, source=source_label):  # type: ignore[attr-defined]
-                        if event.get("type") != "final_result":
-                            await websocket.send_json(event)
-                            continue
-
-                        result = event.get("result")
-                        if not isinstance(result, dict):
-                            await websocket.send_json(event)
-                            continue
-
-                        agents_used = []
-                        for r in result.get("results", []):
-                            agent_id = r.get("agent_id", "unknown")
-                            provider = r.get("provider") or "unknown"
-                            model = r.get("model") or "unknown"
-                            agents_used.append(f"{agent_id} [{provider} :: {model}]")
-
-                        meta_header = "\n".join([
-                            "AI ORCHESTRATOR EXECUTION REPORT",
-                            f"Tasks routed to: {', '.join(agents_used)}",
-                            "",
-                        ])
-
-                        merged = result.get("merged", {})
-                        if isinstance(merged, dict) and "summary" in merged:
-                            merged["summary"] = meta_header + "\n" + str(merged["summary"])
-                        elif isinstance(merged, str):
-                            merged = meta_header + "\n" + merged
-
-                        await websocket.send_json({
-                            "type": "final_result",
-                            "task_id": result.get("task_id", "unknown"),
-                            "status": result.get("status", "unknown"),
-                            "source": source_label,
-                            "provider": provider_label,
-                            "message": request.message,
-                            "result": merged,
-                        })
-                    
             except WebSocketDisconnect:
                 return
             except Exception as exc:
@@ -595,12 +521,6 @@ class APIBridgeModule:
                     return
 
         app.add_api_websocket_route("/chat/ws", _chat_websocket_handler)
-
-        @app.post("/chat/fulltrace")
-        async def chat_fulltrace_endpoint(request: ChatRequest):
-            source_label = request.source or "http_api"
-            provider_label = request.provider or "auto"
-            return await self._chat_trace_payload(request, source_label=source_label, provider_label=provider_label)
 
         @app.get("/dump_memory")
         async def dump_memory_endpoint():
