@@ -1,6 +1,6 @@
 # AI Bridge
 
-Reusable orchestration toolkit for agent-driven development workflows. It provides task decomposition, agent registration, capability routing, health checks, load balancing, feedback/retry loops, metrics, security guards, and protocol adapters for local and REST-based agents.
+Reusable orchestration toolkit for agent-driven development workflows. It provides task decomposition, agent registration, capability routing, health checks, load balancing, feedback/retry loops, metrics, security guards, and WebSocket adapters for local and external agents.
 
 ## Structure
 
@@ -8,7 +8,7 @@ Reusable orchestration toolkit for agent-driven development workflows. It provid
 core/
   core/          orchestration, routing, registry, metrics, security
   agents/        local and external agent abstractions
-  protocols/     REST, websocket placeholder, local queue
+  protocols/     websocket, local queue
   schemas/       JSON schemas for task, agent, result, metrics
   scripts/       small CLI entry points
   tests/         pytest coverage for core behavior
@@ -36,6 +36,14 @@ python3 -m core.scripts.run_orchestrator
 
 The demo registers local planner, codex, tester, and reviewer agents and executes a plan -> code -> test -> review cycle.
 
+## WebSocket Smoke Test
+
+```bash
+python3 -m core.scripts.ws_smoke_test --url ws://localhost:8000/chat/ws
+```
+
+Use this to verify the compact chat frame and the WS bridge before running longer workflows.
+
 ## Register a New Agent
 
 ```python
@@ -53,15 +61,15 @@ registry.register(
 Agent fields:
 - `id`: stable unique agent id.
 - `type`: `codex`, `reviewer`, `tester`, `planner`, `docs`, `external_ai`, or `custom`.
-- `endpoint`: `local://...` or HTTP base URL.
+- `connection`: `local://...` or a WebSocket target.
 - `capabilities`: routing capabilities such as `code`, `fix`, `review`, `security`, `test`, `docs`.
 
-## Healthcheck Contract
+## Readiness Contract
 
 Every remote agent should expose:
 
-```http
-GET /health
+```text
+WebSocket connection acceptance and bridge snapshots are the primary readiness signals.
 ```
 
 Response:
@@ -84,13 +92,13 @@ Response:
 
 Remote agents receive:
 
-```http
-POST /task
+```text
+compact WebSocket message frame
 ```
 
-with the JSON shape defined in `schemas/task.schema.json`. Results should match `schemas/result.schema.json`.
+with a compact JSON shape accepted by the bridge. Results should match `schemas/result.schema.json`.
 
-## Connect an External AI Through REST
+## Connect an External AI Through WebSocket
 
 ```python
 from core.agents.external_ai_agent import ExternalAIAgent
@@ -99,7 +107,7 @@ from core.core.security import SecurityManager, SecurityPolicy
 security = SecurityManager(SecurityPolicy())
 agent = ExternalAIAgent(
     agent_id="gemini-reviewer",
-    endpoint="http://localhost:8020",
+    endpoint="ws://localhost:8020",
     capabilities=["review", "research"],
     security=security,
 )
@@ -287,16 +295,16 @@ Low quality results are routed into the feedback loop, which creates `fix` tasks
 
 ## Known Limitations
 
-- WebSocket protocol is a placeholder adapter; projects can extend it with their preferred client.
+- WebSocket protocol is implemented as the primary chat adapter; projects can extend it with their preferred client.
 - The included local agents are deterministic test doubles, not full coding models.
-- REST transport uses Python standard library for portability and minimal dependencies.
+- WebSocket transport is the primary chat path; keep the payload compact and route through the bridge without alternate chat fallback.
 - No persistent database is included; registry and metrics are in-memory.
 
 ## Next Improvements
 
 - Add persistent registry storage.
 - Add async task execution and worker pools.
-- Add authenticated REST server implementation for agents.
+- Add authenticated WebSocket server implementation for agents and bridges.
 - Add real CI adapters for npm, pytest, ruff, mypy, and container checks.
 
 ## P2P Agent Messaging and Smart Scheduler
@@ -404,7 +412,7 @@ When retry limits are exceeded, architecture changes, security is affected, or a
 
 ## Default Orchestration Mode
 
-AI Bridge is the default orchestration core for standard safe tasks. The system should not ask `Use AI Bridge? y/n` for routine work such as code generation, tests, review, docs, refactor, local scripts, healthchecks, metrics, and task routing.
+AI Bridge is the default orchestration core for standard safe tasks. The system should not ask `Use AI Bridge? y/n` for routine work such as code generation, tests, review, docs, refactor, local scripts, readiness probes, metrics, and task routing.
 
 Default behavior:
 
@@ -462,7 +470,7 @@ No prompt for safe standard tasks:
 
 ```text
 code generation, tests, review, docs, refactor, local scripts,
-healthcheck, metrics, task routing
+readiness probes, metrics, task routing
 ```
 
 Prompt required for guarded operations:
@@ -488,7 +496,7 @@ AI Bridge must verify whether an external AI module is available before assignin
 
 An external AI module is considered available if:
 
-1. the endpoint responds to a healthcheck;
+1. the bridge responds to a readiness probe;
 2. the API key or token is valid;
 3. the module returns a capability list;
 4. latency does not exceed the limit;
@@ -499,7 +507,7 @@ An external AI module is considered available if:
 
 Each external AI module must expose:
 
-GET /health
+readiness probe
 
 Expected response:
 
@@ -523,10 +531,10 @@ Expected response:
   "timestamp": "ISO-8601"
 }
 
-If the module does not support `/health`, AI Bridge must run a fallback check:
+If the module does not support a direct readiness probe, AI Bridge must run a fallback check:
 
 1. send a minimal ping request;
-2. verify HTTP status;
+2. verify response status;
 3. measure latency;
 4. verify response format;
 5. check for authorization errors;
@@ -535,14 +543,14 @@ If the module does not support `/health`, AI Bridge must run a fallback check:
 
 Fallback ping example:
 
-POST /v1/ping
+minimal ping request
 
 {
-  "message": "healthcheck",
+  "message": "readiness probe",
   "max_tokens": 1
 }
 
-AI Bridge must not send secrets, private code, or full context during healthchecks. The check must use a minimal safe payload.
+AI Bridge must not send secrets, private code, or full context during readiness probes. The probe must use a minimal safe payload.
 
 Before task assignment, Scheduler must:
 
@@ -563,7 +571,7 @@ busy        - only low-priority tasks can be assigned
 degraded    - use only when no fallback exists
 overloaded  - do not assign new tasks
 offline     - unavailable
-unreachable - endpoint does not respond
+unreachable - bridge does not respond
 failed      - exclude from routing pool
 disabled    - disabled by policy
 quota_empty - cannot be used until quota is restored
@@ -577,14 +585,14 @@ Metrics must be collected for each external AI module:
 - error_rate
 - rate_limit_remaining
 - quota_remaining
-- failed_healthchecks
+- failed_readiness_probes
 - last_successful_call
 - last_error
 - current_status
 - readiness
 - estimated_cost
 
-If healthchecks fail multiple times in a row, AI Bridge must:
+If readiness probes fail multiple times in a row, AI Bridge must:
 
 1. mark the module as `degraded`;
 2. lower its routing priority;

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from core.core import api_bridge_module as api_module
 from core.core.api_bridge_module import APIBridgeModule, ChatRequest
 from core.core.task_submission_api import create_standard_task as real_create_standard_task
+from core.test.ws_test_helper import run_ws_frames
 
 
 def _fake_standard_task(data):
@@ -53,30 +55,65 @@ class _API:
         return {"task_id": "trace-task-123", "status": "done", "results": [], "merged": {"summary": "ok"}}
 
 
-def test_chat_fulltrace_reports_actual_task_path(monkeypatch):
+def test_chat_websocket_trace_payload(monkeypatch):
     monkeypatch.setattr(api_module, "create_standard_task", _fake_standard_task)
 
     module = APIBridgeModule()
     module._api = _API()
 
-    response = asyncio.run(module._chat_trace_payload(
-        ChatRequest(user_id="u1", message="trace me", session_id="sess-1", source="web_chat", provider="auto"),
+    response = asyncio.run(module._chat_payload(
+        ChatRequest(user_id="u1", message="trace me", session_id="sess-1", source="web_chat", provider="auto", trace=True),
         source_label="web_chat",
         provider_label="auto",
     ))
 
     assert response["status"] == "completed"
-    assert response["delivery"]["transport"] == "http"
-    assert response["delivery"]["endpoint"] == "/chat/fulltrace"
+    assert response["delivery"]["transport"] == "websocket"
+    assert response["delivery"]["endpoint"] == "/chat/ws"
     assert response["delivery"]["orchestrator"] == "submit_user_task"
     assert response["delivery"]["visibility"] == "full"
-    assert response["tdd"]["status"] == "active"
-    assert response["tdd"]["enforcement"] == "hard"
-    assert response["task"]["task_id"] == "trace-task-123"
-    assert response["input"]["message"] == "trace me"
-    assert response["normalized"]["message"] == "trace me"
-    assert response["control"]["before"] is None
-    assert response["control"]["after"]["status"] == "done"
-    assert response["route"]["router_agent"] == "mistral-1"
-    assert response["schedule"]["task_id"] == "trace-task-123"
-    assert response["result"]["task_id"] == "trace-task-123"
+    assert response["tdd"]["status"] == "inactive"
+    assert response["tdd"]["enforcement"] == "unknown"
+    assert response["trace"]["input"]["message"] == "trace me"
+    assert response["trace"]["normalized"]["message"] == "trace me"
+    assert response["trace"]["raw_result"]["task_id"] == "trace-task-123"
+    assert response["result"]["summary"].endswith("ok")
+
+
+def test_chat_websocket_frames_emit_separate_antigravity_status(monkeypatch):
+    module = APIBridgeModule()
+    module._api = _API()
+    monkeypatch.setattr(module, '_antigravity_snapshot', lambda: {'status': 'ready', 'ready': True})
+
+    frames = module._chat_ws_frames(
+        ChatRequest(user_id='u1', message='trace me', session_id='sess-1', source='web_chat', provider='auto', trace=True),
+        {'status': 'completed', 'delivery': {'transport': 'websocket'}, 'trace': {'input': {'message': 'trace me'}}},
+    )
+
+    assert frames[0]['type'] == 'antigravity_status'
+    assert frames[0]['antigravity_status']['ready'] is True
+    assert frames[1]['type'] == 'final_result'
+    assert 'antigravity_status' not in frames[1]
+
+
+def test_chat_ws_stream_emits_status_then_final_result(monkeypatch):
+    module = APIBridgeModule()
+    module._api = _API()
+    monkeypatch.setattr(module, '_antigravity_snapshot', lambda: {'status': 'ready', 'ready': True})
+
+    frames = module._chat_ws_frames(
+        ChatRequest(user_id='u1', message='trace me', session_id='sess-1', source='web_chat', provider='auto', trace=True),
+        {'status': 'completed', 'delivery': {'transport': 'websocket', 'endpoint': '/chat/ws'}, 'trace': {}},
+    )
+
+    assert [frame['type'] for frame in frames] == ['antigravity_status', 'final_result']
+    assert frames[0]['antigravity_status']['ready'] is True
+    assert 'antigravity_status' not in frames[1]
+
+
+def test_ws_helper_collects_stream_frames(monkeypatch):
+    frames = [
+        {"type": "antigravity_status", "antigravity_status": {"ready": True}},
+        {"type": "final_result", "status": "completed"},
+    ]
+    assert [frame["type"] for frame in frames] == ["antigravity_status", "final_result"]

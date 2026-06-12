@@ -37,13 +37,13 @@ class HealthcheckResult:
 
 class ExternalAIModuleHealthchecker:
     def check(self, module: Any) -> HealthcheckResult:
-        """Perform standard healthcheck against /health endpoint."""
+        """Perform a standard readiness probe against the agent bridge."""
         raise NotImplementedError
     
     def fallback_ping(self, module: Any) -> HealthcheckResult:
-        """Perform fallback ping if standard healthcheck is unavailable."""
+        """Perform a fallback ping if a direct readiness probe is unavailable."""
         raise NotImplementedError
 
     def is_available(self, module: Any, task: Any) -> bool:
-        """Check if module is available for a specific task."""
+        """Check if the module is available for a specific task."""
         raise NotImplementedError

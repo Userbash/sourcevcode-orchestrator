@@ -11,6 +11,23 @@ class HealthChecker:
         self.registry = registry
         self.rest_protocol = rest_protocol or RestProtocol()
         self.availability = ModelAvailability()
+        self._module_state_source = None
+
+    def set_module_state_source(self, module_state_source):
+        self._module_state_source = module_state_source
+
+    def module_state(self) -> dict[str, Any]:
+        if callable(self._module_state_source):
+            state = self._module_state_source()
+            return state if isinstance(state, dict) else {}
+        return {}
+
+    def antigravity_state(self) -> dict[str, Any]:
+        state = self.module_state().get("antigravity_status", {})
+        if isinstance(state, dict):
+            snapshot = state.get("snapshot")
+            return snapshot if isinstance(snapshot, dict) else state
+        return {}
 
     def check_providers(self) -> dict:
         return self.availability.check_all()

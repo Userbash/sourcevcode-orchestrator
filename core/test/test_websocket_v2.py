@@ -1,30 +1,9 @@
-import asyncio
-import websockets
-import json
+from __future__ import annotations
 
-async def test_ws():
-    uri = "ws://localhost:8000/chat/ws"
-    # Попробуем с указанием subprotocol, так как код сервера его ожидает
-    try:
-        async with websockets.connect(uri, subprotocols=["chat.json"]) as websocket:
-            print(f"Connected to {uri} with subprotocol 'chat.json'")
-            
-            # Send a ping-like test message
-            test_msg = {
-                "user_id": "test_user",
-                "message": "ping",
-                "session_id": "test_session",
-                "source": "cli_test"
-            }
-            await websocket.send(json.dumps(test_msg))
-            print(f"Sent: {test_msg}")
-            
-            # Wait for response
-            response = await websocket.recv()
-            print(f"Received: {response}")
-            
-    except Exception as e:
-        print(f"Connection failed: {e}")
+from core.test.ws_test_helper import compact_frame, run_ws_request
 
-if __name__ == "__main__":
-    asyncio.run(test_ws())
+
+def test_ws():
+    data = run_ws_request("ws://localhost:8000/chat/ws", compact_frame(user_id="test_user", session_id="test_session", message="ping", source="cli_test", provider="test"), open_timeout=30, recv_timeout=60)
+    assert data["type"] == "final_result"
+    assert data["status"] in {"completed", "done", "ok"}

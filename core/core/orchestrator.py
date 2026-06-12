@@ -29,6 +29,7 @@ from .smart_scheduler import SmartScheduler
 from .session_memory import MemoryScope, SessionMemory
 from .availability import ModelAvailability, ModelAvailabilityModule, ProviderStatus
 from .ai_activity_module import AIActivityModule
+from .antigravity_status_module import AntigravityStatusModule
 from .api_bridge_module import APIBridgeModule
 from .smart_decomposer_module import SmartDecomposerModule
 from .prompt_optimizer_module import PromptOptimizerModule
@@ -80,8 +81,11 @@ class Orchestrator:
     def emit_event(self, event_name: str, payload: dict[str, Any]) -> None:
         self.console.emit(event_name, str(payload))
 
+    def module_state(self) -> dict[str, Any]:
+        return self.module_manager.finalize()
+
     def query_state(self, module_name: str, key: str) -> Any:
-        return self.module_manager.finalize().get(module_name, {}).get(key)
+        return self.module_state().get(module_name, {}).get(key)
 
     def query_module_state(self, module_name: str, key: str) -> Any:
         return self.query_state(module_name, key)
@@ -110,6 +114,13 @@ class Orchestrator:
     @staticmethod
     def _easy_diffusion_autostart_enabled() -> bool:
         return os.getenv("AI_BRIDGE_AUTOSTART_EASY_DIFFUSION", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _antigravity_status_snapshot(self) -> dict[str, Any]:
+        module = self.module_manager.get_module("antigravity_status")
+        if module and hasattr(module, "snapshot"):
+            snapshot = module.snapshot()
+            return snapshot if isinstance(snapshot, dict) else {"value": snapshot}
+        return {}
 
     def _autostart_local_llm(self) -> None:
         if os.getenv("TESTING") == "true" or not self._local_llm_autostart_enabled():
@@ -170,6 +181,8 @@ class Orchestrator:
         self.scheduler = components.scheduler
         self.message_bus = components.message_bus
         self.healthcheck = components.healthcheck
+        if hasattr(self.healthcheck, "set_module_state_source"):
+            self.healthcheck.set_module_state_source(self.module_state)
         self.availability = ModelAvailability()
         self.feedback = components.feedback
         self.metrics = components.metrics
@@ -189,7 +202,7 @@ class Orchestrator:
         self.mimo_director.set_history_source(self.session_memory)
         self.mimo_director.set_kpi_source(self.kpi)
         self.mimo_director.set_quality_source(self.quality)
-        
+
         # Connect API for smart modules
         self.model_selector.set_api(self)
         self.router.set_api(self)
@@ -200,7 +213,9 @@ class Orchestrator:
         self.module_manager.register(OrchestratorControlModule())
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(ModelAvailabilityModule())
+        self.module_manager.register(AntigravityStatusModule())
         self.module_manager.register(APIBridgeModule())
+        self.mimo_director.set_status_source(self._antigravity_status_snapshot)
         self.module_manager.register(SmartDecomposerModule())
         self.module_manager.register(PromptOptimizerModule())
         self.module_manager.register(ChatBusModule())
@@ -318,7 +333,9 @@ class Orchestrator:
         self.module_manager.register(OrchestratorControlModule())
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(ModelAvailabilityModule())
+        self.module_manager.register(AntigravityStatusModule())
         self.module_manager.register(APIBridgeModule())
+        self.mimo_director.set_status_source(lambda: self.module_manager.get_module("antigravity_status").snapshot() if self.module_manager.is_loaded("antigravity_status") and hasattr(self.module_manager.get_module("antigravity_status"), "snapshot") else {})
         self.module_manager.register(SmartDecomposerModule())
         self.module_manager.register(PromptOptimizerModule())
         self.module_manager.register(ChatBusModule())
@@ -1100,7 +1117,7 @@ class Orchestrator:
             self.module_manager.after_task(task, result, module_context)
             finished_at = datetime.now(UTC)
             latency_ms = round((time.perf_counter() - started_perf) * 1000.0, 2)
-            model_usage_state = self.module_manager.finalize().get("model_usage", {})
+            model_usage_state = self.module_state().get("model_usage", {})
             history = model_usage_state.get("history", []) if isinstance(model_usage_state, dict) else []
             tokens_used = None
             if isinstance(history, list) and history:
@@ -1185,7 +1202,7 @@ class Orchestrator:
             
             if any(r.status != TaskStatus.DONE for r in results):
                 merged = self.merger.merge(final_results)
-                module_state = self.module_manager.finalize()
+                module_state = self.module_state()
                 return {"status": "failed", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
                 
             for task in ready_tasks:
@@ -1194,7 +1211,7 @@ class Orchestrator:
 
         merged = self.merger.merge(final_results)
         self.console.emit("DONE", "Все критерии выполнены (Асинхронный параллельный режим)")
-        module_state = self.module_manager.finalize()
+        module_state = self.module_state()
         return {"status": "done", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "disabled_agents": self.autoscaler.disabled_agents, "enabled_agents": self.autoscaler.enabled_agents, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
 
     async def run_async(self, root_task: Task) -> dict:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -52,15 +53,38 @@ class AntigravityManager:
         return self._run_host(["agy", *args], timeout=timeout)
 
     def _run_login_helper(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        return self._run_host(["python3", "core/scripts/antigravity_login.py", *args], timeout=timeout)
+        helper = Path(__file__).resolve().parents[2] / "scripts" / "antigravity_login.py"
+        return self._run_host(["python3", str(helper), *args], timeout=timeout)
 
     def verify_auth(self) -> dict[str, Any]:
         return self._run_login_helper(["--verify"], timeout=max(self.probe_timeout, 45))
 
-    def ensure_authorized(self) -> dict[str, Any]:
+    def _confirmed_ready(self) -> dict[str, Any]:
         verify = self.verify_auth()
         if verify.get("ok"):
             verify["action"] = "verify"
+            return verify
+
+        models = self._run_agy(["models"], timeout=max(self.probe_timeout, 45))
+        if models.get("ok"):
+            probe = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"], timeout=max(self.probe_timeout, 45))
+            if probe.get("ok"):
+                return {
+                    "ok": True,
+                    "action": "verify_after_login",
+                    "models": [line.strip() for line in models.get("stdout", "").splitlines() if line.strip()],
+                    "models_probe": models,
+                    "generation_probe": probe,
+                    "auth_probe": verify,
+                    "api_probe": None,
+                    "auth_mode": "agy_oauth",
+                }
+
+        return verify
+
+    def ensure_authorized(self) -> dict[str, Any]:
+        verify = self._confirmed_ready()
+        if verify.get("ok"):
             return verify
 
         if not self.auto_login_enabled():
@@ -68,12 +92,26 @@ class AntigravityManager:
             verify["auto_login_skipped"] = True
             return verify
 
-        login = self._run_login_helper(["--login", "--timeout", str(self.login_timeout)], timeout=self.login_timeout + 20)
-        login["action"] = "login"
-        if login.get("ok"):
-            return login
-        login["verify_error"] = verify.get("stderr") or verify.get("error")
-        return login
+        last: dict[str, Any] = verify
+        for attempt in range(1, 4):
+            login = self._run_login_helper(["--login", "--timeout", str(self.login_timeout)], timeout=self.login_timeout + 20)
+            login["action"] = "login"
+            login["attempt"] = attempt
+            if login.get("ok"):
+                confirmation = self._confirmed_ready()
+                if confirmation.get("ok"):
+                    confirmation["action"] = "login_confirmed"
+                    confirmation["attempt"] = attempt
+                    return confirmation
+                login["verify_error"] = confirmation.get("stderr") or confirmation.get("error") or "login did not produce a ready auth state"
+                login["post_login_verify"] = confirmation
+                last = login
+            else:
+                last = login
+            if attempt < 3:
+                import time
+                time.sleep(min(8.0, 1.5 * attempt))
+        return last
 
 
 
