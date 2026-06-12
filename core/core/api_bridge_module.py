@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from .kernel_protocol import KernelAPI, KernelModule
 from .task_submission_api import create_standard_task, normalize_user_payload
+from .data_plane_monitor import build_data_plane_snapshot, fetch_recent_rows, postgres_recover, postgres_status_summary
 from .dev_toolkit_module import DevToolkitModule, DevToolkitRequest
 
 logger = logging.getLogger("api_bridge_module")
@@ -129,6 +130,13 @@ class APIBridgeModule:
             "visibility": "full",
         }
 
+    def _postgres_snapshot(self) -> dict[str, Any]:
+        database_url = os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip()
+        rabbitmq_url = os.getenv("AI_BRIDGE_RABBITMQ_URL", "").strip()
+        snapshot = build_data_plane_snapshot(database_url=database_url, rabbitmq_url=rabbitmq_url)
+        recent = {table: fetch_recent_rows(database_url, table, limit=3) for table in ["memories", "vfs_files", "json_themes", "commands", "sessions", "users", "user_roles"]}
+        return {"status": "ok" if snapshot.ok else "degraded", **postgres_status_summary(snapshot), "snapshot": snapshot.as_dict(), "recent": recent}
+
     def _health_full_snapshot(self) -> dict[str, Any]:
         if not self._api:
             return {"status": "error", "message": "Kernel API not available"}
@@ -169,7 +177,8 @@ class APIBridgeModule:
 
         module_state = module_manager.finalize() if module_manager and hasattr(module_manager, "finalize") else {}
         sourcecraft = self._sourcecraft_snapshot()
-        overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0
+        postgres = self._postgres_snapshot()
+        overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0 and postgres.get("status") == "ok"
 
         return {
             "status": "ok" if overall_ok else "degraded",
@@ -179,6 +188,7 @@ class APIBridgeModule:
             "agents": agent_health,
             "modules": module_state,
             "sourcecraft": sourcecraft,
+            "postgres_state": postgres,
             "registry_size": len(registry.list_agents()) if registry and hasattr(registry, "list_agents") else 0,
         }
 
@@ -467,6 +477,16 @@ class APIBridgeModule:
         @app.get("/health/full")
         async def health_full_endpoint():
             return self._health_full_snapshot()
+
+        @app.get("/diagnostics/postgres")
+        async def diagnostics_postgres_endpoint():
+            return self._postgres_snapshot()
+
+        @app.post("/diagnostics/postgres/recover")
+        async def diagnostics_postgres_recover_endpoint():
+            database_url = os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip()
+            rabbitmq_url = os.getenv("AI_BRIDGE_RABBITMQ_URL", "").strip()
+            return postgres_recover(database_url, rabbitmq_url)
 
         @app.get("/antigravity/status")
         async def antigravity_status_endpoint():
