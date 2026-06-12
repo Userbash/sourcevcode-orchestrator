@@ -74,3 +74,29 @@ def test_settings_env_override(monkeypatch):
     settings = BridgeSettings.load(Path("core/CONFIG.example.yaml"))
 
     assert settings.orchestrator.max_parallel_tasks == 12
+
+
+from core.core.orchestration_config import OrchestrationConfig
+
+
+def test_orchestration_config_exposes_trained_memory_controls():
+    config = OrchestrationConfig.from_env()
+    assert isinstance(config.trained_memory_quality_thresholds_by_task, dict)
+    assert "plan" in config.trained_memory_quality_thresholds_by_task
+    assert config.high_risk_trained_memory_enabled is False
+
+
+def test_orchestration_config_cli_can_enable_high_risk_trained_memory():
+    config = OrchestrationConfig()
+    config.apply_cli_flags(high_risk_trained_memory=True)
+    assert config.high_risk_trained_memory_enabled is True
+
+
+from core.core.orchestration_config import OrchestrationConfig
+
+
+def test_orchestration_config_exposes_kpi_thresholds():
+    config = OrchestrationConfig()
+    assert config.kpi_thresholds_by_task["plan"] >= 0.7
+    assert config.kpi_routing_floor_by_task["review"] >= 0.7
+    assert config.trained_memory_degrade_ttl_sec >= 120

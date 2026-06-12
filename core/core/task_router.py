@@ -78,8 +78,12 @@ class TaskRouter:
             base -= a.metrics.queue_depth * 10
             base -= a.metrics.avg_latency_ms * 0.01
             base -= a.metrics.error_rate * 50
+            base += getattr(a.kpi, "agent_kpi", 1.0) * 18
+            base += a.metrics.quality_score * 20
+            base += a.metrics.review_score * 10
+            base += a.metrics.test_pass_rate * 10
             if envelope.priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
-                base += a.kpi.quality_score * 20
+                base += a.kpi.quality_score * 12
             return base
 
         valid_candidates = [c for c in candidates if score(c) > 0]
@@ -105,7 +109,7 @@ class TaskRouter:
         secure_pool = self._preferred_secure_agents(chosen_pool, task)
         scoring_pool = secure_pool or chosen_pool
 
-        agent = self.load_balancer.choose(scoring_pool, capability, task.priority)
+        agent = self.load_balancer.choose(scoring_pool, capability, task.priority, task)
         if not agent:
             if capability == "sourcecraft" or sourcecraft_task:
                 return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", self.estimate_complexity(task), "SourceCraft role handled by orchestrator module")

@@ -8,8 +8,21 @@ __test__ = False
 
 class TesterAgent(BaseAgent):
     __test__ = False
+
     def __init__(self, agent_id: str = "testeragent") -> None:
         super().__init__(agent_id, ['test', 'ci'])
 
+    @staticmethod
+    def _trusted_summary(memory_context: dict | None = None) -> str:
+        memory = memory_context or {}
+        if not memory.get("trained_memory_trusted"):
+            return ""
+        brief = str(memory.get("trained_memory_brief", "") or "").strip()
+        return brief[:180] if len(brief) >= 40 else ""
+
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
-        return self.result(task, "Created and ran tests for acceptance criteria.")
+        trained = self._trusted_summary(memory_context)
+        summary = "Created and ran tests for acceptance criteria."
+        if trained:
+            summary = f"{summary} Trained memory used: {trained}"
+        return self.result(task, summary)

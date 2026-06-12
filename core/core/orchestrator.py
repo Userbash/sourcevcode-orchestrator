@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from datetime import UTC, datetime
 
@@ -46,6 +47,7 @@ from .provider_budget_router import ProviderBudgetRouter
 from .cold_boot_module import ColdBootModule
 from .voice_listener_module import VoiceListenerModule
 from .kpi_event_logger import KPIEventLogger
+from .effectiveness_dashboard import build_kpi_dashboard
 from .ui_design_system_module import UIDesignSystemModule
 from .ui_anti_template_module import UIAntiTemplateModule
 from .frontend_engineering_bridge_module import FrontendEngineeringBridgeModule
@@ -117,6 +119,10 @@ class Orchestrator:
     def _easy_diffusion_autostart_enabled() -> bool:
         return os.getenv("AI_BRIDGE_AUTOSTART_EASY_DIFFUSION", "false").strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _testing_mode() -> bool:
+        return os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
+
     def _antigravity_status_snapshot(self) -> dict[str, Any]:
         module = self.module_manager.get_module("antigravity_status")
         if module and hasattr(module, "snapshot"):
@@ -125,7 +131,7 @@ class Orchestrator:
         return {}
 
     def _autostart_local_llm(self) -> None:
-        if os.getenv("TESTING") == "true" or not self._local_llm_autostart_enabled():
+        if self._testing_mode() or not self._local_llm_autostart_enabled():
             return
 
         module = self.module_manager.get_module("local_llm")
@@ -145,7 +151,7 @@ class Orchestrator:
             self.log("warning", f"[LOCAL_LLM] Autostart could not confirm readiness for {module.model_name}.")
 
     def _autostart_easy_diffusion(self) -> None:
-        if os.getenv("TESTING") == "true" or not self._easy_diffusion_autostart_enabled():
+        if self._testing_mode() or not self._easy_diffusion_autostart_enabled():
             return
 
         module = self.module_manager.get_module("easy_diffusion")
@@ -189,6 +195,7 @@ class Orchestrator:
         self.feedback = components.feedback
         self.metrics = components.metrics
         self.kpi = components.kpi
+        self.kpi.task_thresholds = dict(self.orchestration_config.kpi_thresholds_by_task)
         self.quality = components.quality
         self.merger = components.merger
         self.console = components.console
@@ -198,8 +205,18 @@ class Orchestrator:
         self.memory_consolidator = components.memory_consolidator
         self.provider_budget_router = ProviderBudgetRouter()
         self.kpi_events = KPIEventLogger.from_env()
+        if getattr(self.orchestration_config, "kpi_rejection_summary_path", ""):
+            self.kpi_events.summary_path = Path(self.orchestration_config.kpi_rejection_summary_path)
         self._postgres_watchdog_stop = threading.Event()
         self._postgres_watchdog_thread: threading.Thread | None = None
+        self._training_consolidation_stop = threading.Event()
+        self._kpi_dashboard_stop = threading.Event()
+        self._training_consolidation_lock = threading.Lock()
+        self._training_consolidation_queue: list[dict[str, Any]] = []
+        self._training_consolidation_task: asyncio.Task[None] | None = None
+        self._kpi_dashboard_task: asyncio.Task[None] | None = None
+        self._training_consolidation_interval_sec = max(60, int(self.orchestration_config.training_consolidation_interval_sec))
+        self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
         self.mimo_director = MimoOrchestrationDirector()
         self.mimo_director.set_memory_source(self.session_memory)
@@ -295,7 +312,7 @@ class Orchestrator:
 
         # Load local_llm before autostart so the module is available for
         # advisory context and readiness checks during kernel boot.
-        if os.getenv("TESTING") != "true":
+        if not self._testing_mode():
             self.module_manager.load("local_llm")
         self._autostart_local_llm()
         self._autostart_easy_diffusion()
@@ -345,6 +362,116 @@ class Orchestrator:
     def _stop_postgres_watchdog(self) -> None:
         self._postgres_watchdog_stop.set()
 
+    def _training_memory_domain(self, task: Task) -> str:
+        task_type = task.type.value.lower()
+        return {
+            "plan": "prompt:plan",
+            "review": "prompt:review",
+            "test": "prompt:test",
+            "code": "prompt:code",
+            "docs": "prompt:docs",
+            "research": "prompt:research",
+        }.get(task_type, f"prompt:{task_type}")
+
+    def _enqueue_training_consolidation(self, task: Task, result: AgentResult) -> None:
+        memory_domain = self._training_memory_domain(task)
+        payload = {
+            "session_id": task.session_id or task.task_id,
+            "agent_id": result.agent_id or "orchestrator",
+            "task_type": task.type.value,
+            "memory_domain": memory_domain,
+            "summary": str(result.output.get("summary", "") or "").strip(),
+            "source_memory_ids": [],
+            "quality_score": max(0.0, min(1.0, float(result.confidence))),
+            "metadata": {
+                "task_id": task.task_id,
+                "status": result.status.value,
+                "memory_domain": memory_domain,
+            },
+        }
+        if not payload["summary"]:
+            payload["summary"] = f"Successful {task.type.value} task {task.task_id}"
+        with self._training_consolidation_lock:
+            self._training_consolidation_queue.append(payload)
+        if self._training_consolidation_task is None or self._training_consolidation_task.done():
+            self._flush_training_consolidation_queue()
+
+    def _flush_training_consolidation_queue(self) -> int:
+        drained: list[dict[str, Any]] = []
+        with self._training_consolidation_lock:
+            if self._training_consolidation_queue:
+                drained = self._training_consolidation_queue[:]
+                self._training_consolidation_queue.clear()
+        if not drained:
+            return 0
+
+        processed = 0
+        for item in drained:
+            try:
+                self.memory_consolidator.consolidate_successful_task(
+                    session_id=str(item["session_id"]),
+                    agent_id=str(item["agent_id"]),
+                    task_type=str(item["task_type"]),
+                    summary=str(item["summary"]),
+                    source_memory_ids=list(item.get("source_memory_ids") or []),
+                    quality_score=float(item.get("quality_score", 0.0)),
+                    metadata=dict(item.get("metadata") or {}),
+                )
+                processed += 1
+            except Exception:
+                self.log("warning", f"[MEMORY] Failed to consolidate trained memory for task_type={item.get('task_type')}")
+        return processed
+
+    async def _training_consolidation_loop(self) -> None:
+        while not self._training_consolidation_stop.is_set():
+            await asyncio.sleep(self._training_consolidation_interval_sec)
+            self._flush_training_consolidation_queue()
+
+    def _refresh_kpi_dashboard(self) -> dict[str, Any]:
+        kpi_log = Path(getattr(self.kpi_events, "file_path", "memory_store/kpi_events.jsonl"))
+        rolling = Path("core/mimo/profiles/rolling_kpi_store.json")
+        summary = Path(getattr(self.orchestration_config, "kpi_dashboard_output_path", "memory_store/kpi_dashboard_24h.json") or "memory_store/kpi_dashboard_24h.json")
+        dashboard = build_kpi_dashboard(kpi_log_path=kpi_log, rolling_kpi_path=rolling, summary_path=summary)
+        self.kpi_events.write({"event_type": "kpi_dashboard_refresh", "tasks_total": dashboard.get("task_lifecycle", {}).get("tasks_total", 0), "rejection_rate": dashboard.get("trained_memory_rejection", {}).get("rejection_rate", 0.0), "dashboard_path": str(summary)})
+        return dashboard
+
+    async def _kpi_dashboard_loop(self) -> None:
+        while not self._kpi_dashboard_stop.is_set():
+            await asyncio.sleep(self._kpi_dashboard_interval_sec)
+            try:
+                self._refresh_kpi_dashboard()
+            except Exception as exc:
+                self.log("warning", f"[KPI] dashboard refresh failed: {exc}")
+
+    def _kpi_rejection_summary(self) -> dict[str, Any]:
+        counters = self.metrics.snapshot().get("counters", {})
+        accepted = 0
+        rejected = 0
+        by_task: dict[str, dict[str, int]] = {}
+        for key, value in counters.items():
+            if not key.startswith("trained_memory."):
+                continue
+            parts = key.split(".")
+            if len(parts) < 3:
+                continue
+            task_type = parts[1]
+            bucket = by_task.setdefault(task_type, {"accepted": 0, "rejected": 0})
+            if parts[2] == "accepted":
+                accepted += int(value)
+                bucket["accepted"] += int(value)
+            elif parts[2] == "rejected":
+                rejected += int(value)
+                bucket["rejected"] += int(value)
+        total = accepted + rejected
+        rate = round(rejected / total, 4) if total else 0.0
+        return {
+            "summary_type": "trained_memory_rejection_summary",
+            "accepted": accepted,
+            "rejected": rejected,
+            "rejection_rate": rate,
+            "by_task": by_task,
+        }
+
     def _init_original(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900) -> None:
         self.local_agents = {}
         self.results = {}
@@ -367,6 +494,7 @@ class Orchestrator:
         self.feedback = components.feedback
         self.metrics = components.metrics
         self.kpi = components.kpi
+        self.kpi.task_thresholds = dict(self.orchestration_config.kpi_thresholds_by_task)
         self.quality = components.quality
         self.merger = components.merger
         self.console = components.console
@@ -375,6 +503,8 @@ class Orchestrator:
         self.session_memory = components.session_memory
         self.provider_budget_router = ProviderBudgetRouter()
         self.kpi_events = KPIEventLogger.from_env()
+        if getattr(self.orchestration_config, "kpi_rejection_summary_path", ""):
+            self.kpi_events.summary_path = Path(self.orchestration_config.kpi_rejection_summary_path)
         self._postgres_watchdog_stop = threading.Event()
         self._postgres_watchdog_thread: threading.Thread | None = None
 
@@ -438,6 +568,8 @@ class Orchestrator:
 
     def shutdown(self) -> None:
         self._stop_postgres_watchdog()
+        self._training_consolidation_stop.set()
+        self._kpi_dashboard_stop.set()
 
     def loaded_kernel_modules(self) -> list[str]:
         return self.module_manager.loaded_modules()
@@ -689,15 +821,39 @@ class Orchestrator:
             identifier = task.task_id
 
         context: dict[str, object] = {}
-        if task.cache_policy == "write_only":
-            return context
-        for key in task.memory_keys:
-            normalized = key.lower()
-            if "thought" in normalized or normalized.endswith(":errors") or normalized == "errors":
-                continue
-            value = self.session_memory.get(scope, identifier, key)
-            if value is not None:
-                context[key] = value
+        if task.cache_policy != "write_only":
+            for key in task.memory_keys:
+                normalized = key.lower()
+                if "thought" in normalized or normalized.endswith(":errors") or normalized == "errors":
+                    continue
+                value = self.session_memory.get(scope, identifier, key)
+                if value is not None:
+                    context[key] = value
+
+        config = getattr(self, "orchestration_config", None)
+        high_risk_trained_memory = bool(getattr(config, "high_risk_trained_memory_enabled", False)) if config else False
+        task_type = task.type.value.lower()
+        if high_risk_trained_memory or task_type in {"plan", "review", "test", "code", "docs", "research"}:
+            trained_domain = self._training_memory_domain(task)
+            token_limit = 180 if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST} else 120
+            trained_brief = self.session_memory.hybrid.retrieve_trained_memory_brief(
+                session_id=task.session_id or task.task_id,
+                agent_id=agent_id,
+                memory_domain=trained_domain,
+                top_k=1,
+                token_limit=token_limit,
+                task_type=task_type,
+                allow_trained_memory=high_risk_trained_memory,
+            )
+            if trained_brief:
+                context["trained_memory_domain"] = trained_domain
+                context["trained_memory_brief"] = trained_brief
+                context["trained_memory_trusted"] = len(trained_brief) >= 80 and "Quality:" in trained_brief
+                context["trained_memory_disabled_for_risk"] = False
+            else:
+                context["trained_memory_disabled_for_risk"] = not high_risk_trained_memory
+        else:
+            context["trained_memory_disabled_for_risk"] = True
         return context
 
     def _model_usage_module(self) -> ModelUsageModule | None:
@@ -842,6 +998,8 @@ class Orchestrator:
         
         started_at = datetime.now(UTC)
         started_perf = time.perf_counter()
+        lifecycle_logged = False
+        lifecycle_payload: dict[str, Any] | None = None
         self.log("info", f"[PRE-FLIGHT] Verifying readiness for task {task.task_id}")
         
         # Try to run parallel checks if we have a loop, otherwise skip or run sync
@@ -1179,7 +1337,7 @@ class Orchestrator:
                     if isinstance(item, dict) and item.get("task_id") == task.task_id:
                         tokens_used = item.get("tokens_used")
                         break
-            self.kpi_events.write({
+            lifecycle_payload = {
                 "event_type": "task_lifecycle",
                 "task_id": task.task_id,
                 "task_type": task.type.value,
@@ -1195,7 +1353,14 @@ class Orchestrator:
                 "latency_ms": latency_ms,
                 "tokens_used": tokens_used,
                 "errors_count": len(result.errors or []),
-            })
+            }
+            self.kpi_events.write(lifecycle_payload)
+            self.kpi_events.append_fallback(lifecycle_payload)
+            lifecycle_logged = True
+
+            rejection_summary = self._kpi_rejection_summary()
+            self.kpi_events.write(rejection_summary)
+            self.kpi_events.write_summary({**rejection_summary, "summary_path": str(self.kpi_events.summary_path) if getattr(self.kpi_events, "summary_path", None) else ""})
 
             if choice.requires_secondary_review:
                 self.console.emit(
@@ -1203,6 +1368,8 @@ class Orchestrator:
                     f"task_id={task.task_id} enabled=true reason={choice.reason}",
                 )
 
+            if result.status == TaskStatus.DONE and quality.passed:
+                self._enqueue_training_consolidation(task, result)
             self.memory_consolidator.consolidate(session_id=task.session_id or task.task_id, agent_id=agent_id)
             if hasattr(self.message_bus, "publish_session_insights"):
                 self.message_bus.publish_session_insights(task.session_id or task.task_id, {"task_id": task.task_id, "agent_id": agent_id, "summary": command_summary, "status": result.status.value})
@@ -1218,6 +1385,30 @@ class Orchestrator:
                     return AgentResult(task.task_id, fix_result.agent_id, TaskStatus.DONE, fix_result.output, min(0.8, fix_result.confidence), fix_result.errors, fix_result.next_recommendations, fix_result.provider, fix_result.model_name)
             return result
         finally:
+            if not lifecycle_logged:
+                fallback_payload = lifecycle_payload or {
+                    "event_type": "task_lifecycle",
+                    "task_id": task.task_id,
+                    "task_type": task.type.value,
+                    "priority": task.priority.value,
+                    "status": "unknown",
+                    "agent_id": getattr(locals().get("result", None), "agent_id", agent_id if 'agent_id' in locals() else "orchestrator"),
+                    "provider": module_context.get("provider") if 'module_context' in locals() else None,
+                    "model": module_context.get("model") if 'module_context' in locals() else None,
+                    "fallback_count": fallback_count if 'fallback_count' in locals() else 0,
+                    "fallback_used": bool(fallback_count) if 'fallback_count' in locals() else False,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "latency_ms": round((time.perf_counter() - started_perf) * 1000.0, 2),
+                    "tokens_used": None,
+                    "errors_count": len(getattr(locals().get("result", None), "errors", []) or []),
+                    "task_lifecycle_fallback": True,
+                }
+                try:
+                    self.kpi_events.write(fallback_payload)
+                    self.kpi_events.append_fallback(fallback_payload)
+                except Exception:
+                    pass
             if agent_record:
                 self.lifecycle.mark_idle(agent_record)
                 self.autoscaler.scale_down_idle()
@@ -1294,5 +1485,35 @@ class Orchestrator:
 
     async def listen_for_tasks(self):
         from .task_listener import TaskListener
+        if self._training_consolidation_task is None or self._training_consolidation_task.done():
+            self._training_consolidation_stop.clear()
+            self._training_consolidation_task = asyncio.create_task(self._training_consolidation_loop())
+        if self._kpi_dashboard_task is None or self._kpi_dashboard_task.done():
+            self._kpi_dashboard_stop.clear()
+            try:
+                self._refresh_kpi_dashboard()
+            except Exception as exc:
+                self.log("warning", f"[KPI] initial dashboard refresh failed: {exc}")
+            self._kpi_dashboard_task = asyncio.create_task(self._kpi_dashboard_loop())
         listener = TaskListener(self)
-        await listener.start()
+        try:
+            await listener.start()
+        finally:
+            self._training_consolidation_stop.set()
+            self._kpi_dashboard_stop.set()
+            if self._training_consolidation_task is not None:
+                self._training_consolidation_task.cancel()
+                try:
+                    await self._training_consolidation_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            if self._kpi_dashboard_task is not None:
+                self._kpi_dashboard_task.cancel()
+                try:
+                    await self._kpi_dashboard_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass

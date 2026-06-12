@@ -84,25 +84,75 @@ class PromptOptimizerModule:
         task_type = getattr(task, "type", None)
         return str(getattr(task_type, "value", task_type) or "unknown")
 
+    @staticmethod
+    def _trained_memory_domain_for_task(task: Task) -> str:
+        task_type = str(getattr(task.type, "value", task.type) or "unknown").lower()
+        return {
+            "plan": "prompt:plan",
+            "review": "prompt:review",
+            "test": "prompt:test",
+            "code": "prompt:code",
+            "docs": "prompt:docs",
+            "research": "prompt:research",
+        }.get(task_type, f"prompt:{task_type}")
+
+    @staticmethod
+    def _memory_token_budget(task: Task) -> int:
+        if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST}:
+            return 240
+        if task.type in {TaskType.CODE, TaskType.FIX}:
+            return 220
+        if task.type in {TaskType.DOCS, TaskType.RESEARCH}:
+            return 180
+        return 160
+
+    @staticmethod
+    def _trained_memory_trusted(brief: str, memory_domain: str, task: Task) -> bool:
+        if not brief or len(brief) < 80:
+            return False
+        if f"{task.type.value}" not in memory_domain:
+            return False
+        if "Quality:" not in brief:
+            return False
+        return True
+
+    def _task_quality_threshold(self, task: Task) -> float:
+        if not self._api:
+            return 0.75
+        config = self._api.get_context("orchestration_config")
+        if not config:
+            return 0.75
+        thresholds = getattr(config, "trained_memory_quality_thresholds_by_task", {}) or {}
+        key = str(task.type.value).lower()
+        return float(thresholds.get(key, getattr(config, "trained_memory_quality_threshold", 0.75)) or 0.75)
 
     def _trained_memory_context(self, task: Task) -> dict[str, Any]:
         if not self._api:
             return {"brief": "", "has_trained_memory": False}
+        if self._is_high_risk_task(task):
+            self._record_trained_memory_outcome(task, accepted=False, reason="high_risk_disabled")
+            return {"brief": "", "has_trained_memory": False, "trusted": False, "disabled_for_risk": True}
         memory = self._api.get_context("session_memory")
         if not memory or not hasattr(memory, "hybrid"):
             return {"brief": "", "has_trained_memory": False}
         hybrid = memory.hybrid
         session_id = task.session_id or "default"
         agent_id = task.assigned_model or task.required_capability or self._task_type_label(task)
-        domain = f"prompt:{self._task_type_label(task)}"
+        domain = self._trained_memory_domain_for_task(task)
+        top_k = 2 if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST} else 1
+        quality_threshold = self._task_quality_threshold(task)
         try:
             if hasattr(hybrid, "get_trained_memory_context"):
-                return hybrid.get_trained_memory_context(
+                ctx = hybrid.get_trained_memory_context(
                     session_id=session_id,
                     agent_id=agent_id,
                     memory_domain=domain,
-                    top_k=3,
+                    top_k=top_k,
                 )
+                brief = str(ctx.get("brief") or "").strip()
+                ctx["trusted"] = self._trained_memory_trusted(brief, str(ctx.get("memory_domain") or domain), task) and self._task_quality_threshold(task) <= 0.95
+                self._record_trained_memory_outcome(task, accepted=bool(ctx.get("trusted")), reason="trusted" if ctx.get("trusted") else "untrusted")
+                return ctx
         except Exception:
             pass
         try:
@@ -111,14 +161,18 @@ class PromptOptimizerModule:
                     session_id=session_id,
                     agent_id=agent_id,
                     memory_domain=domain,
-                    top_k=3,
+                    top_k=top_k,
+                    token_limit=self._memory_token_budget(task),
                 )
+                trusted = self._trained_memory_trusted(brief, domain, task) and self._task_quality_threshold(task) <= 0.95
+                self._record_trained_memory_outcome(task, accepted=trusted, reason="trusted" if trusted else "untrusted")
                 return {
                     "brief": brief,
                     "memory_domain": domain,
                     "session_id": session_id,
                     "agent_id": agent_id,
                     "has_trained_memory": bool(brief),
+                    "trusted": trusted,
                 }
         except Exception:
             pass
@@ -127,7 +181,8 @@ class PromptOptimizerModule:
     def apply_trained_memory(self, task: Task, base_instruction: str) -> str:
         trained = self._trained_memory_context(task)
         brief = str(trained.get("brief") or "").strip()
-        if not brief:
+        if not brief or not trained.get("trusted"):
+            self._record_trained_memory_outcome(task, accepted=False, reason="not_trusted")
             return base_instruction
         return "\n".join([base_instruction, "TRAINED MEMORY:", brief])
 
@@ -163,9 +218,9 @@ class PromptOptimizerModule:
             context_lines.append(f"recent_successful_history_items: {len(history)}")
         trained = self._trained_memory_context(task)
         brief = str(trained.get("brief") or "").strip()
-        if brief:
-            context_lines.append(f"trained_memory_domain: {trained.get("memory_domain", "")}")
-            context_lines.append(f"trained_memory_brief: {brief[:360]}")
+        if brief and trained.get("trusted"):
+            context_lines.append(f"trained_memory_domain: {trained.get('memory_domain', '')}")
+            context_lines.append(f"trained_memory_brief: {brief[:240]}")
         decisions = self._memory_decisions(task)
         if decisions:
             context_lines.append(f"memory_decisions: {len(decisions)}")
@@ -296,6 +351,42 @@ class PromptOptimizerModule:
             "if the request is ambiguous, state assumptions explicitly instead of guessing",
         ]
 
+    def _is_high_risk_task(self, task: Task) -> bool:
+        if not self._api:
+            return False
+        config = self._api.get_context("orchestration_config")
+        if config and hasattr(config, "should_ask_confirmation"):
+            try:
+                return bool(config.should_ask_confirmation(task))
+            except Exception:
+                pass
+        selector = self._api.get_context("model_selector")
+        if selector and hasattr(selector, "classify"):
+            try:
+                from .models import Complexity
+                complexity = selector.classify(task)
+                return complexity in {Complexity.HIGH, Complexity.CRITICAL}
+            except Exception:
+                return False
+        return False
+
+    def _record_trained_memory_outcome(self, task: Task, *, accepted: bool, reason: str) -> None:
+        metrics = getattr(self._api, "metrics", None)
+        if metrics and hasattr(metrics, "record_trained_memory_outcome"):
+            try:
+                metrics.record_trained_memory_outcome(task_type=self._task_type_label(task), accepted=accepted, reason=reason)
+            except Exception:
+                pass
+        memory = self._api.get_context("session_memory") if self._api else None
+        hybrid = getattr(memory, "hybrid", None) if memory else None
+        if hybrid and hasattr(hybrid, "record_trained_memory_outcome"):
+            try:
+                config = self._api.get_context("orchestration_config") if self._api else None
+                threshold = float(getattr(config, "trained_memory_quality_threshold", 0.75) or 0.75)
+                hybrid.record_trained_memory_outcome(session_id=task.session_id or "default", task_type=self._task_type_label(task), accepted=accepted, threshold=threshold, reason=reason)
+            except Exception:
+                pass
+
     def _render_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None) -> str:
         objective = self._extract_objective(task)
         context_lines = self._extract_context(task, history, offload)
@@ -362,7 +453,8 @@ class PromptOptimizerModule:
 
     def _compose_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None) -> str:
         refined = self._render_instruction(task, history, offload)
-        refined = self.apply_trained_memory(task, refined)
+        if not self._is_high_risk_task(task):
+            refined = self.apply_trained_memory(task, refined)
 
         if history:
             compact_history = []

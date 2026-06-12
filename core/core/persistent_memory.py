@@ -45,6 +45,16 @@ class TrainedMemoryRecord:
     updated_at: str = ""
 
 
+TASK_TRAINED_MEMORY_DOMAINS: dict[str, str] = {
+    "plan": "prompt:plan",
+    "review": "prompt:review",
+    "test": "prompt:test",
+    "code": "prompt:code",
+    "docs": "prompt:docs",
+    "research": "prompt:research",
+}
+
+
 def normalize_database_url(database_url: str) -> str:
     if database_url.startswith("postgresql+asyncpg://"):
         return "postgresql://" + database_url.removeprefix("postgresql+asyncpg://")
@@ -643,6 +653,42 @@ class PersistentMemoryManager:
             quality_score=min(1.0, 0.4 + 0.1 * len(memories)),
         )
         return json.dumps(summary, ensure_ascii=True, default=str)
+
+    def consolidate_successful_task(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        task_type: str,
+        summary: str,
+        source_memory_ids: list[int] | None = None,
+        quality_score: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        normalized_task_type = str(task_type).strip().lower()
+        memory_domain = TASK_TRAINED_MEMORY_DOMAINS.get(normalized_task_type, f"prompt:{normalized_task_type}")
+        payload = {
+            "session_id": self.upsert_session(session_id, agent_id=agent_id),
+            "source_session_id": session_id,
+            "agent_id": agent_id,
+            "task_type": normalized_task_type,
+            "summary": summary,
+            "source_memory_ids": source_memory_ids or [],
+            "quality_score": max(0.0, min(1.0, float(quality_score))),
+        }
+        merged_metadata = {"source": "consolidate_successful_task", "task_type": normalized_task_type}
+        if metadata:
+            merged_metadata.update(metadata)
+        self.store_trained_memory(
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_domain=memory_domain,
+            content=payload,
+            source_memory_ids=source_memory_ids or [],
+            metadata=merged_metadata,
+            quality_score=max(0.0, min(1.0, float(quality_score))),
+        )
+        return json.dumps(payload, ensure_ascii=True, default=str)
 
     @staticmethod
     def serialize_payload(payload: Any) -> str:

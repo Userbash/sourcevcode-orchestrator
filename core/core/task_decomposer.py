@@ -143,6 +143,25 @@ class TaskDecomposer:
             task.routing_hints = {}
         task.routing_hints.setdefault("required_capability", task.required_capability)
         task.routing_hints.setdefault("sourcecraft_work", task.required_capability == "sourcecraft")
+        task_type = getattr(task.type, "value", task.type)
+        kpi_floor = {
+            "plan": 0.72,
+            "review": 0.76,
+            "test": 0.74,
+        }.get(str(task_type).lower(), 0.65)
+        local_llm = None
+        try:
+            api = getattr(self.model_selector, "_api", None)
+            if api and hasattr(api, "get_module"):
+                local_llm = api.get_module("local_llm")
+        except Exception:
+            local_llm = None
+        if local_llm and getattr(local_llm, "ready", False):
+            kpi_floor = min(0.95, kpi_floor + 0.05)
+            task.routing_hints.setdefault("kpi_floor_source", "local_llm")
+        else:
+            task.routing_hints.setdefault("kpi_floor_source", "default")
+        task.routing_hints.setdefault("kpi_floor", kpi_floor)
 
     def _draft_layers_to_plan(self, task: Task, draft: dict[str, Any]) -> ExecutionPlan:
         layers = draft.get("layers") if isinstance(draft.get("layers"), list) else []
