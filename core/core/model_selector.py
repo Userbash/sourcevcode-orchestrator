@@ -177,14 +177,28 @@ class ModelSelector:
 
         task_family = str(local.get("task_family") or "general")
         should_delegate = bool(local.get("should_delegate"))
+        preferred_model = str(local.get("preferred_model") or "").strip()
+        budget_pressure = str(local.get("budget_pressure") or "normal")
+        context_depth_hint = int(local.get("context_depth") or 0)
+        profile_weights = local.get("profile_weights") if isinstance(local.get("profile_weights"), dict) else {}
         if not should_delegate and task.type not in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}:
             return None
 
         if task.type in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} and complexity in {Complexity.LOW, Complexity.MEDIUM}:
-            return ModelChoice(MODEL_LOCAL_SMALL, "local", complexity, params=ModelParams(temperature=0.5, context_depth=1), requires_secondary_review=False, reason=f"local_llm_advisory_{task_family}")
+            model_name = preferred_model or MODEL_LOCAL_SMALL
+            temperature = 0.35 if budget_pressure in {"high", "medium"} else 0.5
+            context_depth = max(1, context_depth_hint or 0)
+            if profile_weights:
+                context_depth += 1 if float(profile_weights.get("quality", 1.0)) > 1.2 else 0
+            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=False, reason=f"local_llm_advisory_{task_family}")
 
         if task.type == TaskType.PLAN and should_delegate and complexity in {Complexity.LOW, Complexity.MEDIUM}:
-            return ModelChoice(MODEL_LOCAL_SMALL, "local", complexity, params=ModelParams(temperature=0.8, context_depth=3), requires_secondary_review=True, reason=f"local_llm_plan_hand_off_{task_family}")
+            model_name = preferred_model or MODEL_LOCAL_SMALL
+            temperature = 0.65 if budget_pressure == "high" else 0.8
+            context_depth = max(2, context_depth_hint or 0)
+            if profile_weights:
+                context_depth += 1 if float(profile_weights.get("quality", 1.0)) > 1.25 else 0
+            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=True, reason=f"local_llm_plan_hand_off_{task_family}")
 
         return None
 

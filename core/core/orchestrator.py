@@ -53,6 +53,7 @@ from .code_readability_module import CodeReadabilityModule
 from .dev_toolkit_module import DevToolkitModule
 from .dependency_manager import DependencyManager
 from .self_diagnostic_module import SelfDiagnosticModule
+from ..mimo.proxy import MimoOrchestrationDirector
 
 
 
@@ -183,6 +184,11 @@ class Orchestrator:
         self.provider_budget_router = ProviderBudgetRouter()
         self.kpi_events = KPIEventLogger.from_env()
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
+        self.mimo_director = MimoOrchestrationDirector()
+        self.mimo_director.set_memory_source(self.session_memory)
+        self.mimo_director.set_history_source(self.session_memory)
+        self.mimo_director.set_kpi_source(self.kpi)
+        self.mimo_director.set_quality_source(self.quality)
         
         # Connect API for smart modules
         self.model_selector.set_api(self)
@@ -236,6 +242,10 @@ class Orchestrator:
         self.module_manager.load("ai_activity")
         self.module_manager.load("orchestrator_control")
         self.module_manager.load("model_usage")
+        self.mimo_director.set_budget_module(self.module_manager.get_module("model_usage"))
+        self.module_manager.load("unified_vfs")
+        self.mimo_director.set_vfs_source(self.module_manager.get_module("unified_vfs"))
+        self.mimo_director.safe_sync()
         self.module_manager.load("model_availability")
         self.module_manager.load("api_bridge")
         self.module_manager.load("smart_decomposer")
@@ -243,7 +253,6 @@ class Orchestrator:
         self.module_manager.load("chat_bus")
         self.module_manager.load("trigger_dispatcher")
         self.module_manager.load("json_themes")
-        self.module_manager.load("unified_vfs")
         self.module_manager.load("cold_boot")
         self.module_manager.load("ui_design_system")
         self.module_manager.load("ui_anti_template")
@@ -775,8 +784,29 @@ class Orchestrator:
 
         capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
         advisory_context = self._build_decomposition_advisory(task)
+        mimo_model_name = task.assigned_model or "unknown"
+        mimo_memory_context = advisory_context.get("local_llm") if isinstance(advisory_context, dict) else None
+        selection_context = self.mimo_director.build_selection_context(
+            mimo_model_name,
+            task,
+            current_budget=float(os.getenv("MIMO_REMAINING_BUDGET", "999999")),
+            memory_context=mimo_memory_context,
+        )
+        local_llm_context = dict(advisory_context.get("local_llm") or {})
+        local_llm_context.update(selection_context)
+        local_llm_context.setdefault("ready", True)
+        local_llm_context.setdefault("should_delegate", True)
+        local_llm_context.setdefault("task_family", "mimo")
+        advisory_context["local_llm"] = local_llm_context
+        advisory_context["mimo"] = selection_context
 
         choice = self.model_selector.select(task, advisory_context=advisory_context)
+        choice = self.mimo_director.validate_and_correct(
+            choice,
+            task,
+            current_budget=float(os.getenv("MIMO_REMAINING_BUDGET", "999999")),
+            memory_context=mimo_memory_context,
+        )
 
         self.console.emit(
             "MODEL_SELECTION",
@@ -1008,6 +1038,17 @@ class Orchestrator:
                 self.metrics.record_result(agent_record, result)
                 self.kpi.apply_priority_policy(agent_record)
             self.results[task.task_id] = result
+            try:
+                self.mimo_director.register_execution_result(
+                    result.model_name or choice.model_name,
+                    result.status == TaskStatus.DONE,
+                    time.perf_counter() - started_perf,
+                    task=task,
+                    quality_score=quality.score,
+                    provider=agent_record.provider if agent_record else choice.provider,
+                )
+            except Exception:
+                pass
             command_summary = result.output.get("summary", "")
             raw_thoughts = result.output.get("thoughts")
             if raw_thoughts:
