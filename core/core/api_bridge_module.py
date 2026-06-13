@@ -48,6 +48,27 @@ class SourceCraftDelegateRequest(BaseModel):
     required_capability: str | None = None
 
 
+class SourceCraftRepoRequest(BaseModel):
+    action: str
+    repo_path: str = "."
+    branch: str | None = None
+    target_branch: str | None = None
+    remote: str = "origin"
+    allow_mutation: bool = False
+    dry_run: bool = False
+    extra_args: list[str] = Field(default_factory=list)
+    repo_slug: str | None = None
+    title: str | None = None
+    description: str | None = None
+    pr_slug: str | None = None
+    reviewers: list[str] = Field(default_factory=list)
+    draft: bool = False
+    squash: bool = False
+    rebase: bool = False
+    delete_branch: bool = False
+    wait: bool = True
+
+
 @dataclass
 class APIBridgeModule:
     name: str = "api_bridge"
@@ -388,6 +409,36 @@ class APIBridgeModule:
             "schedule": schedule_decision.as_dict() if schedule_decision else None,
         }
 
+    def _sourcecraft_repo(self, request: SourceCraftRepoRequest) -> dict[str, Any]:
+        module = self._sourcecraft_module()
+        if not module or not hasattr(module, "execute_repo_action"):
+            return {"status": "error", "message": "SourceCraft runtime is not available"}
+        result = module.execute_repo_action(
+            request.action,
+            repo_path=request.repo_path,
+            branch=request.branch,
+            target_branch=request.target_branch,
+            remote=request.remote,
+            allow_mutation=request.allow_mutation,
+            dry_run=request.dry_run,
+            extra_args=request.extra_args,
+            repo_slug=request.repo_slug,
+            title=request.title,
+            description=request.description,
+            pr_slug=request.pr_slug,
+            reviewers=request.reviewers,
+            draft=request.draft,
+            squash=request.squash,
+            rebase=request.rebase,
+            delete_branch=request.delete_branch,
+            wait=request.wait,
+        )
+        return {
+            "status": result.get("status", "ok"),
+            "sourcecraft": self._sourcecraft_snapshot(),
+            "operation": result,
+        }
+
     def _run_server(self) -> None:
         app = FastAPI(title="AI Orchestrator Kernel API")
 
@@ -418,6 +469,10 @@ class APIBridgeModule:
         @app.post("/sourcecraft/delegate")
         async def sourcecraft_delegate_endpoint(request: SourceCraftDelegateRequest):
             return self._sourcecraft_delegate(request)
+
+        @app.post("/sourcecraft/repo")
+        async def sourcecraft_repo_endpoint(request: SourceCraftRepoRequest):
+            return self._sourcecraft_repo(request)
 
         @app.post("/devtoolkit/sessions")
         async def devtoolkit_create_session_endpoint(payload: dict[str, Any]):

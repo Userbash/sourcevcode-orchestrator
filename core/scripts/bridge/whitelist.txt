@@ -6,6 +6,7 @@ bash
 cat
 curl
 df
+dh
 distrobox
 distrobox-create
 distrobox-enter
@@ -38,6 +39,7 @@ ps
 python
 python3
 sh
+src
 ss
 stat
 systemctl
