@@ -7,7 +7,7 @@ from datetime import datetime, UTC
 from .agent_registry import AgentRegistry
 from .load_balancer import LoadBalancer, UNROUTABLE_AGENT_STATUSES, is_agent_routable
 from .model_selector import evaluate_risk_context
-from .models import AgentRecord, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType, TaskEnvelope
+from .models import AgentRecord, Complexity, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType, TaskEnvelope
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,12 @@ class TaskRouter:
             base -= a.metrics.queue_depth * 10
             base -= a.metrics.avg_latency_ms * 0.01
             base -= a.metrics.error_rate * 50
+            base += getattr(a.kpi, "agent_kpi", 1.0) * 18
+            base += a.metrics.quality_score * 20
+            base += a.metrics.review_score * 10
+            base += a.metrics.test_pass_rate * 10
             if envelope.priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
-                base += a.kpi.quality_score * 20
+                base += a.kpi.quality_score * 12
             return base
 
         valid_candidates = [c for c in candidates if score(c) > 0]
@@ -103,8 +107,10 @@ class TaskRouter:
             return TaskAcceptance(task.task_id, TaskStatus.REJECTED, None, self.estimate_complexity(task), f"No available agent for capability {capability}")
 
         chosen_pool = self._apply_economy_policy(task, candidates)
+        secure_pool = self._preferred_secure_agents(chosen_pool, task)
+        scoring_pool = secure_pool or chosen_pool
 
-        agent = self.load_balancer.choose(chosen_pool, capability, task.priority)
+        agent = self.load_balancer.choose(scoring_pool, capability, task.priority, task)
         if not agent:
             if capability in SOURCECRAFT_CAPABILITIES or sourcecraft_task:
                 return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", self.estimate_complexity(task), "SourceCraft role handled by orchestrator module")
@@ -119,6 +125,19 @@ class TaskRouter:
             for agent in self.registry.list_agents()
             if capability in agent.capabilities and agent.status not in UNROUTABLE_AGENT_STATUSES
         ]
+
+    @staticmethod
+    def _preferred_secure_agents(candidates: list[AgentRecord], task: Task) -> list[AgentRecord]:
+        if not task.complexity:
+            return []
+        if task.complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not task.priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
+            return []
+        secure = [
+            agent
+            for agent in candidates
+            if agent.critical or any(token in f"{agent.id} {agent.model_name}".lower() for token in ("secure", "senior"))
+        ]
+        return secure
 
     def _apply_economy_policy_envelope(self, envelope: TaskEnvelope, candidates: list[AgentRecord]) -> list[AgentRecord]:
         if not self.codex_economy_mode:
@@ -149,7 +168,12 @@ class TaskRouter:
             fallback_openai = [agent for agent in candidates if agent.provider == "openai"]
             if fallback_openai:
                 standard = [agent for agent in fallback_openai if agent.model_name == "gpt-coding-standard"]
-                return standard or fallback_openai
+                non_secure = [
+                    agent
+                    for agent in fallback_openai
+                    if not any(token in f"{agent.id} {agent.model_name}".lower() for token in ("secure", "senior"))
+                ]
+                return standard or non_secure or fallback_openai
 
         openai_first = [agent for agent in candidates if agent.provider == "openai"]
         if openai_first:
@@ -162,12 +186,27 @@ class TaskRouter:
 
     @staticmethod
     def _preferred_non_openai_group(task: Task, complexity: str, candidates: list[AgentRecord]) -> list[AgentRecord]:
-        local_agents = [agent for agent in candidates if agent.provider == "local"]
-        mistral_agents = [agent for agent in candidates if agent.provider == "mistral"]
-        antigravity_agents = [agent for agent in candidates if agent.provider == "antigravity"]
-        other_agents = [agent for agent in candidates if agent.provider not in {"local", "mistral", "antigravity"}]
+        def _hint(agent: AgentRecord) -> str:
+            return f"{agent.id} {agent.model_name} {agent.provider}".lower()
+
+        antigravity_agents = [agent for agent in candidates if any(token in _hint(agent) for token in ("antigravity", "deepseek"))]
+        mistral_agents = [agent for agent in candidates if "mistral" in _hint(agent)]
+        local_agents = [
+            agent
+            for agent in candidates
+            if agent not in antigravity_agents and agent not in mistral_agents and agent.provider == "local"
+        ]
+        other_agents = [
+            agent
+            for agent in candidates
+            if agent not in antigravity_agents and agent not in mistral_agents and agent not in local_agents
+        ]
 
         if complexity == "low":
+            if task.type in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}:
+                return antigravity_agents or local_agents or mistral_agents or other_agents
+            if task.type in {TaskType.FIX, TaskType.TEST, TaskType.CODE}:
+                return mistral_agents or antigravity_agents or local_agents or other_agents
             return local_agents or mistral_agents or antigravity_agents or other_agents
 
         if task.type in {TaskType.CODE, TaskType.REVIEW}:

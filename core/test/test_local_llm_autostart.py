@@ -148,7 +148,6 @@ def test_orchestrator_preserves_local_llm_advisory_flags_during_mimo_merge():
     assert local_llm_context["budget_pressure"] == "high"
 
 
-
 def test_orchestrator_select_model_choice_uses_mimo_safe_fallback(monkeypatch):
     from core.core.model_selector import ModelSelector
     from core.core.models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
@@ -220,7 +219,6 @@ def test_orchestrator_select_model_choice_returns_none_when_mimo_blocks(monkeypa
     assert recommendation.blocked_by == "health"
 
 
-
 def test_orchestrator_provider_health_snapshot_uses_availability_cache_and_antigravity_module():
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.availability = SimpleNamespace(cached_report=lambda: {
@@ -234,7 +232,6 @@ def test_orchestrator_provider_health_snapshot_uses_availability_cache_and_antig
     assert snapshot["providers"]["openai"]["status"] == "healthy"
     assert snapshot["providers"]["mistral"]["error"] == "quota"
     assert snapshot["providers"]["antigravity"]["ready"] is True
-
 
 
 def test_orchestrator_select_model_choice_uses_surrogate_controller_without_selector(monkeypatch):
@@ -270,3 +267,24 @@ def test_orchestrator_select_model_choice_uses_surrogate_controller_without_sele
     assert choice.provider == "local"
     assert choice.model_name == "qwen-2.5-7b-instruct"
     assert choice.reason == "local_llm_surrogate_controller"
+
+
+def test_task_decomposer_seeds_kpi_floor_from_local_llm(monkeypatch):
+    from core.core.models import Priority, Task, TaskContext, TaskInput, TaskType
+    from core.core.task_decomposer import TaskDecomposer
+
+    class _LocalLLM:
+        ready = True
+
+    class _API:
+        def get_module(self, name: str):
+            return _LocalLLM() if name == "local_llm" else None
+
+    decomposer = TaskDecomposer()
+    decomposer.model_selector.set_api(_API())
+    task = Task(TaskType.REVIEW, TaskInput("review system"), TaskContext("demo", "/repo", "main"), priority=Priority.NORMAL)
+
+    plan = decomposer.decompose(task)
+    root_task = plan.atomic_tasks[0]
+    assert root_task.routing_hints["kpi_floor_source"] == "local_llm"
+    assert root_task.routing_hints["kpi_floor"] >= 0.8

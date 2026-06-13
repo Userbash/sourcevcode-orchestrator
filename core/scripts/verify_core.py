@@ -200,7 +200,7 @@ async def check_external_connectivity() -> bool:
 
     print("  ✅ Mistral API (Configuration)............ OK")
     try:
-        task = Task(TaskType.CODE, TaskInput("say ping", []), TaskContext("probe", ".", "main"))
+        task = Task(TaskType.CODE, TaskInput("say ping", files=[]), TaskContext("probe", ".", "main"))
         result = mistral.execute(task)
         if result.status.value == "done":
             print("  ✅ Mistral API (Live Connectivity)........ OK")

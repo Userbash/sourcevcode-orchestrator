@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ class AntigravityManager:
         self.login_timeout = self._read_int("AI_BRIDGE_ANTIGRAVITY_LOGIN_TIMEOUT_SEC", 60)
         self.api_key = (os.getenv("ANTIGRAVITY_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
         self.api_base_url = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        self.proxy_url = os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip().rstrip("/")
 
     @staticmethod
     def _read_int(key: str, default: int) -> int:
@@ -49,18 +51,75 @@ class AntigravityManager:
             return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
 
     def _run_agy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
+        if self.proxy_url:
+            return self._run_agy_via_proxy(args, timeout=timeout)
         return self._run_host(["agy", *args], timeout=timeout)
 
+    def _run_agy_via_proxy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
+        if not args:
+            return {"ok": False, "stdout": "", "stderr": "empty_args", "error": "empty_args", "command": ["agy"]}
+        try:
+            timeout_sec = timeout or self.probe_timeout
+            if args[:1] == ["models"]:
+                response = httpx.get(f"{self.proxy_url}/models", timeout=timeout_sec)
+                payload = response.json()
+                models = payload.get("models", []) if isinstance(payload, dict) else []
+                stdout = "\n".join(str(item) for item in models)
+                return {
+                    "ok": bool(payload.get("ok")),
+                    "stdout": stdout,
+                    "stderr": str(payload.get("stderr", "")),
+                    "exit_code": int(payload.get("exit_code", 0 if payload.get("ok") else 1)),
+                    "command": ["agy", *args],
+                }
+            if args and args[0] == "-p":
+                prompt = args[1] if len(args) > 1 else ""
+                response = httpx.post(f"{self.proxy_url}/prompt", json={"prompt": prompt, "timeout_sec": timeout_sec}, timeout=timeout_sec + 10)
+                payload = response.json()
+                return {
+                    "ok": bool(payload.get("ok")),
+                    "stdout": str(payload.get("stdout", "")),
+                    "stderr": str(payload.get("stderr", "")),
+                    "exit_code": int(payload.get("exit_code", 0 if payload.get("ok") else 1)),
+                    "command": ["agy", *args],
+                }
+            return {"ok": False, "stdout": "", "stderr": "unsupported_proxy_args", "error": "unsupported_proxy_args", "command": ["agy", *args]}
+        except Exception as exc:
+            return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": ["agy", *args]}
+
     def _run_login_helper(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        return self._run_host(["python3", "core/scripts/antigravity_login.py", *args], timeout=timeout)
+        helper = Path(__file__).resolve().parents[2] / "scripts" / "antigravity_login.py"
+        return self._run_host(["python3", str(helper), *args], timeout=timeout)
 
     def verify_auth(self) -> dict[str, Any]:
         return self._run_login_helper(["--verify"], timeout=max(self.probe_timeout, 45))
 
-    def ensure_authorized(self) -> dict[str, Any]:
+    def _confirmed_ready(self) -> dict[str, Any]:
         verify = self.verify_auth()
         if verify.get("ok"):
             verify["action"] = "verify"
+            return verify
+
+        models = self._run_agy(["models"], timeout=max(self.probe_timeout, 45))
+        if models.get("ok"):
+            probe = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"], timeout=max(self.probe_timeout, 45))
+            if probe.get("ok"):
+                return {
+                    "ok": True,
+                    "action": "verify_after_login",
+                    "models": [line.strip() for line in models.get("stdout", "").splitlines() if line.strip()],
+                    "models_probe": models,
+                    "generation_probe": probe,
+                    "auth_probe": verify,
+                    "api_probe": None,
+                    "auth_mode": "agy_oauth",
+                }
+
+        return verify
+
+    def ensure_authorized(self) -> dict[str, Any]:
+        verify = self._confirmed_ready()
+        if verify.get("ok"):
             return verify
 
         if not self.auto_login_enabled():
@@ -68,12 +127,26 @@ class AntigravityManager:
             verify["auto_login_skipped"] = True
             return verify
 
-        login = self._run_login_helper(["--login", "--timeout", str(self.login_timeout)], timeout=self.login_timeout + 20)
-        login["action"] = "login"
-        if login.get("ok"):
-            return login
-        login["verify_error"] = verify.get("stderr") or verify.get("error")
-        return login
+        last: dict[str, Any] = verify
+        for attempt in range(1, 4):
+            login = self._run_login_helper(["--login", "--timeout", str(self.login_timeout)], timeout=self.login_timeout + 20)
+            login["action"] = "login"
+            login["attempt"] = attempt
+            if login.get("ok"):
+                confirmation = self._confirmed_ready()
+                if confirmation.get("ok"):
+                    confirmation["action"] = "login_confirmed"
+                    confirmation["attempt"] = attempt
+                    return confirmation
+                login["verify_error"] = confirmation.get("stderr") or confirmation.get("error") or "login did not produce a ready auth state"
+                login["post_login_verify"] = confirmation
+                last = login
+            else:
+                last = login
+            if attempt < 3:
+                import time
+                time.sleep(min(8.0, 1.5 * attempt))
+        return last
 
 
 

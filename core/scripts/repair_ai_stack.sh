@@ -19,11 +19,11 @@ echo -n "[Check] Antigravity CLI (agy)... "
 if flatpak-spawn --host agy --version &>/dev/null; then
     echo -e "${GREEN}INSTALLED${NC}"
     # Check if authorized
-    if flatpak-spawn --host python3 core/scripts/antigravity_login.py --verify &>/dev/null; then
+    if flatpak-spawn --host python3 "$PROJECT_ROOT/core/scripts/antigravity_login.py" --verify &>/dev/null; then
         echo -e "${GREEN}[OK] Antigravity is authorized${NC}"
     else
         echo -e "${YELLOW}[WARN] Antigravity not authorized. Starting login flow...${NC}"
-        flatpak-spawn --host python3 core/scripts/antigravity_login.py --login --timeout 300
+        flatpak-spawn --host python3 "$PROJECT_ROOT/core/scripts/antigravity_login.py" --login --timeout 300
     fi
 else
     echo -e "${RED}NOT FOUND${NC}"

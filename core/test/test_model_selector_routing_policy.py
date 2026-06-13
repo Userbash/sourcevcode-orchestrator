@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 
 import pytest
 
 from core.core.agent_registry import AgentRegistry
 from core.core.load_balancer import LoadBalancer
-from core.core.model_selector import ModelSelector
+from core.core.model_selector import ModelSelector, MODEL_QWEN_CODER, MODEL_DEEPSEEK_R1, MODEL_LOCAL_SMALL
 from core.core.models import AgentStatus, Complexity, Task, TaskContext, TaskInput, TaskType
 from core.core.task_router import TaskRouter
 
@@ -40,7 +42,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "custom",
         "local://small",
         ["docs", "fix"],
-        model_name="local-small",
+        model_name=MODEL_LOCAL_SMALL,
         provider="local",
     )
     mistral = registry.register(
@@ -48,23 +50,23 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "custom",
         "local://mistral",
         ["code", "fix", "test"],
-        model_name="mistral-small-or-medium",
-        provider="mistral",
+        model_name=MODEL_QWEN_CODER,
+        provider="local",
     )
     registry.register(
         "antigravity-cli-orchestrator",
         "custom",
         "local://antigravity-cli",
         ["docs", "research", "review"],
-        model_name="antigravity-cli",
-        provider="google",
+        model_name=MODEL_DEEPSEEK_R1,
+        provider="local",
     )
     registry.register(
         "openai-orchestrator",
         "codex",
         "local://openai-large",
         ["plan"],
-        model_name="gpt-coding-large",
+        model_name="gpt-4o",
         provider="openai",
     )
     registry.register(
@@ -72,7 +74,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "codex",
         "local://openai-secure",
         ["code", "fix", "test", "docs", "research", "review"],
-        model_name="gpt-senior-secure",
+        model_name="gpt-4o",
         provider="openai",
     )
     registry.register(
@@ -80,7 +82,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "codex",
         "local://openai-standard",
         ["code", "fix", "test"],
-        model_name="gpt-coding-standard",
+        model_name="gpt-4o",
         provider="openai",
     )
 
@@ -90,48 +92,82 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
     return registry
 
 
-def _reason(choice_provider: str, choice_complexity: Complexity, fallback_used: bool) -> str:
-    if fallback_used:
-        return "fallback_non_openai_unavailable"
-    if choice_complexity == Complexity.CRITICAL:
-        return "critical_risk_openai_escalation"
-    if choice_complexity == Complexity.HIGH:
-        return "high_complexity_openai_escalation"
-    if choice_provider == "local":
-        return "low_simple_local_routing"
-    if choice_provider == "mistral":
-        return "medium_code_fix_test_routing"
-    if choice_provider == "google":
-        return "medium_docs_research_review_antigravity_routing"
-    return "policy_default"
+@contextmanager
+def _test_openai_env() -> Iterator[None]:
+    import os
+
+    snapshot = {
+        "AI_BRIDGE_OPENAI_AUTO_MODEL": os.environ.get("AI_BRIDGE_OPENAI_AUTO_MODEL"),
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY"),
+        "OPENAI_HIGH_MODELS": os.environ.get("OPENAI_HIGH_MODELS"),
+        "OPENAI_CRITICAL_MODELS": os.environ.get("OPENAI_CRITICAL_MODELS"),
+    }
+    os.environ["AI_BRIDGE_OPENAI_AUTO_MODEL"] = "true"
+    os.environ["OPENAI_API_KEY"] = "sk-test"
+    os.environ["OPENAI_HIGH_MODELS"] = "gpt-5-mini,gpt-5.1"
+    os.environ["OPENAI_CRITICAL_MODELS"] = "gpt-5.2-codex,gpt-5.1-codex-max"
+    try:
+        yield
+    finally:
+        for key, value in snapshot.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _execute_case(case: RoutingCase) -> dict[str, object]:
-    task = _task(case.task_type, case.description, case.forced_complexity)
+    with _test_openai_env():
+        task = _task(case.task_type, case.description, case.forced_complexity)
+        selector = ModelSelector()
+        choice = selector.select(task)
+
+        router = TaskRouter(_build_registry(mistral_offline=case.mistral_offline), LoadBalancer())
+        acceptance = router.route(task)
+        assert acceptance.status.value == "accepted"
+
+        agent = router.registry.get(acceptance.assigned_agent)
+        assert agent is not None
+
+        fallback_used = choice.provider != "openai" and agent.provider == "openai"
+
+        return {
+            "task": case.name,
+            "task_type": task.type.value,
+            "complexity": choice.complexity,
+            "selected_orchestrator": agent.id,
+            "selected_provider": agent.provider,
+            "selected_model": choice.model_name,
+            "fallback_used": fallback_used,
+            "requires_secondary_review": choice.requires_secondary_review,
+            "reason": choice.reason,
+        }
+
+
+def test_selector_applies_experience_policy_override():
     selector = ModelSelector()
+
+    class Learner:
+        def recommend_model(self, *, task_type: str, allowed_providers: set[str] | None = None, min_samples: int = 3, min_score: float = 0.65):
+            assert task_type == "code"
+            assert allowed_providers == {"local"}
+            return {
+                "model_name": MODEL_DEEPSEEK_R1,
+                "provider": "local",
+                "score": 0.91,
+                "samples": 6,
+            }
+
+    class API:
+        experience_policy_learner = Learner()
+
+    selector.set_api(API())
+    task = _task(TaskType.CODE, "refactor service module", Complexity.MEDIUM)
     choice = selector.select(task)
 
-    router = TaskRouter(_build_registry(mistral_offline=case.mistral_offline), LoadBalancer())
-    acceptance = router.route(task)
-    assert acceptance.status.value == "accepted"
-
-    agent = router.registry.get(acceptance.assigned_agent)
-    assert agent is not None
-
-    fallback_used = choice.provider != "openai" and agent.provider == "openai"
-    selected_model = "gpt-coding-standard" if fallback_used else choice.model_name
-
-    return {
-        "task": case.name,
-        "task_type": task.type.value,
-        "complexity": choice.complexity,
-        "selected_orchestrator": agent.id,
-        "selected_provider": agent.provider,
-        "selected_model": selected_model,
-        "fallback_used": fallback_used,
-        "requires_secondary_review": choice.requires_secondary_review,
-        "reason": _reason(choice.provider, choice.complexity, fallback_used),
-    }
+    assert choice.model_name == MODEL_DEEPSEEK_R1
+    assert choice.provider == "local"
+    assert choice.reason.startswith("experience_policy:code:")
 
 
 CASES = [
@@ -142,12 +178,12 @@ CASES = [
         forced_complexity=Complexity.LOW,
         mistral_offline=False,
         expected_complexity=Complexity.LOW,
-        expected_orchestrator="local-orchestrator",
+        expected_orchestrator="antigravity-cli-orchestrator",
         expected_provider="local",
-        expected_model="local-small",
+        expected_model=MODEL_DEEPSEEK_R1,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="low_simple_local_routing",
+        expected_reason="planning_docs_deepseek_local",
     ),
     RoutingCase(
         name="simple typo fix",
@@ -156,12 +192,12 @@ CASES = [
         forced_complexity=Complexity.LOW,
         mistral_offline=False,
         expected_complexity=Complexity.LOW,
-        expected_orchestrator="local-orchestrator",
+        expected_orchestrator="mistral-orchestrator",
         expected_provider="local",
-        expected_model="local-small",
+        expected_model=MODEL_QWEN_CODER,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="low_simple_local_routing",
+        expected_reason="standard_code_qwen_local",
     ),
     RoutingCase(
         name="medium code refactor",
@@ -171,11 +207,11 @@ CASES = [
         mistral_offline=False,
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="mistral-orchestrator",
-        expected_provider="mistral",
-        expected_model="mistral-small-or-medium",
+        expected_provider="local",
+        expected_model=MODEL_QWEN_CODER,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="medium_code_fix_test_routing",
+        expected_reason="standard_code_qwen_local",
     ),
     RoutingCase(
         name="medium unit test generation",
@@ -185,11 +221,11 @@ CASES = [
         mistral_offline=False,
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="mistral-orchestrator",
-        expected_provider="mistral",
-        expected_model="mistral-small-or-medium",
+        expected_provider="local",
+        expected_model=MODEL_QWEN_CODER,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="medium_code_fix_test_routing",
+        expected_reason="standard_code_qwen_local",
     ),
     RoutingCase(
         name="medium documentation update",
@@ -199,11 +235,11 @@ CASES = [
         mistral_offline=False,
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="antigravity-cli-orchestrator",
-        expected_provider="google",
-        expected_model="antigravity-cli",
+        expected_provider="local",
+        expected_model=MODEL_DEEPSEEK_R1,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="medium_docs_research_review_antigravity_routing",
+        expected_reason="planning_docs_deepseek_local",
     ),
     RoutingCase(
         name="medium research task",
@@ -213,11 +249,11 @@ CASES = [
         mistral_offline=False,
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="antigravity-cli-orchestrator",
-        expected_provider="google",
-        expected_model="antigravity-cli",
+        expected_provider="local",
+        expected_model=MODEL_DEEPSEEK_R1,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="medium_docs_research_review_antigravity_routing",
+        expected_reason="planning_docs_deepseek_local",
     ),
     RoutingCase(
         name="high architecture redesign",
@@ -228,10 +264,10 @@ CASES = [
         expected_complexity=Complexity.HIGH,
         expected_orchestrator="openai-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-coding-large",
+        expected_model="gpt-5-mini",
         expected_fallback=False,
         expected_secondary_review=True,
-        expected_reason="high_complexity_openai_escalation",
+        expected_reason="openai_auto_high_reasoning:high_risk_or_complexity_escalation",
     ),
     RoutingCase(
         name="critical auth/security fix",
@@ -242,10 +278,10 @@ CASES = [
         expected_complexity=Complexity.CRITICAL,
         expected_orchestrator="openai-secure-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-senior-secure",
+        expected_model="gpt-5.2-codex",
         expected_fallback=False,
         expected_secondary_review=True,
-        expected_reason="critical_risk_openai_escalation",
+        expected_reason="openai_auto_critical_quality:high_risk_or_complexity_escalation",
     ),
     RoutingCase(
         name="production migration",
@@ -256,10 +292,10 @@ CASES = [
         expected_complexity=Complexity.CRITICAL,
         expected_orchestrator="openai-secure-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-senior-secure",
+        expected_model="gpt-5.2-codex",
         expected_fallback=False,
         expected_secondary_review=True,
-        expected_reason="critical_risk_openai_escalation",
+        expected_reason="openai_auto_critical_quality:high_risk_or_complexity_escalation",
     ),
     RoutingCase(
         name="destructive database operation",
@@ -270,10 +306,10 @@ CASES = [
         expected_complexity=Complexity.CRITICAL,
         expected_orchestrator="openai-secure-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-senior-secure",
+        expected_model="gpt-5.2-codex",
         expected_fallback=False,
         expected_secondary_review=True,
-        expected_reason="critical_risk_openai_escalation",
+        expected_reason="openai_auto_critical_quality:high_risk_or_complexity_escalation",
     ),
     RoutingCase(
         name="mistral unavailable fallback",
@@ -284,10 +320,10 @@ CASES = [
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="openai-fallback-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-coding-standard",
+        expected_model=MODEL_QWEN_CODER,
         expected_fallback=True,
         expected_secondary_review=False,
-        expected_reason="fallback_non_openai_unavailable",
+        expected_reason="standard_code_qwen_local",
     ),
 ]
 
@@ -376,5 +412,5 @@ def test_model_selector_prefers_local_llm_when_advisory_is_available():
     choice = selector.select(task, advisory_context={"local_llm": {"ready": True, "should_delegate": True, "task_family": "docs_workflow"}})
 
     assert choice.provider == "local"
-    assert choice.model_name == "local-small"
+    assert choice.model_name == MODEL_LOCAL_SMALL
     assert choice.reason.startswith("local_llm_advisory_")

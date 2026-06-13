@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
-from core.core.external_core import ExternalAIBridge
+from core.core.external_ai_bridge import ExternalAIBridge
 from core.core.models import Complexity, Task, TaskContext, TaskInput, TaskType
 
 

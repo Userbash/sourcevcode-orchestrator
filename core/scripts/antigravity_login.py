@@ -37,6 +37,10 @@ def has_auth_marker() -> bool:
     return any(path.exists() for path in _state_markers())
 
 
+def _model_probe_ready() -> bool:
+    return _run_capture(["agy", "models"], timeout=60).returncode == 0
+
+
 def _run_capture(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
 
@@ -60,7 +64,7 @@ def _verify_generation() -> bool:
 
 
 def is_ready() -> bool:
-    return _run_capture(["agy", "models"], timeout=60).returncode == 0 and _verify_generation()
+    return _model_probe_ready() and _verify_generation()
 
 
 def _open_browser(url: str) -> bool:
@@ -122,7 +126,7 @@ def _interactive_pty(cmd: list[str], timeout_sec: int) -> int:
         now = time.time()
         if now - ready_checked_at > 10:
             ready_checked_at = now
-            if has_auth_marker() and _run_capture(["agy", "models"], timeout=30).returncode == 0:
+            if (_model_probe_ready() or has_auth_marker()) and _verify_generation():
                 print()
                 print(f"[antigravity-login] Antigravity state detected: {AGY_STATE_DIR}")
                 return 0
@@ -188,6 +192,10 @@ def login_interactive(wait_timeout_sec: int = 600, force: bool = False) -> int:
     models_status = _print_models()
     generation_ok = _verify_generation()
     if models_status == 0 and generation_ok:
+        print("Antigravity is authorized and ready.")
+        return 0
+
+    if has_auth_marker() and _model_probe_ready() and generation_ok:
         print("Antigravity is authorized and ready.")
         return 0
     print(f"Antigravity authorization was not confirmed. Check log: {log_file}", file=sys.stderr)

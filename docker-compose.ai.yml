@@ -29,6 +29,7 @@ services:
     container_name: hebrew_ai_orchestrator
     environment:
       PYTHONPATH: /app
+      PATH: /var/home/sanya/.npm-packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app/.local/bin
       TESTING: "false"
       AI_BRIDGE_AUTOSTART_LOCAL_LLM: "false"
       AI_BRIDGE_AUTOSTART_EASY_DIFFUSION: ${AI_BRIDGE_AUTOSTART_EASY_DIFFUSION:-true}
@@ -52,24 +53,36 @@ services:
       AI_BRIDGE_AUTO_APPROVE: "true"
       AI_BRIDGE_CONFIRMATION_POLICY: "full_auto"
       OPENAI_SESSION_TOKEN_BUDGET: ${OPENAI_SESSION_TOKEN_BUDGET:-120000}
+      AI_BRIDGE_ANTIGRAVITY_PROXY_URL: ${AI_BRIDGE_ANTIGRAVITY_PROXY_URL:-http://host.containers.internal:8765}
+      NODE_PATH: /var/home/sanya/.npm-packages/lib/node_modules
     command:
       - sh
       - -lc
       - |
-        export PATH=$$PATH:/app/.local/bin
+        export PATH=/var/home/sanya/.npm-packages/bin:$$PATH:/app/.local/bin
+        export NODE_PATH=/var/home/sanya/.npm-packages/lib/node_modules$${NODE_PATH:+:$$NODE_PATH}
         export PYTHONPATH=/app
         export AI_BRIDGE_MEMORY_ENABLED=true
         export AI_BRIDGE_MEMORY_DATABASE_URL=postgresql+psycopg2://ai_bridge:ai_bridge_password@db:5432/ai_bridge
-        
+
+        if command -v mimo >/dev/null 2>&1; then
+          echo "[MIMO] CLI detected: $$(command -v mimo)"
+          mimo models --verbose >/tmp/mimo_models_boot.log 2>&1 || echo "[MIMO] models probe failed during boot; director will retry at runtime."
+        else
+          echo "[MIMO] CLI not found in PATH during boot."
+        fi
+
         # Run migration if needed (simplified check)
         python3 scripts/migrate_themes_to_pg.py || echo "Migration failed or unnecessary."
-        
+
         exec python3 -m core.scripts.orchestrator_daemon
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
     volumes:
       - core_memory:/app/memory_store
-      - /var/home/sanya/.local/bin:/app/.local/bin:ro
+      - /var/home/sanya/.gemini:/root/.gemini:z
+      - /var/home/sanya/.antigravity:/root/.antigravity:z
+      - /var/home/sanya/.npm-packages:/var/home/sanya/.npm-packages:ro,z
       - ./.env.bridge:/app/.env.bridge:ro,z
       - ./scripts:/app/scripts:ro
     depends_on:

@@ -18,6 +18,7 @@ docker
 docker-compose
 du
 env
+flatpak-spawn
 free
 gh
 git

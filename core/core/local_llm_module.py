@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -44,6 +45,7 @@ class LocalLLMModule(KernelModule):
 
         self.model_name = model_name or os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL") or "qwen2.5:32b-instruct-q4_k_m"
         raw_timeout = os.getenv("AI_BRIDGE_LOCAL_LLM_HEALTH_TIMEOUT_SEC")
+        raw_generate_timeout = os.getenv("AI_BRIDGE_LOCAL_LLM_GENERATE_TIMEOUT_SEC")
         if timeout_sec is not None:
             self.timeout_sec = max(0.2, timeout_sec)
         elif raw_timeout:
@@ -53,8 +55,18 @@ class LocalLLMModule(KernelModule):
                 self.timeout_sec = 1.0
         else:
             self.timeout_sec = 1.0
+        if raw_generate_timeout:
+            try:
+                self.generate_timeout_sec = max(5.0, float(raw_generate_timeout))
+            except ValueError:
+                self.generate_timeout_sec = 60.0
+        else:
+            self.generate_timeout_sec = max(60.0, self.timeout_sec * 30)
         self.last_probe: dict[str, Any] = {}
         self.last_advisory: dict[str, Any] = {}
+        self.adapter_state_path = Path(os.getenv("AI_BRIDGE_EXPERIENCE_ADAPTER_STATE_PATH", "memory_store/training/experience_adapter_state.json"))
+        self._adapter_state_mtime_ns: int | None = None
+        self._adapter_state_cache: dict[str, Any] = {}
 
     def can_use_model(self, model_name: str | None = None) -> dict[str, Any]:
         target_model = (model_name or self.model_name).strip()
@@ -108,6 +120,43 @@ class LocalLLMModule(KernelModule):
     @staticmethod
     def _high_risk(task_text: str) -> bool:
         return any(keyword in task_text for keyword in HIGH_RISK_KEYWORDS)
+
+    def _load_adapter_state(self) -> dict[str, Any]:
+        try:
+            stat = self.adapter_state_path.stat()
+        except FileNotFoundError:
+            self._adapter_state_mtime_ns = None
+            self._adapter_state_cache = {}
+            return {}
+        except Exception:
+            return self._adapter_state_cache
+
+        if self._adapter_state_mtime_ns == stat.st_mtime_ns and self._adapter_state_cache:
+            return self._adapter_state_cache
+
+        try:
+            payload = json.loads(self.adapter_state_path.read_text(encoding='utf-8'))
+        except Exception:
+            return self._adapter_state_cache
+        if not isinstance(payload, dict):
+            return self._adapter_state_cache
+        self._adapter_state_mtime_ns = stat.st_mtime_ns
+        self._adapter_state_cache = payload
+        return payload
+
+    def _training_profile(self, task_type: str | None, task_family: str) -> dict[str, Any]:
+        payload = self._load_adapter_state()
+        profiles = payload.get('task_profiles', {}) if isinstance(payload, dict) else {}
+        if not isinstance(profiles, dict):
+            return {}
+        if task_type:
+            profile = profiles.get(task_type)
+            if isinstance(profile, dict):
+                return profile
+        for profile in profiles.values():
+            if isinstance(profile, dict) and str(profile.get('task_family') or '') == task_family:
+                return profile
+        return {}
 
     @staticmethod
     def _recommended_actions(task_family: str) -> list[str]:
@@ -228,7 +277,7 @@ class LocalLLMModule(KernelModule):
             "error": last_exc,
         }
 
-    def query(
+    def _query_model(
         self,
         prompt: str,
         model_name: str | None = None,
@@ -251,14 +300,14 @@ class LocalLLMModule(KernelModule):
                 json={
                     "model": target_model,
                     "prompt": prompt,
+                    "system": system or "You are a specialized AI Kernel Optimizer.",
                     "stream": False,
-                    **({"system": system} if system else {}),
                     "options": options or {
                         "temperature": 0.2,
                         "top_p": 0.9,
                     },
                 },
-                timeout=timeout_sec or max(2.0, self.timeout_sec * 10),
+                timeout=timeout_sec or self.generate_timeout_sec,
             )
             response.raise_for_status()
             duration = time.perf_counter() - start_time
@@ -285,6 +334,18 @@ class LocalLLMModule(KernelModule):
         high_risk = self._high_risk(task_text) or priority == "critical"
         should_delegate = ready and not high_risk and task_family in {"docs_workflow", "verification", "planning", "analysis"}
         preferred_model = self.model_name if ready else None
+        training_profile = self._training_profile(task_type, task_family)
+        learned_model = str(training_profile.get("preferred_model") or training_profile.get("recommended_model") or "").strip()
+        if ready and learned_model:
+            preferred_model = learned_model
+        if ready and not high_risk and bool(training_profile.get("delegate")):
+            should_delegate = True
+        profile_weights = training_profile.get("profile_weights") if isinstance(training_profile.get("profile_weights"), dict) else {}
+        context_depth = int(training_profile.get("context_depth") or 0)
+        actions = self._recommended_actions(task_family)
+        learned_practices = training_profile.get("best_practices") if isinstance(training_profile.get("best_practices"), list) else []
+        if learned_practices:
+            actions = list(dict.fromkeys(actions + [str(item) for item in learned_practices if str(item).strip()]))
         return {
             "enabled": ready,
             "ready": ready,
@@ -298,12 +359,16 @@ class LocalLLMModule(KernelModule):
             "high_risk": high_risk,
             "should_delegate": should_delegate,
             "recommended_owner": "local_llm" if should_delegate else "core",
+            "preferred_model": preferred_model,
             "recommended_model": preferred_model,
+            "context_depth": context_depth,
+            "profile_weights": profile_weights,
+            "training_profile": training_profile,
             "source_context": {
                 "files": list(getattr(getattr(task, "input", None), "files", []) or []),
                 "constraints": list(getattr(getattr(task, "input", None), "constraints", []) or []),
             },
-            "actions": self._recommended_actions(task_family),
+            "actions": actions,
             "core_retained_actions": self._core_retained_actions(),
             "safe_offload": self._safe_offload_actions(),
             "summary": None,
@@ -465,6 +530,7 @@ class LocalLLMModule(KernelModule):
             "high_risk": high_risk,
             "should_delegate": should_delegate,
             "recommended_owner": "local_llm" if should_delegate else "core",
+            "preferred_model": preferred_model,
             "recommended_model": preferred_model,
             "source_context": {
                 "files": list(getattr(getattr(task, "input", None), "files", []) or []),
@@ -620,11 +686,34 @@ class LocalLLMModule(KernelModule):
 
     @property
     def ready(self) -> bool:
+        probe = self.last_probe or self.check_health()
+        return bool(probe.get("ok")) and bool(probe.get("model_present"))
+
+    def query(
+        self,
+        prompt: str,
+        model_name: str | None = None,
+        system: str | None = "You are a specialized AI Kernel Optimizer.",
+        *,
+        options: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
+    ) -> str:
+        """Synchronous query for internal kernel tasks and local agent execution."""
+        target_model = (model_name or self.model_name).strip()
+        readiness = self.can_use_model(target_model)
+        if not readiness.get("ok"):
+            return ""
         try:
-            resp = requests.get(f"{self.endpoint}/api/tags", timeout=self.timeout_sec)
-            return resp.status_code == 200
-        except Exception:
-            return False
+            return self._query_model(
+                prompt,
+                target_model,
+                system=system,
+                options=options,
+                timeout_sec=timeout_sec,
+            )
+        except Exception as e:
+            logger.error(f"Local LLM query failed: {e}")
+            return ""
 
     def compact_memory(self, raw_data: list[dict[str, Any]]) -> str:
         """Uses local LLM to turn raw logs/history into a dense semantic summary."""
