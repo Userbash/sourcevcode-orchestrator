@@ -37,7 +37,7 @@ class ProviderBudgetRouter:
     @staticmethod
     def _normalize_provider(provider: str) -> str:
         p = provider.strip().lower()
-        if p in {"antigravity", "antigravity-cli", "agy"}:
+        if p in {"antigravity", "antigravity-cli", "agy", "google", "gemini", "gemini-cli"}:
             return "antigravity"
         return p
 
@@ -85,7 +85,7 @@ class ProviderBudgetRouter:
         elif self.force_antigravity and task.type in {TaskType.CODE, TaskType.REVIEW, TaskType.TEST, TaskType.DOCS, TaskType.RESEARCH, TaskType.FIX}:
             base = ["antigravity", "mistral", "local", "openai"]
         elif task.type in {TaskType.CODE, TaskType.REVIEW}:
-            base = ["antigravity", "mistral", "local", "openai"]
+            base = [preferred, "antigravity", "mistral", "local", "openai"]
         elif task.type in {TaskType.TEST, TaskType.FIX}:
             base = ["mistral", "antigravity", "local", "openai"]
         elif task.type in {TaskType.DOCS, TaskType.RESEARCH}:

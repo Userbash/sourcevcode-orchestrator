@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, UTC
 from collections import defaultdict, deque
+from copy import deepcopy
 from collections.abc import Callable
 from typing import Any, Dict, List, Optional
 
@@ -153,6 +154,22 @@ class MessageBus:
     def latest_ack(self, message_id: str) -> MessageAck | None:
         history = self._acks.get(message_id, [])
         return history[-1] if history else None
+
+    def depth(self, topic: str) -> int:
+        return len(self._queues[topic])
+
+    def replay_unacked(self) -> int:
+        replayed = 0
+        for message_id, message in list(self._unacked.items()):
+            topic = None
+            if isinstance(message, TaskEnvelope):
+                topic = self.agent_topic(message.target_agent) if message.target_agent else "orchestrator.inbox"
+            else:
+                topic = self.agent_topic(getattr(message, "to_agent", ""))
+            if topic:
+                self.publish(topic, message)
+                replayed += 1
+        return replayed
 
     def mark_dead_letter(self, message: P2PMessage, reason: str) -> MessageAck:
         self.dead_letters.append(message)

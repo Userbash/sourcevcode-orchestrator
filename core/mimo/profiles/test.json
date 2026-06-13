@@ -1,0 +1,45 @@
+{
+  "task_type": "test",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.08,
+      "budget": 0.98
+    },
+    "local": {
+      "budget": 1.1,
+      "quality": 1.0
+    },
+    "mistral": {
+      "budget": 1.12,
+      "quality": 0.95
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "budget": 1.06,
+      "quality": 1.0
+    },
+    "deepseek": {
+      "quality": 1.02,
+      "budget": 1.0
+    },
+    "gpt": {
+      "quality": 1.08,
+      "budget": 0.97
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.74,
+    "avg_latency_ms": 1800,
+    "quality_min_confidence": 0.72
+  },
+  "default_context_depth": 2,
+  "budget_pressure": {
+    "high": 1200,
+    "medium": 2500
+  },
+  "quality_pressure": {
+    "high": 0.8,
+    "medium": 0.7
+  }
+}

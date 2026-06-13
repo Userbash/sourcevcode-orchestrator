@@ -1,0 +1,49 @@
+{
+  "profile_type": "model",
+  "profile_key": "model::deepseek-r1-14b",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.08,
+      "budget": 0.96,
+      "vfs": 1.0
+    },
+    "local": {
+      "quality": 1.02,
+      "budget": 1.04,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 1.0,
+      "budget": 1.02,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "quality": 1.0,
+      "budget": 1.0
+    },
+    "deepseek": {
+      "quality": 1.16,
+      "budget": 0.96
+    },
+    "gpt": {
+      "quality": 1.12,
+      "budget": 0.94
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.82,
+    "avg_latency_ms": 1800,
+    "quality_min_confidence": 0.8
+  },
+  "default_context_depth": 4,
+  "budget_pressure": {
+    "high": 1400,
+    "medium": 3000
+  },
+  "quality_pressure": {
+    "high": 0.88,
+    "medium": 0.8
+  }
+}

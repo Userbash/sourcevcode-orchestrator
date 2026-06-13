@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from .models import AgentRecord, AgentStatus, Priority
+from .models import AgentRecord, AgentStatus, Priority, Task
 
 
 UNROUTABLE_AGENT_STATUSES = {
@@ -38,7 +38,7 @@ class LoadBalancer:
     def __init__(self, overload_threshold: float = 0.85) -> None:
         self.overload_threshold = overload_threshold
 
-    def score(self, agent: AgentRecord, capability: str, priority: Priority | str | None = None) -> float:
+    def score(self, agent: AgentRecord, capability: str, priority: Priority | str | None = None, task: Task | None = None) -> float:
         if not is_agent_routable(agent, priority):
             return float("-inf")
         
@@ -48,6 +48,7 @@ class LoadBalancer:
         quality_score = max(0.0, min(1.0, agent.metrics.quality_score))
         success_rate = max(0.0, min(1.0, agent.metrics.success_rate))
         review_pass_rate = max(0.0, min(1.0, agent.metrics.review_score))
+        test_pass_rate = max(0.0, min(1.0, agent.metrics.test_pass_rate))
         
         availability = self._availability(agent)
         speed_score = self._speed_score(agent.metrics.avg_latency_ms)
@@ -55,24 +56,43 @@ class LoadBalancer:
         specialization_score = 1.0 if capability in agent.capabilities else 0.0
         
         overload_penalty = self._overload_penalty(agent)
-        
+        secure_bonus = 0.0
+        if priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
+            secure_hint = f"{agent.id} {agent.model_name}".lower()
+            if any(token in secure_hint for token in ("secure", "senior")):
+                secure_bonus = 0.12
+
+        quality_component = (quality_score * 0.22) + (review_pass_rate * 0.12) + (test_pass_rate * 0.10)
+        kpi_component = getattr(agent.kpi, "agent_kpi", 1.0) * 0.14
+        if task is not None:
+            try:
+                from .kpi import KPIEvaluator
+                kpi_evaluator = KPIEvaluator()
+                threshold = kpi_evaluator.threshold_for_task(task)
+                floor = float((getattr(task, "routing_hints", {}) or {}).get("kpi_floor", threshold))
+                effective_threshold = max(threshold, floor)
+                if agent.kpi.agent_kpi < effective_threshold:
+                    kpi_component -= (effective_threshold - agent.kpi.agent_kpi) * 0.25
+            except Exception:
+                pass
         return (
-            quality_score * 0.30
-            + success_rate * 0.25
-            + review_pass_rate * 0.15
-            + availability * 0.10
-            + speed_score * 0.10
-            + cost_score * 0.05
+            quality_component
+            + success_rate * 0.18
+            + kpi_component
+            + availability * 0.09
+            + speed_score * 0.08
+            + cost_score * 0.04
             + specialization_score * 0.05
+            + secure_bonus
             - overload_penalty
         ) * agent.metrics.priority_score
 
-    async def score_async(self, agent: AgentRecord, capability: str, priority: Priority | str | None = None) -> float:
+    async def score_async(self, agent: AgentRecord, capability: str, priority: Priority | str | None = None, task: Task | None = None) -> float:
         """Asynchronous version of score, allowing for external health checks or IO."""
         # For now, it just calls the sync version, but we wrap it to maintain the interface
-        return self.score(agent, capability, priority)
+        return self.score(agent, capability, priority, task)
 
-    async def choose_async(self, agents: list[AgentRecord], capability: str, priority: Priority | str | None = None) -> AgentRecord | None:
+    async def choose_async(self, agents: list[AgentRecord], capability: str, priority: Priority | str | None = None, task: Task | None = None) -> AgentRecord | None:
         """Concurrently scores all candidates and picks the best one."""
         import asyncio
         candidates = [
@@ -83,7 +103,7 @@ class LoadBalancer:
             return None
             
         scores = await asyncio.gather(*[
-            self.score_async(agent, capability, priority) for agent in candidates
+            self.score_async(agent, capability, priority, task) for agent in candidates
         ])
         
         indexed_scores = list(zip(candidates, scores))
@@ -94,14 +114,14 @@ class LoadBalancer:
             
         return max(valid_indexed, key=lambda x: x[1])[0]
 
-    def choose(self, agents: list[AgentRecord], capability: str, priority: Priority | str | None = None) -> AgentRecord | None:
+    def choose(self, agents: list[AgentRecord], capability: str, priority: Priority | str | None = None, task: Task | None = None) -> AgentRecord | None:
         candidates = [
             agent for agent in agents
             if capability in agent.capabilities and is_agent_routable(agent, priority)
         ]
         if not candidates:
             return None
-        return max(candidates, key=lambda agent: self.score(agent, capability, priority))
+        return max(candidates, key=lambda agent: self.score(agent, capability, priority, task))
 
     def _availability(self, agent: AgentRecord) -> float:
         if agent.status in {AgentStatus.READY, AgentStatus.IDLE}:

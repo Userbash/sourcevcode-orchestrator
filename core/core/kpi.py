@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from .models import AgentKPI, AgentRecord
+from .models import AgentKPI, AgentRecord, Task, TaskType
 
 
 class KPIEvaluator:
-    def __init__(self, threshold: float = 0.65) -> None:
+    def __init__(self, threshold: float = 0.65, task_thresholds: dict[str, float] | None = None) -> None:
         self.threshold = threshold
+        self.task_thresholds = task_thresholds or {
+            "plan": 0.72,
+            "review": 0.76,
+            "test": 0.74,
+        }
 
     def calculate(self, agent: AgentRecord) -> AgentKPI:
         total = agent.metrics.completed_tasks + agent.metrics.failed_tasks
@@ -33,6 +38,15 @@ class KPIEvaluator:
 
     def below_threshold(self, agent: AgentRecord) -> bool:
         return self.calculate(agent).agent_kpi < self.threshold
+
+    def threshold_for_task(self, task: Task | None) -> float:
+        if not task:
+            return self.threshold
+        task_type = getattr(task.type, "value", task.type)
+        return float(self.task_thresholds.get(str(task_type).lower(), self.threshold))
+
+    def below_task_threshold(self, agent: AgentRecord, task: Task | None) -> bool:
+        return self.calculate(agent).agent_kpi < self.threshold_for_task(task)
 
     def apply_priority_policy(self, agent: AgentRecord) -> None:
         if self.below_threshold(agent):
