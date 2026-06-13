@@ -12,7 +12,7 @@ class DistroboxBridgeError(RuntimeError):
 
 @dataclass(slots=True)
 class DistroboxBridge:
-    default_box_name: str = "gh-dev"
+    default_box_name: str = "ghbox"
     default_image: str = "registry.fedoraproject.org/fedora-toolbox:42"
 
     def _host_prefix(self, mode: str) -> list[str]:

@@ -55,3 +55,60 @@ def test_whitelist_includes_common_diagnostics(tmp_path: Path):
 
     allowed = bridge.allowlist()
     assert {"ss", "lsof", "ps", "free", "df", "du", "hostname", "whoami"}.issubset(allowed)
+
+
+
+def test_whitelist_includes_sourcecraft_tools(tmp_path: Path):
+    wl = tmp_path / "whitelist.txt"
+    bridge = HostBridge(whitelist_file=wl)
+    bridge.ensure_whitelist()
+
+    allowed = bridge.allowlist()
+    assert {"src", "dh", "git", "gh"}.issubset(allowed)
+
+
+def test_execute_forwards_cwd(monkeypatch, tmp_path: Path):
+    bridge = HostBridge(whitelist_file=tmp_path / "whitelist.txt")
+    monkeypatch.setattr(HostBridge, "validate", lambda self, command: None)
+    monkeypatch.setattr(HostBridge, "translate", lambda self, command: command)
+
+    captured: dict[str, object] = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return _Proc()
+
+    monkeypatch.setattr("core.core.host_bridge.subprocess.run", fake_run)
+    result = bridge.execute(["git", "status"], cwd=str(tmp_path), timeout=5)
+
+    assert result.returncode == 0
+    assert captured["command"] == ["git", "status"]
+    assert captured["cwd"] == str(tmp_path)
+
+
+
+def test_translate_dh_via_distrobox(monkeypatch):
+    bridge = HostBridge()
+
+    monkeypatch.setattr(HostBridge, "detect_mode", lambda self: "flatpak-spawn")
+    monkeypatch.setattr(type(bridge.distrobox_bridge), "ensure_gh_ready", lambda self, mode: "ghbox")
+
+    translated = bridge.translate(["dh", "git", "push", "origin", "main"])
+    assert translated == [
+        "flatpak-spawn",
+        "--host",
+        "distrobox",
+        "enter",
+        "ghbox",
+        "--",
+        "git",
+        "push",
+        "origin",
+        "main",
+    ]
