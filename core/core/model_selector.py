@@ -10,6 +10,7 @@ from .openai_runtime_router import OpenAIRuntimeRouter
 from .qwen_runtime_router import QwenRuntimeRouter
 from .model_lifecycle import ModelLifecycleManager
 from .mimo_bridge import MimoBridge, MimoModel
+from .experience_policy_learner import ExperiencePolicyLearner
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class ModelSelector:
         self._api: Any | None = None
         self.mimo_bridge = MimoBridge()
         self.mimo_models: list[MimoModel] = []
+        self.experience_policy = ExperiencePolicyLearner()
 
     def sync_with_mimo(self) -> None:
         self.mimo_models = self.mimo_bridge.get_models()
@@ -177,7 +179,7 @@ class ModelSelector:
 
         task_family = str(local.get("task_family") or "general")
         should_delegate = bool(local.get("should_delegate"))
-        preferred_model = str(local.get("preferred_model") or "").strip()
+        preferred_model = str(local.get("preferred_model") or local.get("recommended_model") or local.get("model_hint") or "").strip()
         budget_pressure = str(local.get("budget_pressure") or "normal")
         context_depth_hint = int(local.get("context_depth") or 0)
         profile_weights = local.get("profile_weights") if isinstance(local.get("profile_weights"), dict) else {}
@@ -202,6 +204,33 @@ class ModelSelector:
 
         return None
 
+    def _apply_experience_policy(self, task: Task, choice: ModelChoice) -> ModelChoice:
+        learner = getattr(self._api, "experience_policy_learner", None) if self._api else self.experience_policy
+        if learner is None or task.priority == Priority.CRITICAL or choice.complexity == Complexity.CRITICAL:
+            return choice
+
+        allowed_providers = {choice.provider}
+        recommendation = learner.recommend_model(task_type=task.type.value, allowed_providers=allowed_providers)
+        if recommendation is None:
+            return choice
+        recommended_model = str(recommendation.get("model_name") or "").strip()
+        if not recommended_model or recommended_model == choice.model_name:
+            return choice
+
+        learned_score = float(recommendation.get("score") or 0.0)
+        learned_samples = int(recommendation.get("samples") or 0)
+        return ModelChoice(
+            recommended_model,
+            str(recommendation.get("provider") or choice.provider),
+            choice.complexity,
+            params=choice.params,
+            requires_secondary_review=choice.requires_secondary_review,
+            detected_keywords=choice.detected_keywords,
+            matched_high_risk_rules=choice.matched_high_risk_rules,
+            matched_low_risk_exemptions=choice.matched_low_risk_exemptions,
+            reason=f"experience_policy:{task.type.value}:{recommended_model}:score={learned_score:.2f}:samples={learned_samples}",
+        )
+
     def _openai_choice(self, task: Task, complexity: Complexity, secondary_review: bool, reason: str, fallback_model: str) -> ModelChoice:
         if not OpenAIRuntimeRouter.enabled():
             return ModelChoice(fallback_model, "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=reason)
@@ -218,19 +247,22 @@ class ModelSelector:
         risk = evaluate_risk_context(self._task_text(task))
 
         if self._should_escalate_to_cloud(task, complexity, risk):
-            return self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o")
+            return self._apply_experience_policy(task, self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o"))
 
         local_choice = self._local_policy_choice(task, complexity, advisory_context)
         if local_choice:
-            return local_choice
+            return self._apply_experience_policy(task, local_choice)
 
-        return ModelChoice(
-            MODEL_QWEN_CODER,
-            "local",
-            complexity,
-            params=ModelParams(temperature=0.5, context_depth=1),
-            requires_secondary_review=False,
-            reason="policy_default_utility_qwen",
+        return self._apply_experience_policy(
+            task,
+            ModelChoice(
+                MODEL_QWEN_CODER,
+                "local",
+                complexity,
+                params=ModelParams(temperature=0.5, context_depth=1),
+                requires_secondary_review=False,
+                reason="policy_default_utility_qwen",
+            ),
         )
 
 def evaluate_risk_context(text: str) -> RiskEvaluation:

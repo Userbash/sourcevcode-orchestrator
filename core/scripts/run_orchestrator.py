@@ -19,6 +19,7 @@ from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
 from core.agents.frontend_dev_agent import FrontendDevAgent
 from core.agents.frontend_design_agent import FrontendDesignAgent
+from core.agents.local_llm_agent import LocalLLMAgent
 from core.core.orchestration_config import OrchestrationConfig
 from core.core.dependency_manager import DependencyManager
 from core.core.orchestrator import Orchestrator
@@ -74,6 +75,7 @@ async def main(argv: list[str] | None = None) -> None:
     orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
     orchestrator.attach_local_agent("frontend-dev-1", FrontendDevAgent("frontend-dev-1"), agent_type="codex", model_name=os.getenv("CODEX_OPENAI_MODEL", "gpt-4o"), provider="openai")
     orchestrator.attach_local_agent("frontend-design-1", FrontendDesignAgent("frontend-design-1"), agent_type="docs", model_name="design-spec", provider="local")
+    orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")), agent_type="custom", critical=False, model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"), provider="local")
 
     print(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")
     try:

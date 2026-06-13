@@ -136,3 +136,38 @@ def test_local_llm_module_builds_layered_decomposition_draft(monkeypatch):
     assert advisory["decomposition"]["status"] == "model"
     assert [layer["name"] for layer in advisory["decomposition"]["layers"]] == ["intake", "analysis"]
     assert advisory["decomposition"]["agent_map"]["planner"] == ["intake"]
+
+
+def test_local_llm_module_query_uses_requested_model(monkeypatch):
+    calls = {}
+
+    def fake_get(url: str, timeout: float):
+        return _Response(payload={"models": [{"name": "custom-local"}]})
+
+    def fake_post(url: str, json: dict[str, object], timeout: float):
+        calls["model"] = json["model"]
+        calls["system"] = json["system"]
+        return _Response(payload={"response": "ok"})
+
+    monkeypatch.setattr("core.core.local_llm_module.requests.get", fake_get)
+    monkeypatch.setattr("core.core.local_llm_module.requests.post", fake_post)
+
+    module = LocalLLMModule(model_name="custom-local")
+    response = module.query("ping", model_name="custom-local", system="sys")
+
+    assert response == "ok"
+    assert calls["model"] == "custom-local"
+    assert calls["system"] == "sys"
+
+
+def test_local_llm_advisory_exposes_preferred_model(monkeypatch):
+    monkeypatch.setattr("core.core.local_llm_module.requests.get", lambda url, timeout: _Response(payload={"models": [{"name": "qwen2.5:32b-instruct-q4_k_m"}]}))
+
+    module = LocalLLMModule()
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+    task = Task(TaskType.DOCS, TaskInput("Draft docs summary"), TaskContext("demo", ".", "main"))
+
+    advisory = module.build_advisory(task, {"description": task.input.description})
+
+    assert advisory["preferred_model"] == module.model_name
+    assert advisory["recommended_model"] == module.model_name

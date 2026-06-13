@@ -215,7 +215,12 @@ class UnifiedVFSModule:
                 )
                 return [dict(row) for row in rows]
 
-        rows = asyncio.run_coroutine_threadsafe(_recover(), self._loop).result(timeout=10) if self._loop and self._loop.is_running() else asyncio.run(_recover())
+        try:
+            rows = asyncio.run_coroutine_threadsafe(_recover(), self._loop).result(timeout=10) if self._loop and self._loop.is_running() else asyncio.run(_recover())
+        except Exception as exc:
+            if self._api:
+                self._api.log("warning", f"[VFS] State recovery skipped during load: {exc}")
+            rows = []
         with self._memory_lock:
             for row in rows:
                 self._nodes[row["file_path"]] = VFSNode(

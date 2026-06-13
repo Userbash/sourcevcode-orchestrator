@@ -233,12 +233,16 @@ class PersistentMemoryManager:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         (self.storage_dir / "memories").mkdir(exist_ok=True)
         (self.storage_dir / "commands").mkdir(exist_ok=True)
+        (self.storage_dir / "trained_memories").mkdir(exist_ok=True)
         self.index_file = self.storage_dir / "memory_index.json"
         self.session_map_file = self.storage_dir / "session_map.json"
+        self.trained_index_file = self.storage_dir / "trained_memory_index.json"
         if not self.index_file.exists():
             self.index_file.write_text("[]", encoding="utf-8")
         if not self.session_map_file.exists():
             self.session_map_file.write_text("{}", encoding="utf-8")
+        if not self.trained_index_file.exists():
+            self.trained_index_file.write_text("[]", encoding="utf-8")
 
         self._records: list[dict[str, Any]] = self._read_json(self.index_file, default=[])
         self._by_sat: dict[tuple[str, str, str], list[int]] = {}
@@ -247,6 +251,10 @@ class PersistentMemoryManager:
         for idx, row in enumerate(self._records):
             self._index_record(row, idx)
             self._max_memory_id = max(self._max_memory_id, int(row.get("memory_id", 0)))
+        self._trained_records: list[dict[str, Any]] = self._read_json(self.trained_index_file, default=[])
+        self._max_trained_memory_id = 0
+        for row in self._trained_records:
+            self._max_trained_memory_id = max(self._max_trained_memory_id, int(row.get("trained_memory_id", 0)))
 
         mode = "etcd" if self._etcd_enabled else ("PostgreSQL" if self._pg_enabled else "file")
         logger.info("[MEMORY] Operating in %s mode.", mode)
@@ -605,7 +613,24 @@ class PersistentMemoryManager:
                     row = cur.fetchone()
                     return int(row[0])
 
-        return 0
+        self._max_trained_memory_id += 1
+        now_iso = datetime.now(UTC).isoformat()
+        record = {
+            "trained_memory_id": self._max_trained_memory_id,
+            "session_id": normalized_session_id,
+            "source_session_id": session_id,
+            "agent_id": agent_id,
+            "source_memory_ids": list(source_memory_ids or []),
+            "memory_domain": memory_domain,
+            "content": content,
+            "metadata": metadata,
+            "quality_score": quality_score,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+        self._trained_records.append(record)
+        self._write_json(self.trained_index_file, self._trained_records)
+        return self._max_trained_memory_id
 
     def retrieve_trained_memories(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int = 8) -> list[TrainedMemoryRecord]:
         normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
@@ -625,7 +650,67 @@ class PersistentMemoryManager:
                         (normalized_session_id, agent_id, memory_domain, limit),
                     )
                     return [self._trained_record_from_row(row) for row in cur.fetchall()]
-        return []
+        rows = [
+            row for row in self._trained_records
+            if str(row.get("session_id", "")) == normalized_session_id
+            and str(row.get("agent_id", "")) == agent_id
+            and str(row.get("memory_domain", "")) == memory_domain
+        ]
+        rows.sort(key=lambda row: int(row.get("trained_memory_id", 0)), reverse=True)
+        return [self._trained_record_from_dict(row) for row in rows[:limit]]
+
+    def list_trained_memories(self, *, limit: int = 200) -> list[TrainedMemoryRecord]:
+        bounded_limit = max(1, int(limit))
+        if self._pg_enabled:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT trained_memory_id, session_id, agent_id, source_memory_ids, memory_domain,
+                               content, metadata, quality_score, created_at, updated_at
+                        FROM {AI_BRIDGE_SCHEMA}.trained_memories
+                        ORDER BY trained_memory_id DESC
+                        LIMIT %s
+                        """,
+                        (bounded_limit,),
+                    )
+                    return [self._trained_record_from_row(row) for row in cur.fetchall()]
+        rows = sorted(self._trained_records, key=lambda row: int(row.get("trained_memory_id", 0)), reverse=True)
+        return [self._trained_record_from_dict(row) for row in rows[:bounded_limit]]
+
+    def list_memories(self, *, limit: int = 200, memory_type_prefix: str | None = None) -> list[MemoryRecord]:
+        bounded_limit = max(1, int(limit))
+        prefix = str(memory_type_prefix or "").strip()
+        if self._pg_enabled:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    if prefix:
+                        cur.execute(
+                            f"""
+                            SELECT memory_id, session_id, agent_id, memory_type, content, metadata, importance_score, created_at, updated_at
+                            FROM {AI_BRIDGE_SCHEMA}.memories
+                            WHERE memory_type LIKE %s
+                            ORDER BY memory_id DESC
+                            LIMIT %s
+                            """,
+                            (f"{prefix}%", bounded_limit),
+                        )
+                    else:
+                        cur.execute(
+                            f"""
+                            SELECT memory_id, session_id, agent_id, memory_type, content, metadata, importance_score, created_at, updated_at
+                            FROM {AI_BRIDGE_SCHEMA}.memories
+                            ORDER BY memory_id DESC
+                            LIMIT %s
+                            """,
+                            (bounded_limit,),
+                        )
+                    return [self._record_from_row(row) for row in cur.fetchall()]
+        rows = list(self._records)
+        if prefix:
+            rows = [row for row in rows if str(row.get("memory_type", "")).startswith(prefix)]
+        rows.sort(key=lambda row: int(row.get("memory_id", 0)), reverse=True)
+        return [self._record_from_dict(row) for row in rows[:bounded_limit]]
 
     def flush_all(self) -> int:
         return 0
@@ -771,6 +856,21 @@ class PersistentMemoryManager:
             content=row.get("content"),
             metadata=dict(row.get("metadata") or {}),
             importance_score=float(row.get("importance_score", 0.5)),
+            created_at=str(row.get("created_at", "")),
+            updated_at=str(row.get("updated_at", "")),
+        )
+
+    @staticmethod
+    def _trained_record_from_dict(row: dict[str, Any]) -> TrainedMemoryRecord:
+        return TrainedMemoryRecord(
+            trained_memory_id=int(row.get("trained_memory_id", 0)),
+            session_id=str(row.get("session_id", "")),
+            agent_id=str(row.get("agent_id", "")),
+            source_memory_ids=list(row.get("source_memory_ids", []) or []),
+            memory_domain=str(row.get("memory_domain", "")),
+            content=row.get("content"),
+            metadata=dict(row.get("metadata") or {}),
+            quality_score=float(row.get("quality_score", 0.0)),
             created_at=str(row.get("created_at", "")),
             updated_at=str(row.get("updated_at", "")),
         )

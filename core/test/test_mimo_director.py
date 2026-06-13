@@ -183,3 +183,25 @@ def test_director_persisted_kpi_store_roundtrip(tmp_path):
     reloaded.kpi_store_path = director.kpi_store_path
     reloaded._load_persisted_kpi_windows()
     assert ("docs", "model-persist") in reloaded.task_kpi_windows
+
+
+import asyncio
+
+from core.mimo.bridge import MimoAsyncBridge, MimoModelSnapshot
+
+
+def test_mimo_bridge_ping_model_falls_back_to_cached_models():
+    bridge = MimoAsyncBridge()
+    bridge._cached_models = [
+        MimoModelSnapshot(
+            full_id="xiaomi/mimo-v2-pro",
+            id="mimo-v2-pro",
+            provider="xiaomi",
+            status="active",
+            context_window=1048576,
+        )
+    ]
+
+    assert asyncio.run(bridge.ping_model("xiaomi/mimo-v2-pro")) is True
+    assert asyncio.run(bridge.ping_model("mimo-v2-pro")) is True
+    assert asyncio.run(bridge.ping_model("missing-model")) is False

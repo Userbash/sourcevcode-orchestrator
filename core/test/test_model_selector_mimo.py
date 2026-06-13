@@ -63,3 +63,22 @@ def test_model_selector_adjusts_context_depth_from_mimo():
     )
     assert choice.model_name == "qwen-2.5-7b-instruct"
     assert choice.params.context_depth >= 5
+
+
+def test_model_selector_uses_recommended_model_when_preferred_missing():
+    selector = ModelSelector()
+    task = _task(TaskType.DOCS, "write a concise guide")
+    choice = selector.select(
+        task,
+        advisory_context={
+            "local_llm": {
+                "ready": True,
+                "should_delegate": True,
+                "recommended_model": "qwen-2.5-7b-instruct",
+                "budget_pressure": "low",
+                "task_family": "docs_workflow",
+            }
+        },
+    )
+    assert choice.model_name == "qwen-2.5-7b-instruct"
+    assert choice.provider == "local"

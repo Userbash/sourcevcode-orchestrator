@@ -190,3 +190,22 @@ def test_kpi_validation_detects_missing_task_telemetry(tmp_path):
 
     assert report["task_lifecycle_events"] == 0
     assert "no_task_lifecycle_events" in report["anomalies"]
+
+
+def test_file_backed_trained_memory_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_MEMORY_STORE_DIR", str(tmp_path / "memory_store"))
+    manager = PersistentMemoryManager()
+    trained_id = manager.store_trained_memory(
+        session_id="s1",
+        agent_id="a1",
+        memory_domain="prompt:code",
+        content={"task_type": "code", "summary": "use safe refactors"},
+        metadata={"model_name": "qwen2.5:32b-instruct-q4_k_m", "provider": "local"},
+        quality_score=0.91,
+    )
+
+    assert trained_id > 0
+    listed = manager.list_trained_memories(limit=5)
+    assert listed and listed[0].memory_domain == "prompt:code"
+    retrieved = manager.retrieve_trained_memories(session_id="s1", agent_id="a1", memory_domain="prompt:code", top_k=1)
+    assert retrieved and retrieved[0].quality_score == 0.91

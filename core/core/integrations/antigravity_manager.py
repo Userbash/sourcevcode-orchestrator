@@ -23,6 +23,7 @@ class AntigravityManager:
         self.login_timeout = self._read_int("AI_BRIDGE_ANTIGRAVITY_LOGIN_TIMEOUT_SEC", 60)
         self.api_key = (os.getenv("ANTIGRAVITY_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
         self.api_base_url = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        self.proxy_url = os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip().rstrip("/")
 
     @staticmethod
     def _read_int(key: str, default: int) -> int:
@@ -50,7 +51,41 @@ class AntigravityManager:
             return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
 
     def _run_agy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
+        if self.proxy_url:
+            return self._run_agy_via_proxy(args, timeout=timeout)
         return self._run_host(["agy", *args], timeout=timeout)
+
+    def _run_agy_via_proxy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
+        if not args:
+            return {"ok": False, "stdout": "", "stderr": "empty_args", "error": "empty_args", "command": ["agy"]}
+        try:
+            timeout_sec = timeout or self.probe_timeout
+            if args[:1] == ["models"]:
+                response = httpx.get(f"{self.proxy_url}/models", timeout=timeout_sec)
+                payload = response.json()
+                models = payload.get("models", []) if isinstance(payload, dict) else []
+                stdout = "\n".join(str(item) for item in models)
+                return {
+                    "ok": bool(payload.get("ok")),
+                    "stdout": stdout,
+                    "stderr": str(payload.get("stderr", "")),
+                    "exit_code": int(payload.get("exit_code", 0 if payload.get("ok") else 1)),
+                    "command": ["agy", *args],
+                }
+            if args and args[0] == "-p":
+                prompt = args[1] if len(args) > 1 else ""
+                response = httpx.post(f"{self.proxy_url}/prompt", json={"prompt": prompt, "timeout_sec": timeout_sec}, timeout=timeout_sec + 10)
+                payload = response.json()
+                return {
+                    "ok": bool(payload.get("ok")),
+                    "stdout": str(payload.get("stdout", "")),
+                    "stderr": str(payload.get("stderr", "")),
+                    "exit_code": int(payload.get("exit_code", 0 if payload.get("ok") else 1)),
+                    "command": ["agy", *args],
+                }
+            return {"ok": False, "stdout": "", "stderr": "unsupported_proxy_args", "error": "unsupported_proxy_args", "command": ["agy", *args]}
+        except Exception as exc:
+            return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": ["agy", *args]}
 
     def _run_login_helper(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
         helper = Path(__file__).resolve().parents[2] / "scripts" / "antigravity_login.py"

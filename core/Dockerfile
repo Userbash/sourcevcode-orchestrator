@@ -10,6 +10,8 @@ COPY core/requirements-ai.txt /app/core/requirements-ai.txt
 RUN pip install --no-cache-dir -r /app/core/requirements-ai.txt
 
 COPY core /app/core
+COPY core/bin/agy /usr/local/bin/agy
+RUN chmod 0755 /usr/local/bin/agy
 
 ENV PYTHONPATH=/app
 EXPOSE 8000

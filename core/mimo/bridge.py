@@ -52,16 +52,22 @@ class MimoAsyncBridge:
         return list(self._cached_models)
 
     async def ping_model(self, model_name: str) -> bool:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "mimo", "ping", "--model", model_name,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-            return proc.returncode == 0
-        except Exception:
+        normalized = (model_name or "").strip().lower()
+        if not normalized:
             return False
+
+        # Current mimo CLI does not expose a dedicated `ping` subcommand.
+        # Treat model discovery as the compatibility health-check so the
+        # director can stay operational with the installed CLI.
+        cached = self.get_cached_models()
+        if not cached:
+            cached = await self.refresh_cache()
+        for model in cached:
+            full_id = (model.full_id or "").strip().lower()
+            short_id = (model.id or "").strip().lower()
+            if normalized in {full_id, short_id}:
+                return str(model.status or "").lower() not in {"offline", "error", "disabled"}
+        return False
 
     async def refresh_cache(self) -> list[MimoModelSnapshot]:
         return await self.get_models()

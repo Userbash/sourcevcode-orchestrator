@@ -22,7 +22,7 @@ from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
 from .model_selector import ModelSelector
-from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus
+from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
@@ -59,7 +59,8 @@ from .dev_toolkit_module import DevToolkitModule
 from .dependency_manager import DependencyManager
 from .self_diagnostic_module import SelfDiagnosticModule
 from ..mimo.proxy import MimoOrchestrationDirector
-
+from .experience_policy_learner import ExperiencePolicyLearner
+from .experience_training_pipeline import ExperienceTrainingPipeline
 
 
 from .local_llm_bridge import LocalLLMBridge
@@ -219,6 +220,8 @@ class Orchestrator:
         self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
         self.mimo_director = MimoOrchestrationDirector()
+        self.experience_policy_learner = ExperiencePolicyLearner()
+        self.experience_trainer = ExperienceTrainingPipeline()
         self.mimo_director.set_memory_source(self.session_memory)
         self.mimo_director.set_history_source(self.session_memory)
         self.mimo_director.set_kpi_source(self.kpi)
@@ -309,6 +312,8 @@ class Orchestrator:
         self.module_manager.load("orchestrator_advisor")
         self.module_manager.load("intelligence")
         self.module_manager.load("security_sentinel")
+        self.experience_policy_learner.refresh(persistent=self.session_memory.hybrid.persistent)
+        self.experience_trainer.train(persistent=self.session_memory.hybrid.persistent)
 
         # Load local_llm before autostart so the module is available for
         # advisory context and readiness checks during kernel boot.
@@ -375,6 +380,8 @@ class Orchestrator:
 
     def _enqueue_training_consolidation(self, task: Task, result: AgentResult) -> None:
         memory_domain = self._training_memory_domain(task)
+        model_name = str(result.model_name or getattr(task, "assigned_model", "") or "").strip()
+        provider = str(result.provider or "").strip().lower()
         payload = {
             "session_id": task.session_id or task.task_id,
             "agent_id": result.agent_id or "orchestrator",
@@ -387,6 +394,8 @@ class Orchestrator:
                 "task_id": task.task_id,
                 "status": result.status.value,
                 "memory_domain": memory_domain,
+                "model_name": model_name,
+                "provider": provider,
             },
         }
         if not payload["summary"]:
@@ -420,6 +429,15 @@ class Orchestrator:
                 processed += 1
             except Exception:
                 self.log("warning", f"[MEMORY] Failed to consolidate trained memory for task_type={item.get('task_type')}")
+        if processed:
+            try:
+                self.experience_policy_learner.refresh(persistent=self.session_memory.hybrid.persistent)
+            except Exception as exc:
+                self.log("warning", f"[MEMORY] Experience policy refresh failed: {exc}")
+            try:
+                self.experience_trainer.train(persistent=self.session_memory.hybrid.persistent)
+            except Exception as exc:
+                self.log("warning", f"[MEMORY] Experience training refresh failed: {exc}")
         return processed
 
     async def _training_consolidation_loop(self) -> None:
@@ -540,6 +558,7 @@ class Orchestrator:
     def attach_local_agent(self, agent_id: str, agent: BaseAgent, agent_type: str = "custom", critical: bool = False, model_name: str = "local-small", provider: str = "local") -> None:
         self.local_agents[agent_id] = agent
         agent.set_host_bridge(self.host_bridge)
+        setattr(agent, "orchestrator", self)
         if not self.registry.get(agent_id):
             self.registry.register(agent_id, agent_type, f"local://{agent_id}", agent.capabilities, critical=critical, model_name=model_name, provider=provider)
             self.metrics.register_agent(self.registry.get(agent_id))  # type: ignore[arg-type]

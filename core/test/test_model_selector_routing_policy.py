@@ -144,6 +144,32 @@ def _execute_case(case: RoutingCase) -> dict[str, object]:
         }
 
 
+def test_selector_applies_experience_policy_override():
+    selector = ModelSelector()
+
+    class Learner:
+        def recommend_model(self, *, task_type: str, allowed_providers: set[str] | None = None, min_samples: int = 3, min_score: float = 0.65):
+            assert task_type == "code"
+            assert allowed_providers == {"local"}
+            return {
+                "model_name": MODEL_DEEPSEEK_R1,
+                "provider": "local",
+                "score": 0.91,
+                "samples": 6,
+            }
+
+    class API:
+        experience_policy_learner = Learner()
+
+    selector.set_api(API())
+    task = _task(TaskType.CODE, "refactor service module", Complexity.MEDIUM)
+    choice = selector.select(task)
+
+    assert choice.model_name == MODEL_DEEPSEEK_R1
+    assert choice.provider == "local"
+    assert choice.reason.startswith("experience_policy:code:")
+
+
 CASES = [
     RoutingCase(
         name="simple docs cleanup",

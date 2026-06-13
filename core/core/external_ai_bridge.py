@@ -4,6 +4,8 @@ import os
 import shutil
 import subprocess
 import time
+
+import httpx
 from dataclasses import dataclass
 
 try:
@@ -35,6 +37,7 @@ class ExternalAIBridge:
     def __init__(self, host_bridge: HostBridge | None = None) -> None:
         self.host_bridge = host_bridge
         self.router = AntigravityRuntimeRouter()
+        self.proxy_url = os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip().rstrip("/")
 
     @staticmethod
     def resolve_antigravity_cli_command() -> list[str] | None:
@@ -73,6 +76,21 @@ class ExternalAIBridge:
     def _gemini_runtime_env() -> dict[str, str]:
         # Legacy compatibility path retained for older call sites.
         return ExternalAIBridge._antigravity_runtime_env()
+
+    def _run_prompt_via_proxy(self, prompt: str, timeout_sec: int) -> BridgeExecResult | None:
+        if not self.proxy_url:
+            return None
+        try:
+            response = httpx.post(f"{self.proxy_url}/prompt", json={"prompt": prompt, "timeout_sec": timeout_sec}, timeout=timeout_sec + 10)
+            payload = response.json()
+            if payload.get("ok"):
+                output = str(payload.get("stdout", "")).strip()
+                return BridgeExecResult(True, output, "", "antigravity-cli", "antigravity-proxy", 1, error_type="none")
+            err = str(payload.get("stderr") or payload.get("error") or "proxy_error")
+            return BridgeExecResult(False, "", err, "antigravity-cli", "antigravity-proxy", 1, error_type=self.classify_error(err))
+        except Exception as exc:
+            err = f"proxy_error: {exc}"
+            return BridgeExecResult(False, "", err, "antigravity-cli", "antigravity-proxy", 1, error_type=self.classify_error(err))
 
     @staticmethod
     def _retries() -> int:
@@ -152,6 +170,9 @@ class ExternalAIBridge:
         return "unknown"
 
     def run_antigravity_cli(self, task: Task, prompt: str, timeout_sec: int = 120) -> BridgeExecResult:
+        proxied = self._run_prompt_via_proxy(prompt, timeout_sec)
+        if proxied is not None:
+            return proxied
         retries = self._retries()
         plan = self.router.build_plan(task, prompt)
         attempts = 0
