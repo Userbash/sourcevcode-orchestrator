@@ -267,3 +267,132 @@ def test_api_bridge_full_health_snapshot_contains_providers_and_agents():
     assert snapshot["summary"]["agent_count"] == 2
     assert snapshot["sourcecraft"]["role"]["name"] == "sourcecraft"
     assert snapshot["modules"]["sourcecraft"]["status"] == "ready"
+
+
+
+def test_sourcecraft_repo_action_requires_mutation_opt_in(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    result = module.execute_repo_action("push_branch", repo_path=".", branch="feature/test")
+
+    assert result["status"] == "rejected"
+    assert "allow_mutation" in result["reason"]
+
+
+def test_sourcecraft_repo_action_dry_run_exposes_git_command(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    result = module.execute_repo_action(
+        "merge_branch",
+        repo_path=".",
+        branch="feature/mimo",
+        target_branch="main",
+        allow_mutation=True,
+        dry_run=True,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["command"] == ["git", "merge", "--no-ff", "feature/mimo"]
+    assert result["target_branch"] == "main"
+
+
+def test_api_bridge_sourcecraft_repo_operation_preview(tmp_path, monkeypatch):
+    from core.core.api_bridge_module import APIBridgeModule, SourceCraftRepoRequest
+
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    class _API:
+        def __init__(self):
+            self.sourcecraft = SourceCraftModule()
+            self.sourcecraft.on_load(_FakeAPI())
+
+        def get_module(self, name):
+            return self.sourcecraft if name == "sourcecraft" else None
+
+    module = APIBridgeModule()
+    module._api = _API()
+    response = module._sourcecraft_repo(SourceCraftRepoRequest(action="create_branch", repo_path=".", branch="feature/sourcecraft", allow_mutation=True, dry_run=True))
+
+    assert response["status"] == "dry_run"
+    assert response["operation"]["command"] == ["git", "checkout", "-b", "feature/sourcecraft"]
+    assert response["sourcecraft"]["execution"]["tools"]["src"] is True
+
+
+
+def test_sourcecraft_push_branch_uses_dh_runner_in_dry_run(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    result = module.execute_repo_action(
+        "push_branch",
+        repo_path=".",
+        branch="feature/sourcecraft",
+        allow_mutation=True,
+        dry_run=True,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["runner"] == "dh"
+    assert result["command"] == ["dh", "git", "push", "-u", "origin", "feature/sourcecraft"]
+
+
+def test_sourcecraft_create_pr_uses_src_runner_in_dry_run(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    monkeypatch.setattr(module, "_resolve_repo_slug", lambda repo_path: "Userbash/sourcevcode-orchestrator")
+    result = module.execute_repo_action(
+        "create_pr",
+        repo_path=".",
+        branch="feature/sourcecraft",
+        target_branch="main",
+        allow_mutation=True,
+        dry_run=True,
+        title="Wire SourceCraft publish flow",
+        description="Connect SourceCraft repo actions to kernel execution",
+        reviewers=["alice", "bob"],
+        draft=True,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["runner"] == "src"
+    assert result["repo_slug"] == "Userbash/sourcevcode-orchestrator"
+    assert result["command"] == [
+        "pr",
+        "create",
+        "-R",
+        "Userbash/sourcevcode-orchestrator",
+        "--title",
+        "Wire SourceCraft publish flow",
+        "--base",
+        "main",
+        "--head",
+        "feature/sourcecraft",
+        "--description",
+        "Connect SourceCraft repo actions to kernel execution",
+        "--draft",
+        "--reviewer",
+        "alice",
+        "--reviewer",
+        "bob",
+    ]

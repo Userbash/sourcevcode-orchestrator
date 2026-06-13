@@ -23,6 +23,8 @@ class HostBridge:
     default_allowlist: list[str] = field(default_factory=lambda: [
         "git",
         "gh",
+        "dh",
+        "src",
         "distrobox",
         "distrobox-enter",
         "distrobox-list",
@@ -144,11 +146,24 @@ class HostBridge:
         except DistroboxBridgeError as exc:
             raise HostBridgeError(str(exc)) from exc
 
+
+    def _translate_dh(self, command: list[str], mode: str) -> list[str]:
+        inner = command[1:]
+        if not inner:
+            raise HostBridgeError("dh requires a nested command")
+        try:
+            box_name = self.distrobox_bridge.ensure_gh_ready(mode)
+            return self.distrobox_bridge.translate_exec(mode, box_name, inner)
+        except DistroboxBridgeError as exc:
+            raise HostBridgeError(str(exc)) from exc
+
     def translate(self, command: list[str]) -> list[str]:
         mode = self.detect_mode()
 
         if command[0] == "gh":
             return self._translate_gh(command, mode)
+        if command[0] == "dh":
+            return self._translate_dh(command, mode)
 
         if mode == "flatpak-spawn":
             if len(command) >= 2 and command[0] == "podman" and command[1] == "compose":
@@ -172,6 +187,7 @@ class HostBridge:
         self,
         command: list[str],
         *,
+        cwd: str | None = None,
         timeout: int | None = None,
         capture_output: bool = True,
         text: bool = True,
@@ -186,4 +202,11 @@ class HostBridge:
                 raise HostBridgeError(str(exc)) from exc
 
         translated = self.translate(command)
-        return subprocess.run(translated, timeout=timeout, capture_output=capture_output, text=text, check=check)
+        return subprocess.run(
+            translated,
+            cwd=cwd,
+            timeout=timeout,
+            capture_output=capture_output,
+            text=text,
+            check=check,
+        )
