@@ -725,8 +725,11 @@ class Orchestrator:
                         "branch": task.context.branch,
                     },
                 )
+                if hasattr(sourcecraft_module, "ensure_ready"):
+                    advisory_context["sourcecraft_runtime"] = sourcecraft_module.ensure_ready(repo_path=task.context.repo_path or ".")
             except Exception:
                 advisory_context["sourcecraft"] = {"enabled": False, "should_delegate": False}
+                advisory_context["sourcecraft_runtime"] = {"status": "error"}
 
         local_llm_module = self.module_manager.get_module("local_llm") if hasattr(self.module_manager, "get_module") else None
         if local_llm_module and isinstance(local_llm_module, LocalLLMModule):
@@ -750,6 +753,29 @@ class Orchestrator:
     def create_execution_plan(self, task: Task) -> ExecutionPlan:
         self.console.emit("PLAN", "Задача проанализирована")
         advisory_context = self._build_decomposition_advisory(task)
+
+        sourcecraft_module = self.module_manager.get_module("sourcecraft")
+        if sourcecraft_module and hasattr(sourcecraft_module, "build_execution_plan"):
+            try:
+                sourcecraft_plan = sourcecraft_module.build_execution_plan(
+                    task,
+                    {
+                        "description": task.input.description,
+                        "repo_path": task.context.repo_path,
+                        "branch": task.context.branch,
+                    },
+                )
+                if sourcecraft_plan and getattr(sourcecraft_plan, "atomic_tasks", None):
+                    tdd_policy = self.module_manager.get_module("tdd_policy")
+                    if isinstance(tdd_policy, StrictTDDModule):
+                        sourcecraft_plan = tdd_policy.enforce_plan(sourcecraft_plan)
+                    readability_policy = self.module_manager.get_module("readability_policy")
+                    if isinstance(readability_policy, CodeReadabilityModule):
+                        sourcecraft_plan = readability_policy.enforce_plan(sourcecraft_plan)
+                    self.console.emit("PLAN", f"SourceCraft execution plan created: {len(sourcecraft_plan.atomic_tasks)} tasks")
+                    return sourcecraft_plan
+            except Exception as e:
+                self.console.emit("PLAN", f"SourceCraft planning fallback: {e}")
 
         # Try smart decomposition first (Higher level AI/Reasoning)
         smart_decomp = self.module_manager.get_module("smart_decomposer")
