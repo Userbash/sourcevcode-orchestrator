@@ -228,7 +228,15 @@ class LocalLLMModule(KernelModule):
             "error": last_exc,
         }
 
-    def query(self, prompt: str, model_name: str | None = None) -> str:
+    def query(
+        self,
+        prompt: str,
+        model_name: str | None = None,
+        *,
+        system: str | None = None,
+        options: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
+    ) -> str:
         target_model = (model_name or self.model_name).strip()
         readiness = self.can_use_model(target_model)
         if not readiness["ok"]:
@@ -244,12 +252,13 @@ class LocalLLMModule(KernelModule):
                     "model": target_model,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
+                    **({"system": system} if system else {}),
+                    "options": options or {
                         "temperature": 0.2,
                         "top_p": 0.9,
                     },
                 },
-                timeout=max(2.0, self.timeout_sec * 10),
+                timeout=timeout_sec or max(2.0, self.timeout_sec * 10),
             )
             response.raise_for_status()
             duration = time.perf_counter() - start_time
@@ -616,24 +625,6 @@ class LocalLLMModule(KernelModule):
             return resp.status_code == 200
         except Exception:
             return False
-
-    def query(self, prompt: str, system: str = "You are a specialized AI Kernel Optimizer.") -> str:
-        """Synchronous query for internal kernel tasks."""
-        if not self.ready:
-            return ""
-        try:
-            payload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "system": system,
-                "stream": False,
-                "options": {"temperature": 0.1}
-            }
-            resp = requests.post(f"{self.endpoint}/api/generate", json=payload, timeout=300)
-            return resp.json().get("response", "").strip()
-        except Exception as e:
-            logger.error(f"Local LLM query failed: {e}")
-            return ""
 
     def compact_memory(self, raw_data: list[dict[str, Any]]) -> str:
         """Uses local LLM to turn raw logs/history into a dense semantic summary."""

@@ -134,6 +134,13 @@ class TaskDecomposer:
             layer_name = str(layer.get("name") or f"layer_{index}").strip() or f"layer_{index}"
             objective = str(layer.get("objective") or layer_name).strip()
             capability = self._capability_from_layer(layer_name, objective, layer.get("capability"))
+            draft_layers.append({
+                "name": layer_name,
+                "objective": objective,
+                "capability": capability,
+                "task_type": str(layer.get("task_type") or "code").strip().lower() or "code",
+                "parallel": bool(layer.get("parallel") or layer.get("parallel_group") or len(self._ensure_list(layer.get("sub_agents"))) > 1),
+            })
             task_type = self._normalize_task_type(layer.get("task_type"), TaskType.CODE, objective=objective)
             if task_type == TaskType.PLAN and index == 0:
                 task_type = TaskType.PLAN
@@ -169,7 +176,8 @@ class TaskDecomposer:
                             "source": "local_llm" if draft.get("status") == "model" else "heuristic",
                         },
                     )
-                    agent_atomic.required_capability = capability # or derived from agent_hint
+                    agent_atomic.required_capability = capability
+                    agent_atomic.routing_hints["parallel_group"] = True
                     id_by_layer[f"{layer_name}_{agent_hint}"] = agent_atomic.task_id
                     group_task_ids.append(agent_atomic.task_id)
                     tasks.append(agent_atomic)

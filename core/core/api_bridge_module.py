@@ -204,7 +204,9 @@ class APIBridgeModule:
         module_state = module_manager.finalize() if module_manager and hasattr(module_manager, "finalize") else {}
         sourcecraft = self._sourcecraft_snapshot()
         postgres = self._postgres_snapshot()
-        overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0 and postgres.get("status") == "ok"
+        postgres_required = bool(os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip())
+        postgres_ok = postgres.get("status") == "ok" or (not postgres_required and postgres.get("snapshot", {}).get("postgres_state") == "missing")
+        overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0 and postgres_ok
 
         return {
             "status": "ok" if overall_ok else "degraded",

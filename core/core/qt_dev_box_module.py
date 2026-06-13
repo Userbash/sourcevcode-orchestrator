@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .kernel_api import KernelAPI
@@ -9,8 +11,8 @@ from .kernel_api import KernelAPI
 @dataclass(slots=True)
 class QtDevBoxModule:
     name: str = "qt_dev_box"
-    container_name: str = "qt-dev-box"
-    repo_path: str = "/tmp/Neko_Throne"
+    container_name: str = field(default_factory=lambda: os.getenv("HOST_BRIDGE_GH_DISTROBOX", "qt-dev-box"))
+    repo_path: str = field(default_factory=lambda: os.getenv("QT_DEV_BOX_REPO_PATH", str(Path("/tmp") / Path(__file__).resolve().parents[2].name)))
     _api: KernelAPI | None = None
 
     def on_load(self, api: KernelAPI) -> None:

@@ -284,3 +284,49 @@ def test_prompt_optimizer_records_trained_memory_rejection_metrics():
 
     module.before_task(task, {})
     assert api.session_memory.hybrid.calls == [] or True
+
+
+def test_prompt_optimizer_rejects_trained_memory_without_provenance_or_confidence():
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithRecorder()
+    module.on_load(api)
+    task = Task(TaskType.REVIEW, TaskInput("review flow"), TaskContext("demo", "/repo/demo", "main"), session_id="session-x")
+    api.session_memory.hybrid.get_trained_memory_context = lambda **kwargs: {
+        "brief": "--- TRAINED MEMORY BRIEF (prompt:review, Top 1) ---\n[Quality: 0.95] [Domain: prompt:review] prefer explicit checks",
+        "memory_domain": "prompt:review",
+        "session_id": "session-x",
+        "agent_id": "review",
+        "has_trained_memory": True,
+        "trusted": True,
+        "confidence_score": 0.51,
+        "provenance": [],
+    }
+
+    module.before_task(task, {})
+
+    assert "TRAINED MEMORY:" not in task.input.description
+    assert task.routing_hints["prompt_optimizer"]["trained_memory_used"] is False
+    assert task.routing_hints["prompt_optimizer"]["trained_memory_reason"] == "missing_provenance"
+
+
+def test_prompt_optimizer_respects_explicit_trained_memory_deny_policy():
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithRecorder()
+    module.on_load(api)
+    task = Task(TaskType.REVIEW, TaskInput("review flow"), TaskContext("demo", "/repo/demo", "main"), session_id="session-x")
+    api.session_memory.hybrid.get_trained_memory_context = lambda **kwargs: {
+        "brief": "--- TRAINED MEMORY BRIEF (prompt:review, Top 1) ---\n[Quality: 0.95] [Domain: prompt:review] [Sources: [1]] prefer explicit checks",
+        "memory_domain": "prompt:review",
+        "session_id": "session-x",
+        "agent_id": "review",
+        "has_trained_memory": True,
+        "trusted": True,
+        "confidence_score": 0.96,
+        "provenance": ["trained:1"],
+    }
+
+    module.before_task(task, {"trained_memory_policy": {"allow_injection": False}})
+
+    assert "TRAINED MEMORY:" not in task.input.description
+    assert task.routing_hints["prompt_optimizer"]["trained_memory_used"] is False
+    assert task.routing_hints["prompt_optimizer"]["trained_memory_reason"] == "policy_denied"

@@ -136,3 +136,37 @@ def test_local_llm_module_builds_layered_decomposition_draft(monkeypatch):
     assert advisory["decomposition"]["status"] == "model"
     assert [layer["name"] for layer in advisory["decomposition"]["layers"]] == ["intake", "analysis"]
     assert advisory["decomposition"]["agent_map"]["planner"] == ["intake"]
+
+
+def test_local_llm_query_supports_model_and_system_contract(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_get(url: str, timeout: float):
+        return _Response(payload={"models": [{"name": "qwen2.5:32b-instruct-q4_k_m"}]})
+
+    def fake_post(url: str, json: dict[str, object], timeout: float):
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _Response(payload={"response": "ok"})
+
+    monkeypatch.setattr("core.core.local_llm_module.requests.get", fake_get)
+    monkeypatch.setattr("core.core.local_llm_module.requests.post", fake_post)
+
+    module = LocalLLMModule()
+    result = module.query(
+        "summarize changes",
+        "qwen2.5:32b-instruct-q4_k_m",
+        system="kernel helper",
+        options={"temperature": 0.1},
+        timeout_sec=12.0,
+    )
+
+    assert result == "ok"
+    assert captured["json"] == {
+        "model": "qwen2.5:32b-instruct-q4_k_m",
+        "prompt": "summarize changes",
+        "stream": False,
+        "system": "kernel helper",
+        "options": {"temperature": 0.1},
+    }
+    assert captured["timeout"] == 12.0

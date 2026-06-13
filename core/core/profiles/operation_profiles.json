@@ -1,0 +1,151 @@
+{
+  "control_profiles": [
+    {
+      "slug": "manual",
+      "name": "MANUAL",
+      "description": "Fully manual mode. Every action and tool call requires explicit user approval.",
+      "ask_confirmation": true,
+      "auto_approve_safe_tasks": false,
+      "require_confirmation_for_destructive": true,
+      "non_interactive_default": false,
+      "blocked_risk_levels": [],
+      "confirmation_policy": {
+        "ask_for_low_risk_tasks": true,
+        "ask_for_medium_risk_tasks": true,
+        "ask_for_high_risk_tasks": true,
+        "ask_for_destructive_actions": true,
+        "ask_for_external_api_calls": true
+      }
+    },
+    {
+      "slug": "assisted",
+      "name": "ASSISTED",
+      "description": "Semi-autonomous mode. Safe work is allowed, destructive or production-impacting work requires approval.",
+      "ask_confirmation": false,
+      "auto_approve_safe_tasks": true,
+      "require_confirmation_for_destructive": true,
+      "non_interactive_default": false,
+      "blocked_risk_levels": [],
+      "confirmation_policy": {
+        "ask_for_low_risk_tasks": false,
+        "ask_for_medium_risk_tasks": false,
+        "ask_for_high_risk_tasks": true,
+        "ask_for_destructive_actions": true,
+        "ask_for_external_api_calls": true
+      }
+    },
+    {
+      "slug": "auto_safe",
+      "name": "AUTO_SAFE",
+      "description": "Autonomous mode with guardrails. Safe work proceeds, destructive or production-critical work is blocked.",
+      "ask_confirmation": false,
+      "auto_approve_safe_tasks": true,
+      "require_confirmation_for_destructive": true,
+      "non_interactive_default": false,
+      "blocked_risk_levels": ["destructive", "production_critical"],
+      "confirmation_policy": {
+        "ask_for_low_risk_tasks": false,
+        "ask_for_medium_risk_tasks": false,
+        "ask_for_high_risk_tasks": false,
+        "ask_for_destructive_actions": true,
+        "ask_for_external_api_calls": false
+      }
+    },
+    {
+      "slug": "full_auto",
+      "name": "FULL_AUTO",
+      "description": "Fully autonomous mode with no confirmation prompts.",
+      "ask_confirmation": false,
+      "auto_approve_safe_tasks": true,
+      "require_confirmation_for_destructive": false,
+      "non_interactive_default": true,
+      "blocked_risk_levels": [],
+      "confirmation_policy": {
+        "ask_for_low_risk_tasks": false,
+        "ask_for_medium_risk_tasks": false,
+        "ask_for_high_risk_tasks": false,
+        "ask_for_destructive_actions": false,
+        "ask_for_external_api_calls": false
+      }
+    },
+    {
+      "slug": "ci",
+      "name": "CI",
+      "description": "Non-interactive CI mode for pipeline-safe execution and review workflows.",
+      "ask_confirmation": false,
+      "auto_approve_safe_tasks": true,
+      "require_confirmation_for_destructive": true,
+      "non_interactive_default": true,
+      "blocked_risk_levels": ["destructive", "production_critical"],
+      "confirmation_policy": {
+        "ask_for_low_risk_tasks": false,
+        "ask_for_medium_risk_tasks": false,
+        "ask_for_high_risk_tasks": false,
+        "ask_for_destructive_actions": true,
+        "ask_for_external_api_calls": false
+      }
+    }
+  ],
+  "devtoolkit_modes": [
+    {
+      "slug": "plan",
+      "name": "plan",
+      "description": "Planning mode. Decompose work without filesystem changes.",
+      "aliases": [],
+      "allow_code_changes": false,
+      "allow_execution": false,
+      "dry_run": false,
+      "permissions": ["devtoolkit:read", "devtoolkit:plan"],
+      "task_constraints": ["read-only planning"],
+      "acceptance_criteria": ["return plan only", "do not modify files", "do not run shell commands"]
+    },
+    {
+      "slug": "dry_run",
+      "name": "dry_run",
+      "description": "Execution simulation mode with no real writes.",
+      "aliases": [],
+      "allow_code_changes": false,
+      "allow_execution": false,
+      "dry_run": true,
+      "permissions": ["devtoolkit:read", "devtoolkit:plan", "devtoolkit:simulate"],
+      "task_constraints": ["simulate execution only", "no filesystem writes"],
+      "acceptance_criteria": ["return plan and simulated execution", "do not modify files", "do not run destructive commands"]
+    },
+    {
+      "slug": "apply",
+      "name": "apply",
+      "description": "Execution mode for real code and command changes.",
+      "aliases": ["execute"],
+      "allow_code_changes": true,
+      "allow_execution": true,
+      "dry_run": false,
+      "permissions": ["devtoolkit:read", "devtoolkit:plan", "devtoolkit:write", "devtoolkit:execute"],
+      "task_constraints": ["execution allowed", "file modifications allowed under policy"],
+      "acceptance_criteria": ["execute the approved plan", "report changed files", "report verification results"]
+    },
+    {
+      "slug": "review",
+      "name": "review",
+      "description": "Audit mode for existing code and diffs.",
+      "aliases": [],
+      "allow_code_changes": false,
+      "allow_execution": false,
+      "dry_run": false,
+      "permissions": ["devtoolkit:read", "devtoolkit:review"],
+      "task_constraints": ["analysis only", "no implementation changes"],
+      "acceptance_criteria": ["return findings only", "do not modify files", "do not execute code changes"]
+    },
+    {
+      "slug": "repo",
+      "name": "repo",
+      "description": "Repository operations mode for branch, PR, and repo context workflows.",
+      "aliases": [],
+      "allow_code_changes": false,
+      "allow_execution": false,
+      "dry_run": false,
+      "permissions": ["devtoolkit:read", "devtoolkit:repo"],
+      "task_constraints": ["repository context required"],
+      "acceptance_criteria": ["return repository-aware plan", "do not modify files by default", "do not run shell commands by default"]
+    }
+  ]
+}

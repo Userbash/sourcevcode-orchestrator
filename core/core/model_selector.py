@@ -44,6 +44,7 @@ class ModelChoice:
     matched_high_risk_rules: list[str] | None = None
     matched_low_risk_exemptions: list[str] | None = None
     reason: str = "policy_default"
+    selection_trace: dict[str, Any] | None = None
 
 
 class ModelSelector:
@@ -179,11 +180,18 @@ class ModelSelector:
 
         task_family = str(local.get("task_family") or "general")
         should_delegate = bool(local.get("should_delegate"))
+        recommended_owner = str(local.get("recommended_owner") or "").strip().lower()
         preferred_model = str(local.get("preferred_model") or local.get("recommended_model") or local.get("model_hint") or "").strip()
         budget_pressure = str(local.get("budget_pressure") or "normal")
         context_depth_hint = int(local.get("context_depth") or 0)
         profile_weights = local.get("profile_weights") if isinstance(local.get("profile_weights"), dict) else {}
-        if not should_delegate and task.type not in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}:
+        local_primary_types = {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}
+        is_primary_owner = (
+            recommended_owner == "local_llm"
+            and task.type in local_primary_types
+            and complexity in {Complexity.LOW, Complexity.MEDIUM}
+        )
+        if not should_delegate and not is_primary_owner:
             return None
 
         if task.type in {TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} and complexity in {Complexity.LOW, Complexity.MEDIUM}:
@@ -192,15 +200,17 @@ class ModelSelector:
             context_depth = max(1, context_depth_hint or 0)
             if profile_weights:
                 context_depth += 1 if float(profile_weights.get("quality", 1.0)) > 1.2 else 0
-            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=False, reason=f"local_llm_advisory_{task_family}")
+            reason_prefix = "local_llm_primary_owner" if is_primary_owner else "local_llm_advisory"
+            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=False, reason=f"{reason_prefix}_{task_family}")
 
-        if task.type == TaskType.PLAN and should_delegate and complexity in {Complexity.LOW, Complexity.MEDIUM}:
+        if task.type == TaskType.PLAN and complexity in {Complexity.LOW, Complexity.MEDIUM} and (should_delegate or is_primary_owner):
             model_name = preferred_model or MODEL_LOCAL_SMALL
             temperature = 0.65 if budget_pressure == "high" else 0.8
             context_depth = max(2, context_depth_hint or 0)
             if profile_weights:
                 context_depth += 1 if float(profile_weights.get("quality", 1.0)) > 1.25 else 0
-            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=True, reason=f"local_llm_plan_hand_off_{task_family}")
+            reason_prefix = "local_llm_primary_owner" if is_primary_owner else "local_llm_plan_hand_off"
+            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=True, reason=f"{reason_prefix}_{task_family}")
 
         return None
 
@@ -241,19 +251,42 @@ class ModelSelector:
         plan = self.openai_router.build_plan(task, task.input.description)
         return ModelChoice(plan.models[0], "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_{plan.reason}:{reason}")
 
+    def _attach_selection_trace(self, choice: ModelChoice, task: Task, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
+        local = self._local_llm_advisory(advisory_context) or {}
+        choice.selection_trace = {
+            "provider": choice.provider,
+            "model_name": choice.model_name,
+            "complexity": getattr(choice.complexity, "value", str(choice.complexity)),
+            "reason": choice.reason,
+            "task_type": getattr(task.type, "value", str(task.type)),
+            "budget_pressure": str(local.get("budget_pressure") or "normal"),
+            "context_depth": int(getattr(choice.params, "context_depth", 0) or 0),
+            "preferred_model": str(local.get("preferred_model") or local.get("recommended_model") or local.get("model_hint") or "").strip(),
+            "task_family": str(local.get("task_family") or "general"),
+            "requires_secondary_review": bool(choice.requires_secondary_review),
+        }
+        if self._api and hasattr(self._api, "log"):
+            try:
+                self._api.log("info", f"[MODEL_SELECTOR] selection_trace={choice.selection_trace}")
+            except Exception:
+                pass
+        return choice
+
     def select(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
         complexity = self.classify(task)
         task.complexity = complexity
         risk = evaluate_risk_context(self._task_text(task))
 
         if self._should_escalate_to_cloud(task, complexity, risk):
-            return self._apply_experience_policy(task, self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o"))
+            choice = self._apply_experience_policy(task, self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o"))
+            return self._attach_selection_trace(choice, task, advisory_context)
 
         local_choice = self._local_policy_choice(task, complexity, advisory_context)
         if local_choice:
-            return self._apply_experience_policy(task, local_choice)
+            choice = self._apply_experience_policy(task, local_choice)
+            return self._attach_selection_trace(choice, task, advisory_context)
 
-        return self._apply_experience_policy(
+        choice = self._apply_experience_policy(
             task,
             ModelChoice(
                 MODEL_QWEN_CODER,
@@ -264,6 +297,7 @@ class ModelSelector:
                 reason="policy_default_utility_qwen",
             ),
         )
+        return self._attach_selection_trace(choice, task, advisory_context)
 
 def evaluate_risk_context(text: str) -> RiskEvaluation:
     normalized = text.lower()

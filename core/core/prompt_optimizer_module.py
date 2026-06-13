@@ -126,21 +126,56 @@ class PromptOptimizerModule:
         key = str(task.type.value).lower()
         return float(thresholds.get(key, getattr(config, "trained_memory_quality_threshold", 0.75)) or 0.75)
 
-    def _trained_memory_context(self, task: Task) -> dict[str, Any]:
+    @staticmethod
+    def _trained_memory_policy(context: dict[str, Any] | None) -> dict[str, Any]:
+        policy = context.get("trained_memory_policy") if isinstance(context, dict) else {}
+        policy = policy if isinstance(policy, dict) else {}
+        return {
+            "allow_injection": bool(policy.get("allow_injection", True)),
+            "allowed_domains": {str(item) for item in (policy.get("allowed_domains") or []) if str(item).strip()},
+            "denied_domains": {str(item) for item in (policy.get("denied_domains") or []) if str(item).strip()},
+            "max_age_sec": int(policy.get("max_age_sec") or 604800),
+        }
+
+    def _trained_memory_validation_reason(self, ctx: dict[str, Any], brief: str, memory_domain: str, task: Task, policy: dict[str, Any]) -> str:
+        if not policy.get("allow_injection", True):
+            return "policy_denied"
+        allowed_domains = policy.get("allowed_domains") or set()
+        if allowed_domains and memory_domain not in allowed_domains:
+            return "domain_not_allowed"
+        denied_domains = policy.get("denied_domains") or set()
+        if memory_domain in denied_domains:
+            return "domain_denied"
+        if not self._trained_memory_trusted(brief, memory_domain, task):
+            return "format_untrusted"
+        provenance = ctx.get("provenance") or ctx.get("sources") or ctx.get("source_ids") or []
+        if not provenance and "[Sources:" in brief:
+            provenance = ["brief_sources"]
+        if not provenance:
+            return "missing_provenance"
+        confidence = ctx.get("confidence_score")
+        if confidence is not None and float(confidence) < self._task_quality_threshold(task):
+            return "low_confidence"
+        age_sec = ctx.get("age_sec")
+        if age_sec is not None and float(age_sec) > float(policy.get("max_age_sec") or 604800):
+            return "stale_memory"
+        return "trusted"
+
+    def _trained_memory_context(self, task: Task, context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._api:
-            return {"brief": "", "has_trained_memory": False}
+            return {"brief": "", "has_trained_memory": False, "trusted": False, "reason": "api_unavailable"}
         if self._is_high_risk_task(task):
             self._record_trained_memory_outcome(task, accepted=False, reason="high_risk_disabled")
-            return {"brief": "", "has_trained_memory": False, "trusted": False, "disabled_for_risk": True}
+            return {"brief": "", "has_trained_memory": False, "trusted": False, "disabled_for_risk": True, "reason": "high_risk_disabled"}
+        policy = self._trained_memory_policy(context)
         memory = self._api.get_context("session_memory")
         if not memory or not hasattr(memory, "hybrid"):
-            return {"brief": "", "has_trained_memory": False}
+            return {"brief": "", "has_trained_memory": False, "trusted": False, "reason": "memory_unavailable"}
         hybrid = memory.hybrid
         session_id = task.session_id or "default"
         agent_id = task.assigned_model or task.required_capability or self._task_type_label(task)
         domain = self._trained_memory_domain_for_task(task)
         top_k = 2 if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST} else 1
-        quality_threshold = self._task_quality_threshold(task)
         try:
             if hasattr(hybrid, "get_trained_memory_context"):
                 ctx = hybrid.get_trained_memory_context(
@@ -150,8 +185,11 @@ class PromptOptimizerModule:
                     top_k=top_k,
                 )
                 brief = str(ctx.get("brief") or "").strip()
-                ctx["trusted"] = self._trained_memory_trusted(brief, str(ctx.get("memory_domain") or domain), task) and self._task_quality_threshold(task) <= 0.95
-                self._record_trained_memory_outcome(task, accepted=bool(ctx.get("trusted")), reason="trusted" if ctx.get("trusted") else "untrusted")
+                memory_domain = str(ctx.get("memory_domain") or domain)
+                reason = self._trained_memory_validation_reason(ctx, brief, memory_domain, task, policy)
+                ctx["trusted"] = reason == "trusted"
+                ctx["reason"] = reason
+                self._record_trained_memory_outcome(task, accepted=bool(ctx.get("trusted")), reason=reason)
                 return ctx
         except Exception:
             pass
@@ -164,25 +202,29 @@ class PromptOptimizerModule:
                     top_k=top_k,
                     token_limit=self._memory_token_budget(task),
                 )
-                trusted = self._trained_memory_trusted(brief, domain, task) and self._task_quality_threshold(task) <= 0.95
-                self._record_trained_memory_outcome(task, accepted=trusted, reason="trusted" if trusted else "untrusted")
-                return {
+                ctx = {
                     "brief": brief,
                     "memory_domain": domain,
                     "session_id": session_id,
                     "agent_id": agent_id,
                     "has_trained_memory": bool(brief),
-                    "trusted": trusted,
+                    "provenance": ["brief_cache"] if brief else [],
+                    "confidence_score": 1.0 if brief else 0.0,
                 }
+                reason = self._trained_memory_validation_reason(ctx, brief, domain, task, policy)
+                ctx["trusted"] = reason == "trusted"
+                ctx["reason"] = reason
+                self._record_trained_memory_outcome(task, accepted=ctx["trusted"], reason=reason)
+                return ctx
         except Exception:
             pass
-        return {"brief": "", "has_trained_memory": False}
+        return {"brief": "", "has_trained_memory": False, "trusted": False, "reason": "not_found"}
 
-    def apply_trained_memory(self, task: Task, base_instruction: str) -> str:
-        trained = self._trained_memory_context(task)
+    def apply_trained_memory(self, task: Task, base_instruction: str, trained: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> str:
+        trained = trained or self._trained_memory_context(task, context)
         brief = str(trained.get("brief") or "").strip()
         if not brief or not trained.get("trusted"):
-            self._record_trained_memory_outcome(task, accepted=False, reason="not_trusted")
+            self._record_trained_memory_outcome(task, accepted=False, reason=str(trained.get("reason") or "not_trusted"))
             return base_instruction
         return "\n".join([base_instruction, "TRAINED MEMORY:", brief])
 
@@ -200,7 +242,7 @@ class PromptOptimizerModule:
             objective = objective[:320].rstrip() + "..."
         return objective
 
-    def _extract_context(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None) -> list[str]:
+    def _extract_context(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> list[str]:
         context_lines: list[str] = []
         if task.session_id:
             context_lines.append(f"session_id: {task.session_id}")
@@ -387,9 +429,9 @@ class PromptOptimizerModule:
             except Exception:
                 pass
 
-    def _render_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None) -> str:
+    def _render_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> str:
         objective = self._extract_objective(task)
-        context_lines = self._extract_context(task, history, offload)
+        context_lines = self._extract_context(task, history, offload, trained=trained, context=context)
         requirements = self._extract_requirements(task, offload)
         risks = self._extract_risks(task, offload)
         steps = self._extract_steps(task, history, offload)
@@ -451,10 +493,11 @@ class PromptOptimizerModule:
             self._api.log("warning", f"[OPTIMIZER] antigravity rewrite failed: {exc}")
         return None
 
-    def _compose_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None) -> str:
-        refined = self._render_instruction(task, history, offload)
+    def _compose_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, context: dict[str, Any] | None = None, trained: dict[str, Any] | None = None) -> str:
+        trained = trained or self._trained_memory_context(task, context)
+        refined = self._render_instruction(task, history, offload, trained=trained, context=context)
         if not self._is_high_risk_task(task):
-            refined = self.apply_trained_memory(task, refined)
+            refined = self.apply_trained_memory(task, refined, trained=trained, context=context)
 
         if history:
             compact_history = []
@@ -489,7 +532,8 @@ class PromptOptimizerModule:
 
         history = self._memory_history(task)
         offload = self._local_llm(task, context, history) if history else self._local_llm(task, context, [])
-        instruction = self._compose_instruction(task, history, offload)
+        trained = self._trained_memory_context(task, context)
+        instruction = self._compose_instruction(task, history, offload, context, trained)
 
         rewritten = None
         if offload and task.type in self._safe_offload_types():
@@ -503,6 +547,9 @@ class PromptOptimizerModule:
             "history_items": len(history),
             "local_llm_used": bool(offload),
             "antigravity_used": bool(rewritten),
+            "trained_memory_used": bool(trained.get("trusted") and str(trained.get("brief") or "").strip()),
+            "trained_memory_reason": str(trained.get("reason") or "not_used"),
+            "trained_memory_domain": str(trained.get("memory_domain") or ""),
             "source": "prompt_optimizer",
         }
         self._api.log(
