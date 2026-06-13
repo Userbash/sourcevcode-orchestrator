@@ -1,0 +1,45 @@
+{
+  "task_type": "docs_api",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.05,
+      "budget": 0.98
+    },
+    "local": {
+      "budget": 1.18,
+      "quality": 0.96
+    },
+    "mistral": {
+      "budget": 1.08,
+      "quality": 0.96
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "budget": 1.1,
+      "quality": 0.96
+    },
+    "deepseek": {
+      "quality": 1.02,
+      "budget": 1.0
+    },
+    "gpt": {
+      "quality": 1.03,
+      "budget": 0.98
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.78,
+    "avg_latency_ms": 1300,
+    "quality_min_confidence": 0.7
+  },
+  "default_context_depth": 2,
+  "budget_pressure": {
+    "high": 700,
+    "medium": 1400
+  },
+  "quality_pressure": {
+    "high": 0.72,
+    "medium": 0.62
+  }
+}

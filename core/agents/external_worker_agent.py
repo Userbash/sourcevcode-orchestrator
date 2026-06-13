@@ -45,5 +45,8 @@ class ExternalWorkerAgent(BaseAgent):
             status=TaskStatus(data["status"]),
             output=ResultOutput(**data.get("output", {})),
             confidence=data.get("confidence", 0.9),
-            errors=data.get("errors", [])
+            errors=data.get("errors", []),
+            next_recommendations=list(data.get("next_recommendations", [])),
+            provider=data.get("provider"),
+            model_name=data.get("model_name"),
         )

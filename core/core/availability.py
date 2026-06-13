@@ -20,6 +20,7 @@ from .gemini_model_registry import AntigravityModelRegistry
 from .gemini_runtime_router import AntigravityRuntimeRouter
 from .env_loader import load_env_file
 from .external_ai_bridge import ExternalAIBridge
+from .antigravity_status_module import shared_antigravity_snapshot
 from .integrations.antigravity_manager import AntigravityManager
 from .integrations.mistral_manager import MistralManager
 from .openai_model_registry import OpenAIModelRegistry
@@ -230,8 +231,8 @@ class ModelAvailability:
             diagnostics["remediation"] = self._remediation("antigravity", health.status, diagnostics)
             return self._cache(health)
 
+        status = shared_antigravity_snapshot(force=False)
         manager = AntigravityManager()
-        status = manager.status()
         diagnostics["models"] = status.get("models", [])
         diagnostics["models_probe"] = status.get("models_probe", {})
         diagnostics["generation_probe"] = status.get("generation_probe", {})
@@ -256,6 +257,22 @@ class ModelAvailability:
     def check_gemini(self, *, live: bool | None = None) -> ProviderHealth:
         # Legacy compatibility path retained for older call sites.
         return self.check_antigravity(live=live)
+
+    def antigravity_status(self) -> dict[str, Any]:
+        manager = AntigravityManager()
+        try:
+            snapshot = shared_antigravity_snapshot(force=False)
+        except Exception:
+            snapshot = manager.status()
+        self._health_cache["antigravity"] = ProviderHealth(
+            "antigravity",
+            ProviderStatus.HEALTHY if snapshot.get("ready") else ProviderStatus.DEGRADED,
+            0.0,
+            datetime.now(UTC),
+            error=None if snapshot.get("ready") else snapshot.get("error") or "antigravity_not_ready",
+            diagnostics={"snapshot": snapshot},
+        )
+        return snapshot
 
     def check_mistral(self, *, live: bool | None = None) -> ProviderHealth:
         start = datetime.now(UTC)

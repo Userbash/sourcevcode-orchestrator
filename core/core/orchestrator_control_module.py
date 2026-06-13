@@ -56,6 +56,11 @@ class OrchestratorControlModule:
         item["status"] = "running"
         item["agent_id"] = context.get("agent_id")
         item["updated_at"] = now
+        if self._api is not None:
+            self._api.log(
+                "info",
+                f"[TASK START] {task.task_id} | {task.type.value} | {task.input.description[:120]} | agent={context.get('agent_id')}",
+            )
 
     def after_task(self, task: Task, result: AgentResult, context: dict[str, Any]) -> None:
         item = self.submissions.get(task.task_id)
@@ -81,6 +86,11 @@ class OrchestratorControlModule:
         self.finished_total += 1
         if status != "done":
             self.failed_total += 1
+        if self._api is not None:
+            self._api.log(
+                "info",
+                f"[TASK END] {task.task_id} | status={status} | agent={result.agent_id} | summary={item['summary'][:120]}",
+            )
 
     def task_status(self, task_id: str) -> dict[str, Any] | None:
         return self.submissions.get(task_id)

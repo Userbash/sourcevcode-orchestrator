@@ -1,0 +1,49 @@
+{
+  "profile_type": "model",
+  "profile_key": "model::claude-3.5-sonnet",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.16,
+      "budget": 0.95,
+      "vfs": 1.0
+    },
+    "local": {
+      "quality": 1.0,
+      "budget": 1.0,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 1.04,
+      "budget": 0.96,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "quality": 1.0,
+      "budget": 0.98
+    },
+    "deepseek": {
+      "quality": 1.08,
+      "budget": 0.96
+    },
+    "gpt": {
+      "quality": 1.16,
+      "budget": 0.94
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.84,
+    "avg_latency_ms": 1700,
+    "quality_min_confidence": 0.86
+  },
+  "default_context_depth": 5,
+  "budget_pressure": {
+    "high": 1800,
+    "medium": 3600
+  },
+  "quality_pressure": {
+    "high": 0.9,
+    "medium": 0.82
+  }
+}

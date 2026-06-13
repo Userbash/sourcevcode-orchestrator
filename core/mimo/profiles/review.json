@@ -1,0 +1,45 @@
+{
+  "task_type": "review",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.18,
+      "budget": 0.96
+    },
+    "local": {
+      "budget": 1.0,
+      "quality": 1.05
+    },
+    "mistral": {
+      "budget": 1.0,
+      "quality": 1.0
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "budget": 1.0,
+      "quality": 1.0
+    },
+    "deepseek": {
+      "quality": 1.15,
+      "budget": 0.96
+    },
+    "gpt": {
+      "quality": 1.18,
+      "budget": 0.95
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.76,
+    "avg_latency_ms": 2000,
+    "quality_min_confidence": 0.75
+  },
+  "default_context_depth": 4,
+  "budget_pressure": {
+    "high": 1000,
+    "medium": 2200
+  },
+  "quality_pressure": {
+    "high": 0.84,
+    "medium": 0.72
+  }
+}

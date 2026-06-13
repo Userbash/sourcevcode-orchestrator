@@ -100,7 +100,9 @@ ai_bridge/runtime_report.json
 # Temporary AI Bridge files
 memory_store/
 core/.cache/
+core/bin/agy
 *.tmp
 list_models.py
 analyze_tokens.py
 get_stats.py
+Neko_Throne_work/

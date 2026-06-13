@@ -26,6 +26,10 @@ from core.core.models import (
     encapsulate,
     decapsulate,
     TaskStatus,
+    Task,
+    TaskContext,
+    TaskInput,
+    TaskType,
     Priority,
     AgentType,
     AgentStatus,
@@ -182,6 +186,32 @@ def test_decapsulation_rejects_max_hops_exceeded(coding_payload):
             envelope=envelope,
             agent_capabilities=["backend"],
         )
+
+
+def test_decomposer_preserves_parallel_subagent_specialization(coding_payload):
+    task = Task(TaskType.PLAN, TaskInput("Prepare UX and frontend handoff"), TaskContext("demo", ".", "main"))
+    decomposer = TaskDecomposer()
+    draft = {
+        "status": "model",
+        "layers": [
+            {
+                "name": "ux_slice",
+                "objective": "Prepare UX and frontend handoff",
+                "capability": "frontend",
+                "task_type": "code",
+                "dependencies": [],
+                "sub_agents": ["design_agent", "frontend_component_agent"],
+                "parallel_group": True,
+            },
+        ],
+    }
+
+    plan = decomposer.decompose_from_draft(task, draft)
+
+    assert len(plan.atomic_tasks) == 2
+    assert {task.required_capability for task in plan.atomic_tasks} == {"ux", "frontend"}
+    assert all(task.routing_hints.get("parallel_group") is True for task in plan.atomic_tasks)
+    assert all(task.parent_task_id == plan.root_task_id for task in plan.atomic_tasks)
 
 
 def test_decomposer_creates_dag_not_linear_chain(coding_payload):

@@ -1,0 +1,49 @@
+{
+  "profile_type": "model",
+  "profile_key": "model::qwen2.5-32b-instruct-q4_k_m",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.02,
+      "budget": 0.98,
+      "vfs": 1.0
+    },
+    "local": {
+      "quality": 1.0,
+      "budget": 1.05,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 1.0,
+      "budget": 1.02,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "qwen": {
+      "quality": 1.08,
+      "budget": 1.04
+    },
+    "deepseek": {
+      "quality": 1.03,
+      "budget": 0.99
+    },
+    "gpt": {
+      "quality": 1.04,
+      "budget": 0.96
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.8,
+    "avg_latency_ms": 2000,
+    "quality_min_confidence": 0.76
+  },
+  "default_context_depth": 4,
+  "budget_pressure": {
+    "high": 2000,
+    "medium": 3800
+  },
+  "quality_pressure": {
+    "high": 0.84,
+    "medium": 0.74
+  }
+}

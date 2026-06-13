@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from .agent_registry import AgentRegistry
 from .env_loader import load_env_file
 from .host_bridge import HostBridge
+from .data_plane_monitor import build_data_plane_snapshot
 from .memory_backend import InMemoryBackend
 from .memory_policy import MemoryPolicy
 from .orchestrator import Orchestrator
@@ -50,6 +51,14 @@ def _check_memory_backend() -> CheckResult:
     ok = memory.get("health-session", "ping") == "pong"
     backend_ok = isinstance(memory.backend, InMemoryBackend)
     return CheckResult("memory_backend", bool(ok and backend_ok), "in-memory backend ready")
+
+
+def _check_memory_plane() -> CheckResult:
+    memory = SessionMemory()
+    probe = memory.roundtrip_check(session_id="health-session", key="probe", value={"value": "pong"})
+    snapshot = memory.diagnostic_snapshot(session_id="health-session")
+    details = f"roundtrip={'ok' if probe['ok'] else 'failed'} key={probe['key']} hot={snapshot['hot_count']} backend={snapshot['backend_count']} persistent={'on' if snapshot['persistent_enabled'] else 'off'}"
+    return CheckResult("memory_plane", bool(probe['ok']), details)
 
 
 def _check_secret_redaction() -> CheckResult:
@@ -128,6 +137,21 @@ def _check_ai_provider_access() -> CheckResult:
     return CheckResult("ai_provider_access", False, "no external AI provider ready (antigravity executable unavailable and MISTRAL_API_KEY missing)")
 
 
+def _check_data_plane() -> CheckResult:
+    database_url = os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip()
+    rabbitmq_url = os.getenv("AI_BRIDGE_RABBITMQ_URL", "").strip()
+    snapshot = build_data_plane_snapshot(database_url=database_url, rabbitmq_url=rabbitmq_url)
+    table_bits = []
+    for item in snapshot.tables:
+        updated = f", updated={item.last_updated}" if item.last_updated else ""
+        table_bits.append(f"{item.table}={item.row_count}{updated}")
+    rabbitmq_state = f"rabbitmq={'ok' if snapshot.rabbitmq_ok else 'failed'}@{snapshot.rabbitmq_target or 'unknown'}"
+    detail_parts = [snapshot.details, rabbitmq_state]
+    if table_bits:
+        detail_parts.append('; '.join(table_bits))
+    return CheckResult("data_plane", snapshot.ok, ' | '.join(detail_parts))
+
+
 def run_healthcheck() -> tuple[bool, list[CheckResult]]:
     checks = [
         _check_imports(),
@@ -135,6 +159,8 @@ def run_healthcheck() -> tuple[bool, list[CheckResult]]:
         _check_secret_redaction(),
         _check_agent_registry(),
         _check_orchestrator_wiring(),
+        _check_memory_plane(),
+        _check_data_plane(),
         _check_host_bridge(),
         _check_container_provider(),
         _check_policy_config(),

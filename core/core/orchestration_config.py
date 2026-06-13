@@ -108,6 +108,33 @@ class OrchestrationConfig:
     require_confirmation_for_destructive: bool = True
     default_engine: str = "core"
     non_interactive: bool = True
+    training_consolidation_interval_sec: int = 300
+    trained_memory_quality_threshold: float = 0.75
+    trained_memory_quality_thresholds_by_task: dict[str, float] = field(default_factory=lambda: {
+        "plan": 0.80,
+        "review": 0.85,
+        "test": 0.82,
+        "code": 0.78,
+        "docs": 0.70,
+        "research": 0.72,
+    })
+    trained_memory_cache_ttl_sec: int = 600
+    trained_memory_brief_ttl_sec: int = 600
+    trained_memory_degrade_ttl_sec: int = 900
+    high_risk_trained_memory_enabled: bool = False
+    kpi_thresholds_by_task: dict[str, float] = field(default_factory=lambda: {
+        "plan": 0.72,
+        "review": 0.76,
+        "test": 0.74,
+    })
+    kpi_routing_floor_by_task: dict[str, float] = field(default_factory=lambda: {
+        "plan": 0.68,
+        "review": 0.70,
+        "test": 0.69,
+    })
+    kpi_rejection_summary_path: str = ""
+    kpi_dashboard_interval_sec: int = 3600
+    kpi_dashboard_output_path: str = "memory_store/kpi_dashboard_24h.json"
     confirmation_policy: ConfirmationPolicy = field(default_factory=ConfirmationPolicy)
     safety_guards: SafetyGuards = field(default_factory=SafetyGuards)
 
@@ -122,6 +149,33 @@ class OrchestrationConfig:
             ask_confirmation=not auto_approve,
             auto_approve_safe_tasks=auto_approve,
             non_interactive=non_interactive,
+            training_consolidation_interval_sec=_env_int("AI_BRIDGE_TRAINING_CONSOLIDATION_INTERVAL_SEC", 300),
+            trained_memory_quality_threshold=_env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD", 0.75),
+            trained_memory_quality_thresholds_by_task={
+                "plan": _env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD_PLAN", 0.80),
+                "review": _env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD_REVIEW", 0.85),
+                "test": _env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD_TEST", 0.82),
+                "code": _env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD_CODE", 0.78),
+                "docs": _env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD_DOCS", 0.70),
+                "research": _env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD_RESEARCH", 0.72),
+            },
+            trained_memory_cache_ttl_sec=_env_int("AI_BRIDGE_TRAINED_MEMORY_CACHE_TTL_SEC", 600),
+            trained_memory_brief_ttl_sec=_env_int("AI_BRIDGE_TRAINED_MEMORY_BRIEF_TTL_SEC", 600),
+            trained_memory_degrade_ttl_sec=_env_int("AI_BRIDGE_TRAINED_MEMORY_DEGRADE_TTL_SEC", 900),
+            high_risk_trained_memory_enabled=False,
+            kpi_thresholds_by_task={
+                "plan": _env_float("AI_BRIDGE_KPI_THRESHOLD_PLAN", 0.72),
+                "review": _env_float("AI_BRIDGE_KPI_THRESHOLD_REVIEW", 0.76),
+                "test": _env_float("AI_BRIDGE_KPI_THRESHOLD_TEST", 0.74),
+            },
+            kpi_routing_floor_by_task={
+                "plan": _env_float("AI_BRIDGE_KPI_ROUTING_FLOOR_PLAN", 0.68),
+                "review": _env_float("AI_BRIDGE_KPI_ROUTING_FLOOR_REVIEW", 0.70),
+                "test": _env_float("AI_BRIDGE_KPI_ROUTING_FLOOR_TEST", 0.69),
+            },
+            kpi_rejection_summary_path=(os.getenv("AI_BRIDGE_KPI_REJECTION_SUMMARY_PATH") or "").strip(),
+            kpi_dashboard_interval_sec=_env_int("AI_BRIDGE_KPI_DASHBOARD_INTERVAL_SEC", 3600),
+            kpi_dashboard_output_path=(os.getenv("AI_BRIDGE_KPI_DASHBOARD_OUTPUT_PATH") or "memory_store/kpi_dashboard_24h.json").strip(),
             confirmation_policy=ConfirmationPolicy(
                 ask_for_low_risk_tasks=False if safe_only else not auto_approve,
                 ask_for_medium_risk_tasks=False if safe_only else not auto_approve,
@@ -131,7 +185,7 @@ class OrchestrationConfig:
             ),
         )
 
-    def apply_cli_flags(self, *, yes: bool = False, auto: bool = False, use_bridge: bool = False, non_interactive: bool = False) -> None:
+    def apply_cli_flags(self, *, yes: bool = False, auto: bool = False, use_bridge: bool = False, non_interactive: bool = False, high_risk_trained_memory: bool = False) -> None:
         if yes or auto:
             self.ask_confirmation = False
             self.auto_approve_safe_tasks = True
@@ -141,6 +195,8 @@ class OrchestrationConfig:
             self.default_engine = "core"
         if non_interactive:
             self.non_interactive = True
+        if high_risk_trained_memory:
+            self.high_risk_trained_memory_enabled = True
 
     def should_ask_confirmation(self, task: Any) -> bool:
         if not self.enabled_by_default:
@@ -186,7 +242,39 @@ class OrchestrationConfig:
             "require_confirmation_for_destructive": self.require_confirmation_for_destructive,
             "default_engine": self.default_engine,
             "non_interactive": self.non_interactive,
+            "training_consolidation_interval_sec": self.training_consolidation_interval_sec,
+            "trained_memory_quality_threshold": self.trained_memory_quality_threshold,
+            "trained_memory_quality_thresholds_by_task": self.trained_memory_quality_thresholds_by_task,
+            "trained_memory_cache_ttl_sec": self.trained_memory_cache_ttl_sec,
+            "trained_memory_brief_ttl_sec": self.trained_memory_brief_ttl_sec,
+            "trained_memory_degrade_ttl_sec": self.trained_memory_degrade_ttl_sec,
+            "high_risk_trained_memory_enabled": self.high_risk_trained_memory_enabled,
+            "kpi_thresholds_by_task": self.kpi_thresholds_by_task,
+            "kpi_routing_floor_by_task": self.kpi_routing_floor_by_task,
+            "kpi_rejection_summary_path": self.kpi_rejection_summary_path,
+            "kpi_dashboard_interval_sec": self.kpi_dashboard_interval_sec,
+            "kpi_dashboard_output_path": self.kpi_dashboard_output_path,
         }
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
 
 
 def _env_bool(name: str, default: bool) -> bool:

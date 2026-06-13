@@ -3,7 +3,7 @@ from core.agents.base_agent import BaseAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.core.models import AgentResult, Task, TaskContext, TaskInput, TaskStatus, TaskType
+from core.core.models import AgentResult, ResultOutput, Task, TaskContext, TaskInput, TaskStatus, TaskType
 from core.core.orchestrator import Orchestrator
 
 
@@ -86,13 +86,49 @@ def test_full_cycle_delegates_failed_code_to_fix_agent_and_finishes():
     assert any(row.get("router_agent") == "fix-1" for row in result["live_trace"])
 
 
+def test_distribution_trace_shows_pipeline_and_agent_assignment():
+    orchestrator = _orchestrator_with_agents()
+
+    task = Task(
+        TaskType.PLAN,
+        TaskInput(
+            "Build feature with backend, tests, and docs",
+            files=["core/app.py", "tests/test_app.py"],
+            acceptance_criteria=["backend works", "tests pass", "docs updated"],
+        ),
+        TaskContext("demo", ".", "main"),
+    )
+
+    result = asyncio.run(orchestrator.run(task))
+
+    assert result["status"] == "done"
+    assert result["results"]
+
+    # Process visibility: root task -> decomposition -> routing -> specialist execution.
+    task_types = {item["task_type"] for item in result["results"]}
+    assigned_agents = {item["agent_id"] for item in result["results"] if item.get("agent_id")}
+    trace_pairs = {(row.get("task_type"), row.get("router_agent"), row.get("selected_provider")) for row in result["live_trace"]}
+
+    assert {"plan", "code", "test", "review"}.issubset(task_types)
+    assert {"planner-1", "code-main", "tester-1", "reviewer-1"}.issubset(assigned_agents)
+    assert any(task_type == "plan" for task_type, _, _ in trace_pairs)
+    assert any(task_type == "code" for task_type, _, _ in trace_pairs)
+    assert any(task_type == "test" for task_type, _, _ in trace_pairs)
+    assert any(task_type == "review" for task_type, _, _ in trace_pairs)
+
+    # The trace should also preserve model/provider attribution for debugging.
+    for row in result["live_trace"]:
+        assert row.get("selected_provider")
+        assert row.get("selected_model")
+
+
 def test_feedback_loop_does_not_recurse_fix_tasks():
     from core.core.feedback_loop import FeedbackLoop
     from core.core.models import Priority
 
     feedback = FeedbackLoop(retry_limit=1)
     task = Task(TaskType.PLAN, TaskInput("broken"), TaskContext("demo", ".", "main"), priority=Priority.NORMAL)
-    result = AgentResult(task.task_id, "agent", TaskStatus.FAILED, {"summary": "bad"}, 0.1, ["bad"], [])
+    result = AgentResult(task_id=task.task_id, agent_id="agent", status=TaskStatus.FAILED, output=ResultOutput(summary="bad"), confidence=0.1, errors=["bad"], next_recommendations=[], provider="local", model_name="local-small")
 
     ok, fix_task = feedback.evaluate(task, result)
     assert not ok
@@ -100,7 +136,7 @@ def test_feedback_loop_does_not_recurse_fix_tasks():
     assert fix_task.parent_task_id == task.task_id
     assert fix_task.retry_count == 1
 
-    fix_result = AgentResult(fix_task.task_id, "agent", TaskStatus.FAILED, {"summary": "still bad"}, 0.1, ["bad"], [])
+    fix_result = AgentResult(task_id=fix_task.task_id, agent_id="agent", status=TaskStatus.FAILED, output=ResultOutput(summary="still bad"), confidence=0.1, errors=["bad"], next_recommendations=[], provider="local", model_name="local-small")
     ok, nested_fix = feedback.evaluate(fix_task, fix_result)
     assert not ok
     assert nested_fix is None

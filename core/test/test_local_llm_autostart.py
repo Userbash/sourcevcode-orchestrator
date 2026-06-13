@@ -114,3 +114,24 @@ def test_local_llm_bridge_auto_provisions_missing_container(monkeypatch):
 
     assert bridge.ensure_ready("qwen2.5:32b-instruct-q4_k_m") is True
     assert calls == ["ensure:ai-kernel-local", "install:ai-kernel-local", "start:ai-kernel-local"]
+
+
+
+def test_task_decomposer_seeds_kpi_floor_from_local_llm(monkeypatch):
+    from core.core.models import Priority, Task, TaskContext, TaskInput, TaskType
+    from core.core.task_decomposer import TaskDecomposer
+
+    class _LocalLLM:
+        ready = True
+
+    class _API:
+        def get_module(self, name: str):
+            return _LocalLLM() if name == "local_llm" else None
+
+    decomposer = TaskDecomposer()
+    decomposer.model_selector.set_api(_API())
+    task = Task(TaskType.REVIEW, TaskInput("review system"), TaskContext("demo", "/repo", "main"), priority=Priority.NORMAL)
+
+    plan = decomposer.decompose(task)
+    assert plan.root_task.routing_hints["kpi_floor_source"] == "local_llm"
+    assert plan.root_task.routing_hints["kpi_floor"] >= 0.8

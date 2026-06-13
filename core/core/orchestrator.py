@@ -3,8 +3,11 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 import time
+import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from datetime import UTC, datetime
 
@@ -20,7 +23,7 @@ from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
 from .model_selector import ModelSelector
-from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus
+from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
@@ -29,6 +32,8 @@ from .smart_scheduler import SmartScheduler
 from .session_memory import MemoryScope, SessionMemory
 from .availability import ModelAvailability, ModelAvailabilityModule, ProviderStatus
 from .ai_activity_module import AIActivityModule
+from .data_plane_monitor import build_data_plane_snapshot
+from .antigravity_status_module import AntigravityStatusModule
 from .api_bridge_module import APIBridgeModule
 from .smart_decomposer_module import SmartDecomposerModule
 from .prompt_optimizer_module import PromptOptimizerModule
@@ -38,11 +43,13 @@ from .json_themes_module import JSONThemesModule
 from .unified_vfs import UnifiedVFSModule
 from .kernel_module_manager import KernelModuleManager
 from .orchestrator_control_module import OrchestratorControlModule
+from .qt_dev_box_module import QtDevBoxModule
 from .model_usage_module import ModelUsageModule
 from .provider_budget_router import ProviderBudgetRouter
 from .cold_boot_module import ColdBootModule
 from .voice_listener_module import VoiceListenerModule
 from .kpi_event_logger import KPIEventLogger
+from .effectiveness_dashboard import build_kpi_dashboard
 from .ui_design_system_module import UIDesignSystemModule
 from .ui_anti_template_module import UIAntiTemplateModule
 from .frontend_engineering_bridge_module import FrontendEngineeringBridgeModule
@@ -53,7 +60,9 @@ from .code_readability_module import CodeReadabilityModule
 from .dev_toolkit_module import DevToolkitModule
 from .dependency_manager import DependencyManager
 from .self_diagnostic_module import SelfDiagnosticModule
-
+from ..mimo.proxy import MimoOrchestrationDirector
+from .experience_policy_learner import ExperiencePolicyLearner
+from .experience_training_pipeline import ExperienceTrainingPipeline
 
 
 from .local_llm_bridge import LocalLLMBridge
@@ -79,8 +88,11 @@ class Orchestrator:
     def emit_event(self, event_name: str, payload: dict[str, Any]) -> None:
         self.console.emit(event_name, str(payload))
 
+    def module_state(self) -> dict[str, Any]:
+        return self.module_manager.finalize()
+
     def query_state(self, module_name: str, key: str) -> Any:
-        return self.module_manager.finalize().get(module_name, {}).get(key)
+        return self.module_state().get(module_name, {}).get(key)
 
     def query_module_state(self, module_name: str, key: str) -> Any:
         return self.query_state(module_name, key)
@@ -110,8 +122,19 @@ class Orchestrator:
     def _easy_diffusion_autostart_enabled() -> bool:
         return os.getenv("AI_BRIDGE_AUTOSTART_EASY_DIFFUSION", "false").strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _testing_mode() -> bool:
+        return os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
+
+    def _antigravity_status_snapshot(self) -> dict[str, Any]:
+        module = self.module_manager.get_module("antigravity_status")
+        if module and hasattr(module, "snapshot"):
+            snapshot = module.snapshot()
+            return snapshot if isinstance(snapshot, dict) else {"value": snapshot}
+        return {}
+
     def _autostart_local_llm(self) -> None:
-        if os.getenv("TESTING") == "true" or not self._local_llm_autostart_enabled():
+        if self._testing_mode() or not self._local_llm_autostart_enabled():
             return
 
         module = self.module_manager.get_module("local_llm")
@@ -131,7 +154,7 @@ class Orchestrator:
             self.log("warning", f"[LOCAL_LLM] Autostart could not confirm readiness for {module.model_name}.")
 
     def _autostart_easy_diffusion(self) -> None:
-        if os.getenv("TESTING") == "true" or not self._easy_diffusion_autostart_enabled():
+        if self._testing_mode() or not self._easy_diffusion_autostart_enabled():
             return
 
         module = self.module_manager.get_module("easy_diffusion")
@@ -151,7 +174,7 @@ class Orchestrator:
         else:
             self.log("warning", "[EASY_DIFFUSION] Autostart could not confirm readiness.")
 
-    def __init__(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900) -> None:
+    def __init__(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900, verbose_orchestrator: bool = False, json_console: bool = False) -> None:
         self.local_agents: dict[str, BaseAgent] = {}
         self.results: dict[str, AgentResult] = {}
         self.live_trace_rows: list[dict[str, object]] = []
@@ -169,21 +192,56 @@ class Orchestrator:
         self.scheduler = components.scheduler
         self.message_bus = components.message_bus
         self.healthcheck = components.healthcheck
+        if hasattr(self.healthcheck, "set_module_state_source"):
+            self.healthcheck.set_module_state_source(self.module_state)
         self.availability = ModelAvailability()
         self.feedback = components.feedback
         self.metrics = components.metrics
         self.kpi = components.kpi
+        self.kpi.task_thresholds = dict(self.orchestration_config.kpi_thresholds_by_task)
         self.quality = components.quality
         self.merger = components.merger
         self.console = components.console
+        log_file = os.getenv("ORCHESTRATOR_LOG_FILE") or os.getenv("ORCHESTRATOR_JSONL_LOG")
+        env_json = os.getenv("ORCHESTRATOR_JSON_CONSOLE", "").strip().lower() in {"1", "true", "yes", "on"}
+        env_color = os.getenv("ORCHESTRATOR_COLOR_LOGS", "").strip().lower()
+        color_mode = env_color in {"1", "true", "yes", "on"} if env_color else (sys.stdout.isatty() and not json_console)
+        self.console.set_mode(
+            json_mode=json_console or env_json,
+            verbose=verbose_orchestrator,
+            color_mode=color_mode,
+            log_path=log_file,
+        )
+        self.verbose_orchestrator = verbose_orchestrator
+        self.json_console = json_console or env_json
+        self.console.emit("START", f"Orchestrator ready | verbose={self.verbose_orchestrator} | json={self.json_console} | color={color_mode} | log_file={log_file or 'off'}")
         self.security_gate = components.security_gate
         self.host_bridge = components.host_bridge
         self.session_memory = components.session_memory
         self.memory_consolidator = components.memory_consolidator
         self.provider_budget_router = ProviderBudgetRouter()
         self.kpi_events = KPIEventLogger.from_env()
+        if getattr(self.orchestration_config, "kpi_rejection_summary_path", ""):
+            self.kpi_events.summary_path = Path(self.orchestration_config.kpi_rejection_summary_path)
+        self._postgres_watchdog_stop = threading.Event()
+        self._postgres_watchdog_thread: threading.Thread | None = None
+        self._training_consolidation_stop = threading.Event()
+        self._kpi_dashboard_stop = threading.Event()
+        self._training_consolidation_lock = threading.Lock()
+        self._training_consolidation_queue: list[dict[str, Any]] = []
+        self._training_consolidation_task: asyncio.Task[None] | None = None
+        self._kpi_dashboard_task: asyncio.Task[None] | None = None
+        self._training_consolidation_interval_sec = max(60, int(self.orchestration_config.training_consolidation_interval_sec))
+        self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
-        
+        self.mimo_director = MimoOrchestrationDirector()
+        self.experience_policy_learner = ExperiencePolicyLearner()
+        self.experience_trainer = ExperienceTrainingPipeline()
+        self.mimo_director.set_memory_source(self.session_memory)
+        self.mimo_director.set_history_source(self.session_memory)
+        self.mimo_director.set_kpi_source(self.kpi)
+        self.mimo_director.set_quality_source(self.quality)
+
         # Connect API for smart modules
         self.model_selector.set_api(self)
         self.router.set_api(self)
@@ -194,7 +252,9 @@ class Orchestrator:
         self.module_manager.register(OrchestratorControlModule())
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(ModelAvailabilityModule())
+        self.module_manager.register(AntigravityStatusModule())
         self.module_manager.register(APIBridgeModule())
+        self.mimo_director.set_status_source(self._antigravity_status_snapshot)
         self.module_manager.register(SmartDecomposerModule())
         self.module_manager.register(PromptOptimizerModule())
         self.module_manager.register(ChatBusModule())
@@ -202,6 +262,7 @@ class Orchestrator:
         self.module_manager.register(JSONThemesModule())
         self.module_manager.register(UnifiedVFSModule())
         self.module_manager.register(ColdBootModule())
+        self.module_manager.register(QtDevBoxModule())
         self.module_manager.register(UIDesignSystemModule())
         self.module_manager.register(UIAntiTemplateModule())
         self.module_manager.register(FrontendEngineeringBridgeModule())
@@ -236,6 +297,10 @@ class Orchestrator:
         self.module_manager.load("ai_activity")
         self.module_manager.load("orchestrator_control")
         self.module_manager.load("model_usage")
+        self.mimo_director.set_budget_module(self.module_manager.get_module("model_usage"))
+        self.module_manager.load("unified_vfs")
+        self.mimo_director.set_vfs_source(self.module_manager.get_module("unified_vfs"))
+        self.mimo_director.safe_sync()
         self.module_manager.load("model_availability")
         self.module_manager.load("api_bridge")
         self.module_manager.load("smart_decomposer")
@@ -243,7 +308,6 @@ class Orchestrator:
         self.module_manager.load("chat_bus")
         self.module_manager.load("trigger_dispatcher")
         self.module_manager.load("json_themes")
-        self.module_manager.load("unified_vfs")
         self.module_manager.load("cold_boot")
         self.module_manager.load("ui_design_system")
         self.module_manager.load("ui_anti_template")
@@ -264,75 +328,190 @@ class Orchestrator:
         self.module_manager.load("orchestrator_advisor")
         self.module_manager.load("intelligence")
         self.module_manager.load("security_sentinel")
+        self.experience_policy_learner.refresh(persistent=self.session_memory.hybrid.persistent)
+        self.experience_trainer.train(persistent=self.session_memory.hybrid.persistent)
 
         # Load local_llm before autostart so the module is available for
         # advisory context and readiness checks during kernel boot.
-        if os.getenv("TESTING") != "true":
+        if not self._testing_mode():
             self.module_manager.load("local_llm")
         self._autostart_local_llm()
         self._autostart_easy_diffusion()
+        self._start_postgres_watchdog()
 
-    def _init_original(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900) -> None:
-        self.local_agents = {}
-        self.results = {}
-        self.live_trace_rows = []
+    def _start_postgres_watchdog(self) -> None:
+        interval_raw = os.getenv("AI_BRIDGE_POSTGRES_WATCHDOG_INTERVAL_SEC", "30").strip()
+        try:
+            interval = max(5, int(interval_raw))
+        except ValueError:
+            interval = 30
+        if os.getenv("AI_BRIDGE_POSTGRES_WATCHDOG_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return
+        if self._postgres_watchdog_thread and self._postgres_watchdog_thread.is_alive():
+            return
 
-        components = AgentFactory.build(registry=registry, retry_limit=retry_limit, idle_shutdown_sec=idle_shutdown_sec)
+        def _watchdog() -> None:
+            while not self._postgres_watchdog_stop.is_set():
+                try:
+                    snapshot = build_data_plane_snapshot(
+                        database_url=os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip(),
+                        rabbitmq_url=os.getenv("AI_BRIDGE_RABBITMQ_URL", "").strip(),
+                    )
+                    payload = {
+                        "type": "postgres_watchdog",
+                        "status": snapshot.postgres_state,
+                        "ok": snapshot.ok,
+                        "details": snapshot.details,
+                        "probe": snapshot.probe,
+                        "tables": [item.__dict__ for item in snapshot.tables],
+                    }
+                    self.kpi_events.write(payload)
+                    if not snapshot.ok and self.console:
+                        self.console.emit("POSTGRES_ALERT", f"state={snapshot.postgres_state} details={snapshot.details}")
+                except Exception as exc:
+                    try:
+                        self.kpi_events.write({"type": "postgres_watchdog", "status": "error", "error": str(exc)})
+                    except Exception:
+                        pass
+                    if self.console:
+                        self.console.emit("POSTGRES_ALERT", f"watchdog_error={exc}")
+                self._postgres_watchdog_stop.wait(interval)
 
-        self.registry = components.registry
-        self.lifecycle = components.lifecycle
-        self.autoscaler = components.autoscaler
-        self.load_balancer = components.load_balancer
-        self.model_selector = components.model_selector
-        self.decomposer = components.decomposer
-        self.router = components.router
-        self.orchestration_config = components.orchestration_config
-        self.scheduler = components.scheduler
-        self.message_bus = components.message_bus
-        self.healthcheck = components.healthcheck
-        self.availability = ModelAvailability()
-        self.feedback = components.feedback
-        self.metrics = components.metrics
-        self.kpi = components.kpi
-        self.quality = components.quality
-        self.merger = components.merger
-        self.console = components.console
-        self.security_gate = components.security_gate
-        self.host_bridge = components.host_bridge
-        self.session_memory = components.session_memory
-        self.provider_budget_router = ProviderBudgetRouter()
-        self.kpi_events = KPIEventLogger.from_env()
+        self._postgres_watchdog_thread = threading.Thread(target=_watchdog, name="postgres-watchdog", daemon=True)
+        self._postgres_watchdog_thread.start()
 
-        self.module_manager = KernelModuleManager()
-        self.module_manager.set_api(self)
-        self.module_manager.register(AIActivityModule())
-        self.module_manager.register(OrchestratorControlModule())
-        self.module_manager.register(ModelUsageModule())
-        self.module_manager.register(ModelAvailabilityModule())
-        self.module_manager.register(APIBridgeModule())
-        self.module_manager.register(SmartDecomposerModule())
-        self.module_manager.register(PromptOptimizerModule())
-        self.module_manager.register(ChatBusModule())
-        self.module_manager.register(TriggerDispatcherModule())
-        self.module_manager.register(ColdBootModule())
-        self.module_manager.register(SourceCraftModule())
-        self.module_manager.register(VoiceListenerModule())
-        self.module_manager.load("ai_activity")
-        self.module_manager.load("orchestrator_control")
-        self.module_manager.load("model_usage")
-        self.module_manager.load("model_availability")
-        self.module_manager.load("api_bridge")
-        self.module_manager.load("smart_decomposer")
-        self.module_manager.load("prompt_optimizer")
-        self.module_manager.load("chat_bus")
-        self.module_manager.load("trigger_dispatcher")
-        self.module_manager.load("cold_boot")
-        self.module_manager.load("sourcecraft")
-        self.module_manager.load("voice_listener")
-        
+    def _stop_postgres_watchdog(self) -> None:
+        self._postgres_watchdog_stop.set()
+
+    def _training_memory_domain(self, task: Task) -> str:
+        task_type = task.type.value.lower()
+        return {
+            "plan": "prompt:plan",
+            "review": "prompt:review",
+            "test": "prompt:test",
+            "code": "prompt:code",
+            "docs": "prompt:docs",
+            "research": "prompt:research",
+        }.get(task_type, f"prompt:{task_type}")
+
+    def _enqueue_training_consolidation(self, task: Task, result: AgentResult) -> None:
+        memory_domain = self._training_memory_domain(task)
+        model_name = str(result.model_name or getattr(task, "assigned_model", "") or "").strip()
+        provider = str(result.provider or "").strip().lower()
+        payload = {
+            "session_id": task.session_id or task.task_id,
+            "agent_id": result.agent_id or "orchestrator",
+            "task_type": task.type.value,
+            "memory_domain": memory_domain,
+            "summary": str(result.output.get("summary", "") or "").strip(),
+            "source_memory_ids": [],
+            "quality_score": max(0.0, min(1.0, float(result.confidence))),
+            "metadata": {
+                "task_id": task.task_id,
+                "status": result.status.value,
+                "memory_domain": memory_domain,
+                "model_name": model_name,
+                "provider": provider,
+            },
+        }
+        if not payload["summary"]:
+            payload["summary"] = f"Successful {task.type.value} task {task.task_id}"
+        with self._training_consolidation_lock:
+            self._training_consolidation_queue.append(payload)
+        if self._training_consolidation_task is None or self._training_consolidation_task.done():
+            self._flush_training_consolidation_queue()
+
+    def _flush_training_consolidation_queue(self) -> int:
+        drained: list[dict[str, Any]] = []
+        with self._training_consolidation_lock:
+            if self._training_consolidation_queue:
+                drained = self._training_consolidation_queue[:]
+                self._training_consolidation_queue.clear()
+        if not drained:
+            return 0
+
+        processed = 0
+        for item in drained:
+            try:
+                self.memory_consolidator.consolidate_successful_task(
+                    session_id=str(item["session_id"]),
+                    agent_id=str(item["agent_id"]),
+                    task_type=str(item["task_type"]),
+                    summary=str(item["summary"]),
+                    source_memory_ids=list(item.get("source_memory_ids") or []),
+                    quality_score=float(item.get("quality_score", 0.0)),
+                    metadata=dict(item.get("metadata") or {}),
+                )
+                processed += 1
+            except Exception:
+                self.log("warning", f"[MEMORY] Failed to consolidate trained memory for task_type={item.get('task_type')}")
+        if processed:
+            try:
+                self.experience_policy_learner.refresh(persistent=self.session_memory.hybrid.persistent)
+            except Exception as exc:
+                self.log("warning", f"[MEMORY] Experience policy refresh failed: {exc}")
+            try:
+                self.experience_trainer.train(persistent=self.session_memory.hybrid.persistent)
+            except Exception as exc:
+                self.log("warning", f"[MEMORY] Experience training refresh failed: {exc}")
+        return processed
+
+    async def _training_consolidation_loop(self) -> None:
+        while not self._training_consolidation_stop.is_set():
+            await asyncio.sleep(self._training_consolidation_interval_sec)
+            self._flush_training_consolidation_queue()
+
+    def _refresh_kpi_dashboard(self) -> dict[str, Any]:
+        kpi_log = Path(getattr(self.kpi_events, "file_path", "memory_store/kpi_events.jsonl"))
+        rolling = Path("core/mimo/profiles/rolling_kpi_store.json")
+        summary = Path(getattr(self.orchestration_config, "kpi_dashboard_output_path", "memory_store/kpi_dashboard_24h.json") or "memory_store/kpi_dashboard_24h.json")
+        dashboard = build_kpi_dashboard(kpi_log_path=kpi_log, rolling_kpi_path=rolling, summary_path=summary)
+        self.kpi_events.write({"event_type": "kpi_dashboard_refresh", "tasks_total": dashboard.get("task_lifecycle", {}).get("tasks_total", 0), "rejection_rate": dashboard.get("trained_memory_rejection", {}).get("rejection_rate", 0.0), "dashboard_path": str(summary)})
+        return dashboard
+
+    async def _kpi_dashboard_loop(self) -> None:
+        while not self._kpi_dashboard_stop.is_set():
+            await asyncio.sleep(self._kpi_dashboard_interval_sec)
+            try:
+                self._refresh_kpi_dashboard()
+            except Exception as exc:
+                self.log("warning", f"[KPI] dashboard refresh failed: {exc}")
+
+    def _kpi_rejection_summary(self) -> dict[str, Any]:
+        counters = self.metrics.snapshot().get("counters", {})
+        accepted = 0
+        rejected = 0
+        by_task: dict[str, dict[str, int]] = {}
+        for key, value in counters.items():
+            if not key.startswith("trained_memory."):
+                continue
+            parts = key.split(".")
+            if len(parts) < 3:
+                continue
+            task_type = parts[1]
+            bucket = by_task.setdefault(task_type, {"accepted": 0, "rejected": 0})
+            if parts[2] == "accepted":
+                accepted += int(value)
+                bucket["accepted"] += int(value)
+            elif parts[2] == "rejected":
+                rejected += int(value)
+                bucket["rejected"] += int(value)
+        total = accepted + rejected
+        rate = round(rejected / total, 4) if total else 0.0
+        return {
+            "summary_type": "trained_memory_rejection_summary",
+            "accepted": accepted,
+            "rejected": rejected,
+            "rejection_rate": rate,
+            "by_task": by_task,
+        }
+
     def attach_local_agent(self, agent_id: str, agent: BaseAgent, agent_type: str = "custom", critical: bool = False, model_name: str = "local-small", provider: str = "local") -> None:
         self.local_agents[agent_id] = agent
         agent.set_host_bridge(self.host_bridge)
+        setattr(agent, "orchestrator", self)
+        if hasattr(agent, "set_api"):
+            agent.set_api(self)
         if not self.registry.get(agent_id):
             self.registry.register(agent_id, agent_type, f"local://{agent_id}", agent.capabilities, critical=critical, model_name=model_name, provider=provider)
             self.metrics.register_agent(self.registry.get(agent_id))  # type: ignore[arg-type]
@@ -341,6 +520,12 @@ class Orchestrator:
         if hasattr(self.message_bus, "register_pod"):
             self.message_bus.register_pod(agent_id, agent.capabilities)
         self.log("info", f"[KERNEL] Attached local agent pod: {agent_id} (TPP Enabled)")
+
+    def qt_dev_box(self) -> QtDevBoxModule | None:
+        module = self.module_manager.get_module("qt_dev_box")
+        if isinstance(module, QtDevBoxModule):
+            return module
+        return None
 
     def _broadcast_pod_state(self, agent_id: str, status: AgentStatus, task_id: str | None = None) -> None:
         """Updates the TPP mesh with the current pod state."""
@@ -358,6 +543,11 @@ class Orchestrator:
 
     def unload_kernel_module(self, name: str) -> None:
         self.module_manager.unload(name)
+
+    def shutdown(self) -> None:
+        self._stop_postgres_watchdog()
+        self._training_consolidation_stop.set()
+        self._kpi_dashboard_stop.set()
 
     def loaded_kernel_modules(self) -> list[str]:
         return self.module_manager.loaded_modules()
@@ -609,15 +799,39 @@ class Orchestrator:
             identifier = task.task_id
 
         context: dict[str, object] = {}
-        if task.cache_policy == "write_only":
-            return context
-        for key in task.memory_keys:
-            normalized = key.lower()
-            if "thought" in normalized or normalized.endswith(":errors") or normalized == "errors":
-                continue
-            value = self.session_memory.get(scope, identifier, key)
-            if value is not None:
-                context[key] = value
+        if task.cache_policy != "write_only":
+            for key in task.memory_keys:
+                normalized = key.lower()
+                if "thought" in normalized or normalized.endswith(":errors") or normalized == "errors":
+                    continue
+                value = self.session_memory.get(scope, identifier, key)
+                if value is not None:
+                    context[key] = value
+
+        config = getattr(self, "orchestration_config", None)
+        high_risk_trained_memory = bool(getattr(config, "high_risk_trained_memory_enabled", False)) if config else False
+        task_type = task.type.value.lower()
+        if high_risk_trained_memory or task_type in {"plan", "review", "test", "code", "docs", "research"}:
+            trained_domain = self._training_memory_domain(task)
+            token_limit = 180 if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST} else 120
+            trained_brief = self.session_memory.hybrid.retrieve_trained_memory_brief(
+                session_id=task.session_id or task.task_id,
+                agent_id=agent_id,
+                memory_domain=trained_domain,
+                top_k=1,
+                token_limit=token_limit,
+                task_type=task_type,
+                allow_trained_memory=high_risk_trained_memory,
+            )
+            if trained_brief:
+                context["trained_memory_domain"] = trained_domain
+                context["trained_memory_brief"] = trained_brief
+                context["trained_memory_trusted"] = len(trained_brief) >= 80 and "Quality:" in trained_brief
+                context["trained_memory_disabled_for_risk"] = False
+            else:
+                context["trained_memory_disabled_for_risk"] = not high_risk_trained_memory
+        else:
+            context["trained_memory_disabled_for_risk"] = True
         return context
 
     def _model_usage_module(self) -> ModelUsageModule | None:
@@ -762,6 +976,8 @@ class Orchestrator:
         
         started_at = datetime.now(UTC)
         started_perf = time.perf_counter()
+        lifecycle_logged = False
+        lifecycle_payload: dict[str, Any] | None = None
         self.log("info", f"[PRE-FLIGHT] Verifying readiness for task {task.task_id}")
         
         # Try to run parallel checks if we have a loop, otherwise skip or run sync
@@ -775,8 +991,29 @@ class Orchestrator:
 
         capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
         advisory_context = self._build_decomposition_advisory(task)
+        mimo_model_name = task.assigned_model or "unknown"
+        mimo_memory_context = advisory_context.get("local_llm") if isinstance(advisory_context, dict) else None
+        selection_context = self.mimo_director.build_selection_context(
+            mimo_model_name,
+            task,
+            current_budget=float(os.getenv("MIMO_REMAINING_BUDGET", "999999")),
+            memory_context=mimo_memory_context,
+        )
+        local_llm_context = dict(advisory_context.get("local_llm") or {})
+        local_llm_context.update(selection_context)
+        local_llm_context.setdefault("ready", True)
+        local_llm_context.setdefault("should_delegate", True)
+        local_llm_context.setdefault("task_family", "mimo")
+        advisory_context["local_llm"] = local_llm_context
+        advisory_context["mimo"] = selection_context
 
         choice = self.model_selector.select(task, advisory_context=advisory_context)
+        choice = self.mimo_director.validate_and_correct(
+            choice,
+            task,
+            current_budget=float(os.getenv("MIMO_REMAINING_BUDGET", "999999")),
+            memory_context=mimo_memory_context,
+        )
 
         self.console.emit(
             "MODEL_SELECTION",
@@ -1008,6 +1245,17 @@ class Orchestrator:
                 self.metrics.record_result(agent_record, result)
                 self.kpi.apply_priority_policy(agent_record)
             self.results[task.task_id] = result
+            try:
+                self.mimo_director.register_execution_result(
+                    result.model_name or choice.model_name,
+                    result.status == TaskStatus.DONE,
+                    time.perf_counter() - started_perf,
+                    task=task,
+                    quality_score=quality.score,
+                    provider=agent_record.provider if agent_record else choice.provider,
+                )
+            except Exception:
+                pass
             command_summary = result.output.get("summary", "")
             raw_thoughts = result.output.get("thoughts")
             if raw_thoughts:
@@ -1059,7 +1307,7 @@ class Orchestrator:
             self.module_manager.after_task(task, result, module_context)
             finished_at = datetime.now(UTC)
             latency_ms = round((time.perf_counter() - started_perf) * 1000.0, 2)
-            model_usage_state = self.module_manager.finalize().get("model_usage", {})
+            model_usage_state = self.module_state().get("model_usage", {})
             history = model_usage_state.get("history", []) if isinstance(model_usage_state, dict) else []
             tokens_used = None
             if isinstance(history, list) and history:
@@ -1067,7 +1315,7 @@ class Orchestrator:
                     if isinstance(item, dict) and item.get("task_id") == task.task_id:
                         tokens_used = item.get("tokens_used")
                         break
-            self.kpi_events.write({
+            lifecycle_payload = {
                 "event_type": "task_lifecycle",
                 "task_id": task.task_id,
                 "task_type": task.type.value,
@@ -1083,7 +1331,14 @@ class Orchestrator:
                 "latency_ms": latency_ms,
                 "tokens_used": tokens_used,
                 "errors_count": len(result.errors or []),
-            })
+            }
+            self.kpi_events.write(lifecycle_payload)
+            self.kpi_events.append_fallback(lifecycle_payload)
+            lifecycle_logged = True
+
+            rejection_summary = self._kpi_rejection_summary()
+            self.kpi_events.write(rejection_summary)
+            self.kpi_events.write_summary({**rejection_summary, "summary_path": str(self.kpi_events.summary_path) if getattr(self.kpi_events, "summary_path", None) else ""})
 
             if choice.requires_secondary_review:
                 self.console.emit(
@@ -1091,6 +1346,8 @@ class Orchestrator:
                     f"task_id={task.task_id} enabled=true reason={choice.reason}",
                 )
 
+            if result.status == TaskStatus.DONE and quality.passed:
+                self._enqueue_training_consolidation(task, result)
             self.memory_consolidator.consolidate(session_id=task.session_id or task.task_id, agent_id=agent_id)
             if hasattr(self.message_bus, "publish_session_insights"):
                 self.message_bus.publish_session_insights(task.session_id or task.task_id, {"task_id": task.task_id, "agent_id": agent_id, "summary": command_summary, "status": result.status.value})
@@ -1106,6 +1363,30 @@ class Orchestrator:
                     return AgentResult(task.task_id, fix_result.agent_id, TaskStatus.DONE, fix_result.output, min(0.8, fix_result.confidence), fix_result.errors, fix_result.next_recommendations, fix_result.provider, fix_result.model_name)
             return result
         finally:
+            if not lifecycle_logged:
+                fallback_payload = lifecycle_payload or {
+                    "event_type": "task_lifecycle",
+                    "task_id": task.task_id,
+                    "task_type": task.type.value,
+                    "priority": task.priority.value,
+                    "status": "unknown",
+                    "agent_id": getattr(locals().get("result", None), "agent_id", agent_id if 'agent_id' in locals() else "orchestrator"),
+                    "provider": module_context.get("provider") if 'module_context' in locals() else None,
+                    "model": module_context.get("model") if 'module_context' in locals() else None,
+                    "fallback_count": fallback_count if 'fallback_count' in locals() else 0,
+                    "fallback_used": bool(fallback_count) if 'fallback_count' in locals() else False,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "latency_ms": round((time.perf_counter() - started_perf) * 1000.0, 2),
+                    "tokens_used": None,
+                    "errors_count": len(getattr(locals().get("result", None), "errors", []) or []),
+                    "task_lifecycle_fallback": True,
+                }
+                try:
+                    self.kpi_events.write(fallback_payload)
+                    self.kpi_events.append_fallback(fallback_payload)
+                except Exception:
+                    pass
             if agent_record:
                 self.lifecycle.mark_idle(agent_record)
                 self.autoscaler.scale_down_idle()
@@ -1121,39 +1402,69 @@ class Orchestrator:
         self.live_trace_rows = []
         self.console.emit("AGENTS", f"Найдено агентов: {len(self.registry.list_agents())}, доступно: {len(self.registry.ready_agents())}")
         self.healthcheck.check_all()
-        
+
         completed: set[str] = set()
         pending = {task.task_id: task for task in plan.atomic_tasks}
         final_results: list[AgentResult] = []
-        
+        batch_no = 0
+        total_tasks = len(plan.atomic_tasks)
+
         while pending:
             ready_tasks = [task for task in pending.values() if all(dep in completed for dep in task.dependencies)]
             if not ready_tasks:
                 raise RuntimeError("Task graph has unresolved dependencies or cycles")
-                
+
             usage_module = self._model_usage_module()
             if usage_module is not None and usage_module.should_reduce_parallelism() and len(ready_tasks) > 1:
                 self.console.emit("THROTTLE", f"Token budget is low; reducing parallel batch from {len(ready_tasks)} to 1")
                 ready_tasks = ready_tasks[:1]
 
-            self.console.emit("PARALLEL", f"Запуск {len(ready_tasks)} задач параллельно...")
+            batch_no += 1
+            ready_ids = ", ".join(task.task_id[:8] for task in ready_tasks)
+            self.console.emit(
+                "PARALLEL",
+                f"Batch {batch_no}: starting {len(ready_tasks)} task(s) in parallel | ready={ready_ids} | completed={len(completed)}/{total_tasks}",
+            )
+            self.console.progress(
+                "Parallel batches",
+                len(completed),
+                total_tasks,
+                details=f"batch {batch_no} queued {len(ready_tasks)} task(s)",
+            )
 
             results = await asyncio.gather(*(self.run_task_async(t) for t in ready_tasks))
-            
+
             final_results.extend(results)
-            
+
+            succeeded = sum(1 for r in results if r.status == TaskStatus.DONE)
+            failed = len(results) - succeeded
+            self.console.emit(
+                "PARALLEL",
+                f"Batch {batch_no}: finished | ok={succeeded} | failed={failed} | total_done={len(final_results)}",
+            )
+            self.console.progress(
+                "Parallel batches",
+                len(completed) + len(ready_tasks),
+                total_tasks,
+                details=f"batch {batch_no} finished ok={succeeded} failed={failed}",
+            )
+            if failed:
+                failed_ids = ", ".join(r.task_id[:8] for r in results if r.status != TaskStatus.DONE)
+                self.console.emit("ERROR", f"Batch {batch_no}: failed task(s): {failed_ids}")
+
             if any(r.status != TaskStatus.DONE for r in results):
                 merged = self.merger.merge(final_results)
-                module_state = self.module_manager.finalize()
+                module_state = self.module_state()
                 return {"status": "failed", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
-                
+
             for task in ready_tasks:
                 completed.add(task.task_id)
                 pending.pop(task.task_id)
 
         merged = self.merger.merge(final_results)
+        self.console.progress("Parallel batches", total_tasks, total_tasks, details="orchestration complete")
         self.console.emit("DONE", "Все критерии выполнены (Асинхронный параллельный режим)")
-        module_state = self.module_manager.finalize()
+        module_state = self.module_state()
         return {"status": "done", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "disabled_agents": self.autoscaler.disabled_agents, "enabled_agents": self.autoscaler.enabled_agents, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
 
     async def run_async(self, root_task: Task) -> dict:
@@ -1182,5 +1493,35 @@ class Orchestrator:
 
     async def listen_for_tasks(self):
         from .task_listener import TaskListener
+        if self._training_consolidation_task is None or self._training_consolidation_task.done():
+            self._training_consolidation_stop.clear()
+            self._training_consolidation_task = asyncio.create_task(self._training_consolidation_loop())
+        if self._kpi_dashboard_task is None or self._kpi_dashboard_task.done():
+            self._kpi_dashboard_stop.clear()
+            try:
+                self._refresh_kpi_dashboard()
+            except Exception as exc:
+                self.log("warning", f"[KPI] initial dashboard refresh failed: {exc}")
+            self._kpi_dashboard_task = asyncio.create_task(self._kpi_dashboard_loop())
         listener = TaskListener(self)
-        await listener.start()
+        try:
+            await listener.start()
+        finally:
+            self._training_consolidation_stop.set()
+            self._kpi_dashboard_stop.set()
+            if self._training_consolidation_task is not None:
+                self._training_consolidation_task.cancel()
+                try:
+                    await self._training_consolidation_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            if self._kpi_dashboard_task is not None:
+                self._kpi_dashboard_task.cancel()
+                try:
+                    await self._kpi_dashboard_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass

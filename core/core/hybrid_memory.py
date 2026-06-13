@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .memory_backend import BackendEntry, InMemoryBackend, MemoryBackend
@@ -58,6 +58,14 @@ class HybridMemory:
         self._session_index: dict[str, set[str]] = {}
         self._project_index: dict[str, set[str]] = {}
         self._maintenance_task: asyncio.Task[None] | None = None
+        self._trained_memory_brief_cache: dict[tuple[str, str, str, int, int], tuple[datetime, str]] = {}
+        self._trained_memory_quality_threshold = float(getattr(self.settings, "trained_memory_quality_threshold", 0.75) or 0.75)
+        self._trained_memory_quality_thresholds_by_task = dict(getattr(self.settings, "trained_memory_quality_thresholds_by_task", {}) or {})
+        self._trained_memory_brief_ttl_sec = max(60, int(getattr(self.settings, "trained_memory_brief_ttl_sec", 600) or 600))
+        self._trained_memory_degrade: dict[tuple[str, str], datetime] = {}
+        self._trained_memory_degrade_ttl_sec = max(120, int(getattr(self.settings, "trained_memory_degrade_ttl_sec", 900) or 900))
+        self._trained_memory_degrade_releases = 0
+        self._trained_memory_outcome_stats: dict[tuple[str, str], dict[str, int]] = {}
 
     @staticmethod
     def make_key(scope: str, identifier: str, key: str) -> str:
@@ -190,6 +198,30 @@ class HybridMemory:
                 self._drop_key(key)
                 removed += 1
         return removed
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        hot_keys = list(self._hot.keys())
+        backend_keys = []
+        if hasattr(self.backend, "keys"):
+            try:
+                backend_keys = list(self.backend.keys())
+            except Exception:
+                backend_keys = []
+        persistent_enabled = bool(getattr(self.persistent, "_pg_enabled", False))
+        persistent_url = getattr(self.persistent, "database_url", "")
+        return {
+            "hot_count": len(hot_keys),
+            "backend_count": len(backend_keys),
+            "hot_keys": hot_keys[:25],
+            "backend_keys": backend_keys[:25],
+            "persistent_enabled": persistent_enabled,
+            "persistent_url": persistent_url,
+            "session_index_count": len(self._session_index),
+            "project_index_count": len(self._project_index),
+            "term_index_count": len(self._term_index),
+            "trained_memory_degrade_count": len(self._trained_memory_degrade),
+            "trained_memory_degrade_releases": self._trained_memory_degrade_releases,
+        }
 
     def fast_retrieve(
         self,
@@ -382,6 +414,222 @@ class HybridMemory:
             session_id=session_id,
             agent_id=agent_id,
             limit=limit or self.settings.command_window_size,
+        )
+
+    def _trained_cache_key(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float) -> tuple[str, str, str, int, int, float]:
+        return (session_id, agent_id, memory_domain, int(top_k), int(token_limit), round(float(quality_threshold), 3))
+
+    def _trained_cache_get(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float) -> str | None:
+        key = self._trained_cache_key(session_id=session_id, agent_id=agent_id, memory_domain=memory_domain, top_k=top_k, token_limit=token_limit, quality_threshold=quality_threshold)
+        cached = self._trained_memory_brief_cache.get(key)
+        if not cached:
+            return None
+        expires_at, brief = cached
+        if datetime.now(UTC) >= expires_at:
+            self._trained_memory_brief_cache.pop(key, None)
+            return None
+        return brief
+
+    def _trained_cache_set(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float, brief: str) -> None:
+        key = self._trained_cache_key(session_id=session_id, agent_id=agent_id, memory_domain=memory_domain, top_k=top_k, token_limit=token_limit, quality_threshold=quality_threshold)
+        self._trained_memory_brief_cache[key] = (datetime.now(UTC) + timedelta(seconds=self._trained_memory_brief_ttl_sec), brief)
+
+    def _trained_memory_rank(self, record: Any, *, position: int) -> float:
+        score = float(getattr(record, "quality_score", 0.0) or 0.0)
+        created_at = getattr(record, "created_at", "")
+        age_bonus = 0.0
+        if created_at:
+            try:
+                age_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                age_hours = max(0.0, (datetime.now(UTC) - age_dt).total_seconds() / 3600.0)
+                age_bonus = 1.0 / (1.0 + age_hours)
+            except Exception:
+                age_bonus = 0.0
+        recency_bonus = 1.0 / (1.0 + position)
+        return score * 0.7 + age_bonus * 0.2 + recency_bonus * 0.1
+
+    def _trained_quality_threshold_for_domain(self, memory_domain: str) -> float:
+        key = memory_domain.split(":", 1)[-1].lower()
+        return float(self._trained_memory_quality_thresholds_by_task.get(key, self._trained_memory_quality_threshold) or self._trained_memory_quality_threshold)
+
+
+    def _degrade_key(self, session_id: str, task_type: str) -> tuple[str, str]:
+        return (session_id, task_type)
+
+    def record_trained_memory_rejection(self, *, session_id: str, task_type: str, threshold: float, reason: str) -> None:
+        key = self._degrade_key(session_id, task_type)
+        self._trained_memory_degrade[key] = datetime.now(UTC) + timedelta(seconds=self._trained_memory_degrade_ttl_sec)
+        logger.info("[MEMORY] trained memory rejected session=%s task_type=%s threshold=%.2f reason=%s", session_id, task_type, threshold, reason)
+
+    def _trained_outcome_key(self, session_id: str, task_type: str) -> tuple[str, str]:
+        return (session_id, task_type)
+
+    def record_trained_memory_outcome(self, *, session_id: str, task_type: str, accepted: bool, threshold: float, reason: str) -> None:
+        key = self._trained_outcome_key(session_id, task_type)
+        stats = self._trained_memory_outcome_stats.setdefault(key, {"accepted": 0, "rejected": 0})
+        if accepted:
+            stats["accepted"] += 1
+        else:
+            stats["rejected"] += 1
+        total = stats["accepted"] + stats["rejected"]
+        rejection_rate = stats["rejected"] / total if total else 0.0
+        if not accepted and total >= 3 and rejection_rate >= 0.67:
+            self.record_trained_memory_rejection(session_id=session_id, task_type=task_type, threshold=threshold, reason=f"{reason};high_rejection_rate={rejection_rate:.2f}")
+
+    def trained_memory_rejection_rate(self, *, session_id: str, task_type: str) -> float:
+        stats = self._trained_memory_outcome_stats.get(self._trained_outcome_key(session_id, task_type), {"accepted": 0, "rejected": 0})
+        total = stats["accepted"] + stats["rejected"]
+        return stats["rejected"] / total if total else 0.0
+
+    def _trained_memory_degraded(self, *, session_id: str, task_type: str) -> bool:
+        key = self._degrade_key(session_id, task_type)
+        expires = self._trained_memory_degrade.get(key)
+        if not expires:
+            return False
+        if datetime.now(UTC) >= expires:
+            self._trained_memory_degrade.pop(key, None)
+            self._trained_memory_degrade_releases += 1
+            return False
+        return True
+
+    def release_expired_trained_memory_degrade(self) -> int:
+        now = datetime.now(UTC)
+        released = 0
+        for key, expires in list(self._trained_memory_degrade.items()):
+            if now >= expires:
+                self._trained_memory_degrade.pop(key, None)
+                released += 1
+        if released:
+            self._trained_memory_degrade_releases += released
+        return released
+
+    def _rank_trained_memories(self, records: list[Any], *, top_k: int, quality_threshold: float) -> list[Any]:
+        filtered = [record for record in records if float(getattr(record, "quality_score", 0.0) or 0.0) >= quality_threshold]
+        if not filtered:
+            return []
+        ordered = sorted(
+            enumerate(filtered),
+            key=lambda pair: self._trained_memory_rank(pair[1], position=pair[0]),
+            reverse=True,
+        )
+        return [record for _, record in ordered[:max(1, int(top_k))]]
+
+    def retrieve_trained_memory_brief(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        memory_domain: str,
+        top_k: int = 3,
+        token_limit: int = 900,
+        task_type: str | None = None,
+        allow_trained_memory: bool = True,
+    ) -> str:
+        normalized_task_type = str(task_type or memory_domain.split(":", 1)[-1]).lower()
+        if not allow_trained_memory or self._trained_memory_degraded(session_id=session_id, task_type=normalized_task_type):
+            return ""
+        quality_threshold = self._trained_quality_threshold_for_domain(memory_domain)
+        cached = self._trained_cache_get(
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_domain=memory_domain,
+            top_k=top_k,
+            token_limit=token_limit,
+            quality_threshold=quality_threshold,
+        )
+        if cached is not None:
+            self.record_trained_memory_outcome(session_id=session_id, task_type=normalized_task_type, accepted=True, threshold=quality_threshold, reason="cache_hit")
+            return cached
+
+        records: list[Any] = []
+        if hasattr(self.persistent, "retrieve_trained_memories"):
+            try:
+                records = self.persistent.retrieve_trained_memories(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    memory_domain=memory_domain,
+                    top_k=max(1, int(top_k)) * 3,
+                )
+            except Exception:
+                records = []
+        if not records:
+            return ""
+        records = self._rank_trained_memories(records, top_k=top_k, quality_threshold=quality_threshold)
+        if not records:
+            self.record_trained_memory_outcome(session_id=session_id, task_type=normalized_task_type, accepted=False, threshold=quality_threshold, reason="quality_threshold")
+            return ""
+
+        lines = [f"--- TRAINED MEMORY BRIEF ({memory_domain}, Top {len(records)}) ---"]
+        used = len(lines[0])
+        budget_chars = max(200, token_limit * 4)
+        for record in records:
+            if isinstance(record, dict):
+                content = record.get("content")
+                source_ids = record.get("source_memory_ids") or []
+                score = float(record.get("quality_score", 0.0) or 0.0)
+                domain = str(record.get("memory_domain", memory_domain))
+                label = f"[Quality: {score:.2f}] [Domain: {domain}] [Sources: {source_ids}]"
+            else:
+                content = getattr(record, "content", None)
+                source_ids = getattr(record, "source_memory_ids", [])
+                score = float(getattr(record, "quality_score", 0.0) or 0.0)
+                domain = str(getattr(record, "memory_domain", memory_domain))
+                label = f"[Quality: {score:.2f}] [Domain: {domain}] [Sources: {source_ids}]"
+            payload = str(content)
+            if len(payload) > 500:
+                payload = payload[:497] + "..."
+            line = f"{label} {payload}"
+            if used + len(line) + 1 > budget_chars:
+                break
+            lines.append(line)
+            used += len(line) + 1
+        brief = "\n".join(lines)
+        self._trained_cache_set(
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_domain=memory_domain,
+            top_k=top_k,
+            token_limit=token_limit,
+            quality_threshold=quality_threshold,
+            brief=brief,
+        )
+        return brief
+
+    def get_trained_memory_context(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        memory_domain: str,
+        top_k: int = 3,
+    ) -> dict[str, Any]:
+        brief = self.retrieve_trained_memory_brief(
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_domain=memory_domain,
+            top_k=top_k,
+        )
+        return {
+            "brief": brief,
+            "memory_domain": memory_domain,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "has_trained_memory": bool(brief),
+        }
+
+    def use_trained_memory(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        memory_domain: str,
+        top_k: int = 3,
+    ) -> str:
+        return self.retrieve_trained_memory_brief(
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_domain=memory_domain,
+            top_k=top_k,
         )
 
     def get_command_history(self, *, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
