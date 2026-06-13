@@ -20,9 +20,10 @@ from .models import (
 from .task_router import CAPABILITY_BY_TASK_TYPE
 
 ORCHESTRATOR_TASK_TYPES = {TaskType.PLAN}
-ORCHESTRATOR_CAPABILITIES = {"security", "auth", "database", "architecture", "orchestrator", "sourcecraft"}
 SOURCECRAFT_KEYWORDS = ("sourcecraft", "src ", " src", "repo", "repository", "pull request", "pr ", " pr", "issue", "release", "branch", "tag", "changelog", "quota", "status")
 SOURCECRAFT_ROUTABLE_TASK_TYPES = {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}
+SOURCECRAFT_CAPABILITIES = {"sourcecraft", "repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance"}
+ORCHESTRATOR_CAPABILITIES = {"security", "auth", "database", "architecture", "orchestrator", *SOURCECRAFT_CAPABILITIES}
 BLOCKED_STATUSES = {
     AgentStatus.OFFLINE,
     AgentStatus.DISABLED,
@@ -67,7 +68,7 @@ class SmartScheduler:
         
         text = str(envelope.payload.objective).lower()
         risky_terms = {"rollback", "migration", "secret", "security", "auth", "database", "billing", "api", "schema"}
-        sourcecraft_task = envelope.target_capability == "sourcecraft"
+        sourcecraft_task = envelope.target_capability in SOURCECRAFT_CAPABILITIES
         requires_orchestrator = (
             envelope.priority in {Priority.CRITICAL, "critical"}
             or envelope.target_capability in ORCHESTRATOR_CAPABILITIES
@@ -189,7 +190,7 @@ class SmartScheduler:
         agent, score, readiness = self.choose_agent(task)
         requires_orchestrator = self.requires_orchestrator(task)
         if not agent:
-            reason = "SourceCraft role handled by orchestrator module" if (task.type in SOURCECRAFT_ROUTABLE_TASK_TYPES and self._is_sourcecraft_work(task.input.description)) or (task.required_capability == "sourcecraft") else "No ready agent for required capability"
+            reason = "SourceCraft role handled by orchestrator module" if (task.type in SOURCECRAFT_ROUTABLE_TASK_TYPES and self._is_sourcecraft_work(task.input.description)) or (task.required_capability in SOURCECRAFT_CAPABILITIES) else "No ready agent for required capability"
             decision = SchedulerDecision(task.task_id, "orchestrator", None, True, reason, weight.task_score)
         elif requires_orchestrator:
             decision = SchedulerDecision(task.task_id, "orchestrator", agent.id, True, "High-risk or strategic task", weight.task_score, score, readiness.readiness if readiness else None)

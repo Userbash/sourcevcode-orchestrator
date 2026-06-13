@@ -109,3 +109,16 @@ def test_router_excludes_agents_over_capacity_before_scoring():
     assert overloaded.status == AgentStatus.OVERLOADED
     assert accepted.status.value == "accepted"
     assert accepted.assigned_agent == "ready"
+
+
+
+def test_repo_ops_capability_routes_to_orchestrator_without_dedicated_agent():
+    registry = AgentRegistry()
+    registry.register("codex-main", "codex", "local://codex", ["code", "fix"])
+    router = TaskRouter(registry, LoadBalancer())
+    task = Task(TaskType.PLAN, TaskInput("Check repo policy and branch governance"), TaskContext("p", ".", "main"), required_capability="repo_ops")
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "orchestrator"
