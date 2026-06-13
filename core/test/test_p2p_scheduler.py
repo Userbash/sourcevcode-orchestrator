@@ -122,3 +122,21 @@ def test_scheduler_escalation_policy_after_retry_limit():
 
     assert scheduler.should_escalate(task, retry_count=1) is False
     assert scheduler.should_escalate(task, retry_count=4) is True
+
+
+
+def test_scheduler_routes_pr_flow_capability_to_orchestrator():
+    registry = AgentRegistry()
+    registry.register("codex-main", "codex", "local://codex", ["code", "fix"])
+    scheduler = SmartScheduler(registry)
+    task = Task(
+        TaskType.PLAN,
+        TaskInput("Create pull request and validate branch policy"),
+        TaskContext("demo", ".", "main"),
+        required_capability="pr_flow",
+    )
+
+    decision = scheduler.schedule(task)
+
+    assert decision.route_mode == "orchestrator"
+    assert decision.requires_orchestrator is True

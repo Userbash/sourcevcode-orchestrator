@@ -67,6 +67,11 @@ class SourceCraftRepoRequest(BaseModel):
     rebase: bool = False
     delete_branch: bool = False
     wait: bool = True
+    preview_token: str | None = None
+    allow_production_repo: bool = False
+    allow_default_branch_merge: bool = False
+    session_id: str | None = None
+    actor_id: str = "sourcecraft"
 
 
 @dataclass
@@ -432,6 +437,11 @@ class APIBridgeModule:
             rebase=request.rebase,
             delete_branch=request.delete_branch,
             wait=request.wait,
+            preview_token=request.preview_token,
+            allow_production_repo=request.allow_production_repo,
+            allow_default_branch_merge=request.allow_default_branch_merge,
+            session_id=request.session_id,
+            actor_id=request.actor_id,
         )
         return {
             "status": result.get("status", "ok"),
