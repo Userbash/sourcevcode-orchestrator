@@ -277,7 +277,15 @@ class LocalLLMModule(KernelModule):
             "error": last_exc,
         }
 
-    def _query_model(self, prompt: str, model_name: str | None = None, system: str | None = None) -> str:
+    def _query_model(
+        self,
+        prompt: str,
+        model_name: str | None = None,
+        *,
+        system: str | None = None,
+        options: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
+    ) -> str:
         target_model = (model_name or self.model_name).strip()
         readiness = self.can_use_model(target_model)
         if not readiness["ok"]:
@@ -294,12 +302,12 @@ class LocalLLMModule(KernelModule):
                     "prompt": prompt,
                     "system": system or "You are a specialized AI Kernel Optimizer.",
                     "stream": False,
-                    "options": {
+                    "options": options or {
                         "temperature": 0.2,
                         "top_p": 0.9,
                     },
                 },
-                timeout=self.generate_timeout_sec,
+                timeout=timeout_sec or self.generate_timeout_sec,
             )
             response.raise_for_status()
             duration = time.perf_counter() - start_time
@@ -685,7 +693,10 @@ class LocalLLMModule(KernelModule):
         self,
         prompt: str,
         model_name: str | None = None,
-        system: str = "You are a specialized AI Kernel Optimizer.",
+        system: str | None = "You are a specialized AI Kernel Optimizer.",
+        *,
+        options: dict[str, Any] | None = None,
+        timeout_sec: float | None = None,
     ) -> str:
         """Synchronous query for internal kernel tasks and local agent execution."""
         target_model = (model_name or self.model_name).strip()
@@ -693,7 +704,13 @@ class LocalLLMModule(KernelModule):
         if not readiness.get("ok"):
             return ""
         try:
-            return self._query_model(prompt, target_model, system=system)
+            return self._query_model(
+                prompt,
+                target_model,
+                system=system,
+                options=options,
+                timeout_sec=timeout_sec,
+            )
         except Exception as e:
             logger.error(f"Local LLM query failed: {e}")
             return ""

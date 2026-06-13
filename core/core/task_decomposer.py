@@ -179,6 +179,13 @@ class TaskDecomposer:
             layer_name = str(layer.get("name") or f"layer_{index}").strip() or f"layer_{index}"
             objective = str(layer.get("objective") or layer_name).strip()
             capability = self._capability_from_layer(layer_name, objective, layer.get("capability"))
+            draft_layers.append({
+                "name": layer_name,
+                "objective": objective,
+                "capability": capability,
+                "task_type": str(layer.get("task_type") or "code").strip().lower() or "code",
+                "parallel": bool(layer.get("parallel") or layer.get("parallel_group") or len(self._ensure_list(layer.get("sub_agents"))) > 1),
+            })
             task_type = self._normalize_task_type(layer.get("task_type"), TaskType.CODE, objective=objective)
             if task_type == TaskType.PLAN and index == 0:
                 task_type = TaskType.PLAN

@@ -173,6 +173,18 @@ def test_director_prefers_security_review_profile():
     assert ctx["context_depth"] >= 5
 
 
+def test_director_exposes_runtime_health_and_selection_trace():
+    director = MimoOrchestrationDirector()
+    director.is_available = False
+    task = type("T", (), {"session_id": "s8", "task_id": "t8", "memory_scope": "task", "complexity": type("C", (), {"value": "medium"})(), "type": DummyTaskType("docs"), "input": type("I", (), {"description": "docs update for api reference", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "normal"})()})()
+    ctx = director.build_selection_context("model-a", task, 1000.0, memory_context={})
+
+    assert ctx["mimo_runtime_health"]["ready"] is False
+    assert ctx["mimo_runtime_health"]["profiles_loaded"] >= 1
+    assert ctx["selection_trace"][0]["event"] == "runtime_health"
+    assert any(item["event"] == "profile_selected" for item in ctx["selection_trace"])
+
+
 def test_director_persisted_kpi_store_roundtrip(tmp_path):
     director = MimoOrchestrationDirector()
     director.kpi_store_path = tmp_path / "rolling_kpi_store.json"
@@ -205,3 +217,280 @@ def test_mimo_bridge_ping_model_falls_back_to_cached_models():
     assert asyncio.run(bridge.ping_model("xiaomi/mimo-v2-pro")) is True
     assert asyncio.run(bridge.ping_model("mimo-v2-pro")) is True
     assert asyncio.run(bridge.ping_model("missing-model")) is False
+
+
+
+def test_director_recommend_model_uses_safe_fallback_when_unavailable():
+    director = MimoOrchestrationDirector()
+    director.is_available = False
+    task = type("T", (), {
+        "session_id": "s9",
+        "task_id": "t9",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "medium"})(),
+        "type": DummyTaskType("docs"),
+        "input": type("I", (), {"description": "docs update for api reference", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "normal"})(),
+    })()
+
+    recommendation = director.recommend_model(task, {"local_llm": {"ready": True}}, current_budget=1000.0)
+
+    assert recommendation.allow is True
+    assert recommendation.decision_mode == "safe_fallback"
+    assert recommendation.provider == "local"
+    assert recommendation.model_name == "qwen-2.5-7b-instruct"
+    assert recommendation.reason == "mimo_unavailable_safe_fallback"
+
+
+def test_director_recommend_model_blocks_unhealthy_provider():
+    director = MimoOrchestrationDirector()
+    director.is_available = True
+    director.set_status_source(lambda: {"providers": {"antigravity": {"ready": False, "status": "degraded", "error": "auth_failed"}}})
+    task = type("T", (), {
+        "session_id": "s10",
+        "task_id": "t10",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "medium"})(),
+        "type": DummyTaskType("research"),
+        "input": type("I", (), {"description": "compare options and investigate provider behavior", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "normal"})(),
+    })()
+
+    recommendation = director.recommend_model(
+        task,
+        {
+            "selected_provider": "antigravity",
+            "selected_model": "antigravity-cli",
+        },
+        current_budget=1000.0,
+    )
+
+    assert recommendation.allow is False
+    assert recommendation.requires_escalation is True
+    assert recommendation.blocked_by == "health"
+    assert recommendation.provider == "antigravity"
+    assert recommendation.model_name == "antigravity-cli"
+    assert recommendation.fallback_options
+
+
+def test_director_recommend_model_prefers_local_llm_owner_for_low_medium_docs():
+    director = MimoOrchestrationDirector()
+    director.is_available = True
+    task = type("T", (), {
+        "session_id": "s11",
+        "task_id": "t11",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "medium"})(),
+        "type": DummyTaskType("docs"),
+        "input": type("I", (), {"description": "write concise docs summary", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "normal"})(),
+    })()
+
+    recommendation = director.recommend_model(
+        task,
+        {
+            "local_llm": {
+                "ready": True,
+                "recommended_owner": "local_llm",
+                "recommended_model": "qwen-2.5-7b-instruct",
+                "task_family": "docs_workflow",
+            }
+        },
+        current_budget=1000.0,
+    )
+
+    assert recommendation.allow is True
+    assert recommendation.provider == "local"
+    assert recommendation.model_name == "qwen-2.5-7b-instruct"
+    assert recommendation.reason.startswith("mimo_recommend_local_llm_owner")
+
+
+
+def test_director_resolve_candidate_models_filters_blocked_and_unhealthy_provider():
+    director = MimoOrchestrationDirector()
+    director.is_available = True
+    director.bridge._cached_models = [
+        MimoModelSnapshot(
+            full_id="local/qwen-2.5-7b-instruct",
+            id="qwen-2.5-7b-instruct",
+            provider="local",
+            status="active",
+            context_window=131072,
+            capability_tags=["docs", "research"],
+            cost_class="low",
+            ready=True,
+            blocked=False,
+        ),
+        MimoModelSnapshot(
+            full_id="antigravity/antigravity-cli",
+            id="antigravity-cli",
+            provider="antigravity",
+            status="active",
+            context_window=1048576,
+            capability_tags=["docs", "research"],
+            cost_class="medium",
+            ready=True,
+            blocked=False,
+        ),
+        MimoModelSnapshot(
+            full_id="local/qwen2.5-32b-instruct-q4_k_m",
+            id="qwen2.5:32b-instruct-q4_k_m",
+            provider="local",
+            status="active",
+            context_window=65536,
+            capability_tags=["code"],
+            cost_class="medium",
+            ready=True,
+            blocked=True,
+        ),
+    ]
+    director.set_status_source(lambda: {"providers": {"antigravity": {"ready": False, "status": "degraded", "error": "auth_failed"}}})
+    task = type("T", (), {
+        "session_id": "s12",
+        "task_id": "t12",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "medium"})(),
+        "type": DummyTaskType("docs"),
+        "input": type("I", (), {"description": "write docs summary", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "normal"})(),
+    })()
+
+    candidates = director.resolve_candidate_models(task, {"selected_provider": "antigravity"})
+
+    assert [item["model_name"] for item in candidates] == ["qwen-2.5-7b-instruct"]
+    assert candidates[0]["provider"] == "local"
+    assert candidates[0]["source"] == "mimo_inventory"
+
+
+def test_director_safe_fallback_blocks_high_risk_when_mimo_unavailable():
+    director = MimoOrchestrationDirector()
+    director.is_available = False
+    task = type("T", (), {
+        "session_id": "s13",
+        "task_id": "t13",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "high"})(),
+        "type": DummyTaskType("review"),
+        "input": type("I", (), {"description": "security review for auth and rbac changes", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "high"})(),
+    })()
+
+    recommendation = director.recommend_model(task, {}, current_budget=1000.0)
+
+    assert recommendation.allow is False
+    assert recommendation.decision_mode == "safe_fallback"
+    assert recommendation.blocked_by == "policy"
+    assert recommendation.requires_escalation is True
+
+
+def test_director_provider_health_uses_full_provider_snapshot_and_local_advisory():
+    director = MimoOrchestrationDirector()
+    director.set_status_source(lambda: {
+        "providers": {
+            "openai": {"ready": True, "status": "healthy"},
+            "mistral": {"ready": False, "status": "degraded", "error": "quota"},
+        }
+    })
+
+    health = director._provider_health({"local_llm": {"ready": True, "status": "ready"}})
+
+    assert health["openai"]["ready"] is True
+    assert health["mistral"]["error"] == "quota"
+    assert health["local"]["ready"] is True
+
+
+
+def test_director_provider_health_accepts_availability_cached_report_shape():
+    director = MimoOrchestrationDirector()
+    director.set_status_source(lambda: {
+        "providers": {
+            "openai": {"provider": "openai", "status": "healthy", "latency_ms": 10.0, "error": None, "diagnostics": {}},
+            "antigravity": {"provider": "antigravity", "status": "degraded", "latency_ms": 30.0, "error": "auth_failed", "diagnostics": {}},
+        }
+    })
+
+    health = director._provider_health({})
+
+    assert health["openai"]["ready"] is True
+    assert health["antigravity"]["ready"] is False
+    assert health["antigravity"]["error"] == "auth_failed"
+
+
+
+def test_director_uses_local_llm_as_surrogate_controller_when_mimo_unavailable():
+    director = MimoOrchestrationDirector()
+    director.is_available = False
+    task = type("T", (), {
+        "session_id": "s14",
+        "task_id": "t14",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "medium"})(),
+        "type": DummyTaskType("docs"),
+        "input": type("I", (), {"description": "write docs summary", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "normal"})(),
+    })()
+
+    recommendation = director.recommend_model(
+        task,
+        {
+            "local_llm": {
+                "ready": True,
+                "recommended_owner": "local_llm",
+                "recommended_model": "qwen-2.5-7b-instruct",
+                "task_family": "docs_workflow",
+            }
+        },
+        current_budget=1000.0,
+    )
+
+    assert recommendation.allow is True
+    assert recommendation.decision_mode == "surrogate_controller"
+    assert recommendation.provider == "local"
+    assert recommendation.model_name == "qwen-2.5-7b-instruct"
+    assert recommendation.reason == "local_llm_surrogate_controller"
+
+
+def test_director_blocks_high_risk_even_with_local_llm_surrogate():
+    director = MimoOrchestrationDirector()
+    director.is_available = False
+    task = type("T", (), {
+        "session_id": "s15",
+        "task_id": "t15",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "high"})(),
+        "type": DummyTaskType("review"),
+        "input": type("I", (), {"description": "security review for auth and rbac changes", "constraints": [], "acceptance_criteria": [], "files": []})(),
+        "priority": type("P", (), {"value": "high"})(),
+    })()
+
+    recommendation = director.recommend_model(
+        task,
+        {
+            "local_llm": {
+                "ready": True,
+                "recommended_owner": "local_llm",
+                "recommended_model": "qwen-2.5-7b-instruct",
+                "task_family": "review",
+            }
+        },
+        current_budget=1000.0,
+    )
+
+    assert recommendation.allow is False
+    assert recommendation.decision_mode == "safe_fallback"
+    assert recommendation.requires_escalation is True
+    assert recommendation.blocked_by == "policy"
+
+
+def test_director_safe_sync_tracks_failure_reason_and_recovery_attempts(monkeypatch):
+    director = MimoOrchestrationDirector()
+
+    async def boom():
+        raise RuntimeError("mimo_sync_failed")
+
+    monkeypatch.setattr(director.bridge, "refresh_cache", boom)
+    director.safe_sync()
+
+    assert director.is_available is False
+    assert director.last_failure_reason == "mimo_sync_failed"
+    assert director.recovery_attempts == 1

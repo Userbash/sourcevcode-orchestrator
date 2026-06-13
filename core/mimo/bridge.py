@@ -16,6 +16,10 @@ class MimoModelSnapshot:
     provider: str
     status: str
     context_window: Optional[int]
+    capability_tags: list[str] | None = None
+    cost_class: str | None = None
+    ready: bool | None = None
+    blocked: bool = False
 
 
 class MimoAsyncBridge:
@@ -99,12 +103,19 @@ class MimoAsyncBridge:
                 data = json.loads("\n".join(payload))
             except json.JSONDecodeError:
                 continue
+            capability_tags = data.get("capabilities") or data.get("capabilityTags") or []
+            if not isinstance(capability_tags, list):
+                capability_tags = []
             results.append(MimoModelSnapshot(
                 full_id=full_id,
                 id=str(data.get("id", "")),
                 provider=str(data.get("providerID", "")),
                 status=str(data.get("status", "")),
                 context_window=(data.get("limit") or {}).get("context"),
+                capability_tags=[str(item).strip() for item in capability_tags if str(item).strip()],
+                cost_class=str(data.get("costClass") or data.get("cost_class") or "").strip() or None,
+                ready=bool(data.get("ready")) if "ready" in data else None,
+                blocked=bool(data.get("blocked", False)),
             ))
         return results
 

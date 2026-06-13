@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 SOURCECRAFT_KEYWORDS = ("sourcecraft", "src ", " src", "repo", "repository", "pull request", "pr ", " pr", "issue", "release", "branch", "tag", "changelog", "quota", "status")
 SOURCECRAFT_ROUTABLE_TASK_TYPES = {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}
+SOURCECRAFT_CAPABILITIES = {"sourcecraft", "repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance"}
 
 
 CAPABILITY_BY_TASK_TYPE = {
@@ -38,7 +39,7 @@ class TaskRouter:
     @staticmethod
     def _is_sourcecraft_work(task: Task) -> bool:
         text = " ".join([task.input.description, *task.input.constraints, *task.input.files]).lower()
-        return task.required_capability == "sourcecraft" or (task.type in SOURCECRAFT_ROUTABLE_TASK_TYPES and any(keyword in text for keyword in SOURCECRAFT_KEYWORDS))
+        return task.required_capability in SOURCECRAFT_CAPABILITIES or (task.type in SOURCECRAFT_ROUTABLE_TASK_TYPES and any(keyword in text for keyword in SOURCECRAFT_KEYWORDS))
 
     def decompose(self, task: Task) -> ExecutionPlan:
         from .task_decomposer import TaskDecomposer
@@ -47,7 +48,7 @@ class TaskRouter:
     def route_envelope(self, envelope: TaskEnvelope) -> TaskAcceptance:
         """Route a network-like TaskEnvelope based on policy, QoS, and risk."""
         capability = envelope.target_capability
-        sourcecraft_task = capability == "sourcecraft"
+        sourcecraft_task = capability in SOURCECRAFT_CAPABILITIES
         candidates = [agent for agent in self._candidate_agents(capability) if is_agent_routable(agent, envelope.priority)]
 
         if not candidates:
@@ -95,13 +96,13 @@ class TaskRouter:
     def route(self, task: Task) -> TaskAcceptance:
         capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
         sourcecraft_task = self._is_sourcecraft_work(task)
-        if sourcecraft_task and capability != "sourcecraft":
+        if sourcecraft_task and capability not in SOURCECRAFT_CAPABILITIES:
             capability = "sourcecraft"
 
         candidates = [agent for agent in self._candidate_agents(capability) if is_agent_routable(agent, task.priority)]
 
         if not candidates:
-            if capability == "sourcecraft" or sourcecraft_task:
+            if capability in SOURCECRAFT_CAPABILITIES or sourcecraft_task:
                 return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", self.estimate_complexity(task), "SourceCraft role handled by orchestrator module")
             return TaskAcceptance(task.task_id, TaskStatus.REJECTED, None, self.estimate_complexity(task), f"No available agent for capability {capability}")
 
@@ -111,7 +112,7 @@ class TaskRouter:
 
         agent = self.load_balancer.choose(scoring_pool, capability, task.priority, task)
         if not agent:
-            if capability == "sourcecraft" or sourcecraft_task:
+            if capability in SOURCECRAFT_CAPABILITIES or sourcecraft_task:
                 return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", self.estimate_complexity(task), "SourceCraft role handled by orchestrator module")
             return TaskAcceptance(task.task_id, TaskStatus.REJECTED, None, self.estimate_complexity(task), f"No available agent for capability {capability}")
 

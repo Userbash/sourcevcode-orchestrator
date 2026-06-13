@@ -22,7 +22,7 @@ from .kpi import KPIEvaluator
 from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
-from .model_selector import ModelSelector
+from .model_selector import ModelChoice, ModelSelector
 from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
@@ -132,6 +132,65 @@ class Orchestrator:
             snapshot = module.snapshot()
             return snapshot if isinstance(snapshot, dict) else {"value": snapshot}
         return {}
+
+    def _provider_health_snapshot(self) -> dict[str, Any]:
+        providers: dict[str, Any] = {}
+        try:
+            cached = self.availability.cached_report() if hasattr(self.availability, "cached_report") else {}
+            if isinstance(cached, dict):
+                for provider, state in cached.items():
+                    if isinstance(state, dict):
+                        providers[str(provider).strip().lower()] = dict(state)
+        except Exception:
+            pass
+        antigravity = self._antigravity_status_snapshot()
+        if isinstance(antigravity, dict) and antigravity:
+            providers["antigravity"] = antigravity
+        return {"providers": providers}
+
+    def _select_model_choice_with_mimo(self, task: Task, advisory_context: dict[str, Any], current_budget: float, memory_context: dict[str, Any] | None = None) -> tuple[ModelChoice | None, Any]:
+        complexity = self.model_selector.classify(task)
+        task.complexity = complexity
+        recommendation = self.mimo_director.recommend_model(task, advisory_context, current_budget=current_budget, memory_context=memory_context)
+        if not recommendation.allow:
+            return None, recommendation
+
+        if recommendation.decision_mode in {"safe_fallback", "surrogate_controller"}:
+            choice = ModelChoice(
+                recommendation.model_name,
+                recommendation.provider,
+                complexity,
+                requires_secondary_review=task.type == TaskType.PLAN,
+                reason=recommendation.reason,
+            )
+            choice.selection_trace = {
+                "provider": choice.provider,
+                "model_name": choice.model_name,
+                "complexity": getattr(choice.complexity, "value", str(choice.complexity)),
+                "reason": choice.reason,
+                "task_type": getattr(task.type, "value", str(task.type)),
+                "mimo_decision_mode": recommendation.decision_mode,
+                "mimo_recommendation": {
+                    "provider": recommendation.provider,
+                    "model_name": recommendation.model_name,
+                    "confidence": recommendation.confidence,
+                },
+            }
+            return choice, recommendation
+
+        choice = self.model_selector.select(task, advisory_context=advisory_context)
+        choice.provider = recommendation.provider
+        choice.model_name = recommendation.model_name
+        choice.reason = recommendation.reason
+        trace = choice.selection_trace if isinstance(choice.selection_trace, dict) else {}
+        trace["mimo_decision_mode"] = recommendation.decision_mode
+        trace["mimo_recommendation"] = {
+            "provider": recommendation.provider,
+            "model_name": recommendation.model_name,
+            "confidence": recommendation.confidence,
+        }
+        choice.selection_trace = trace
+        return choice, recommendation
 
     def _autostart_local_llm(self) -> None:
         if self._testing_mode() or not self._local_llm_autostart_enabled():
@@ -254,7 +313,7 @@ class Orchestrator:
         self.module_manager.register(ModelAvailabilityModule())
         self.module_manager.register(AntigravityStatusModule())
         self.module_manager.register(APIBridgeModule())
-        self.mimo_director.set_status_source(self._antigravity_status_snapshot)
+        self.mimo_director.set_status_source(self._provider_health_snapshot)
         self.module_manager.register(SmartDecomposerModule())
         self.module_manager.register(PromptOptimizerModule())
         self.module_manager.register(ChatBusModule())
@@ -725,8 +784,11 @@ class Orchestrator:
                         "branch": task.context.branch,
                     },
                 )
+                if hasattr(sourcecraft_module, "ensure_ready"):
+                    advisory_context["sourcecraft_runtime"] = sourcecraft_module.ensure_ready(repo_path=task.context.repo_path or ".")
             except Exception:
                 advisory_context["sourcecraft"] = {"enabled": False, "should_delegate": False}
+                advisory_context["sourcecraft_runtime"] = {"status": "error"}
 
         local_llm_module = self.module_manager.get_module("local_llm") if hasattr(self.module_manager, "get_module") else None
         if local_llm_module and isinstance(local_llm_module, LocalLLMModule):
@@ -750,6 +812,29 @@ class Orchestrator:
     def create_execution_plan(self, task: Task) -> ExecutionPlan:
         self.console.emit("PLAN", "Задача проанализирована")
         advisory_context = self._build_decomposition_advisory(task)
+
+        sourcecraft_module = self.module_manager.get_module("sourcecraft")
+        if sourcecraft_module and hasattr(sourcecraft_module, "build_execution_plan"):
+            try:
+                sourcecraft_plan = sourcecraft_module.build_execution_plan(
+                    task,
+                    {
+                        "description": task.input.description,
+                        "repo_path": task.context.repo_path,
+                        "branch": task.context.branch,
+                    },
+                )
+                if sourcecraft_plan and getattr(sourcecraft_plan, "atomic_tasks", None):
+                    tdd_policy = self.module_manager.get_module("tdd_policy")
+                    if isinstance(tdd_policy, StrictTDDModule):
+                        sourcecraft_plan = tdd_policy.enforce_plan(sourcecraft_plan)
+                    readability_policy = self.module_manager.get_module("readability_policy")
+                    if isinstance(readability_policy, CodeReadabilityModule):
+                        sourcecraft_plan = readability_policy.enforce_plan(sourcecraft_plan)
+                    self.console.emit("PLAN", f"SourceCraft execution plan created: {len(sourcecraft_plan.atomic_tasks)} tasks")
+                    return sourcecraft_plan
+            except Exception as e:
+                self.console.emit("PLAN", f"SourceCraft planning fallback: {e}")
 
         # Try smart decomposition first (Higher level AI/Reasoning)
         smart_decomp = self.module_manager.get_module("smart_decomposer")
@@ -1000,14 +1085,31 @@ class Orchestrator:
             memory_context=mimo_memory_context,
         )
         local_llm_context = dict(advisory_context.get("local_llm") or {})
+        local_ready = local_llm_context.get("ready")
+        local_should_delegate = local_llm_context.get("should_delegate")
+        local_task_family = local_llm_context.get("task_family")
         local_llm_context.update(selection_context)
-        local_llm_context.setdefault("ready", True)
-        local_llm_context.setdefault("should_delegate", True)
-        local_llm_context.setdefault("task_family", "mimo")
+        if local_ready is not None:
+            local_llm_context["ready"] = local_ready
+        if local_should_delegate is not None:
+            local_llm_context["should_delegate"] = local_should_delegate
+        if local_task_family is not None:
+            local_llm_context["task_family"] = local_task_family
         advisory_context["local_llm"] = local_llm_context
         advisory_context["mimo"] = selection_context
 
-        choice = self.model_selector.select(task, advisory_context=advisory_context)
+        choice, mimo_recommendation = self._select_model_choice_with_mimo(
+            task,
+            advisory_context,
+            float(os.getenv("MIMO_REMAINING_BUDGET", "999999")),
+            mimo_memory_context,
+        )
+        if choice is None:
+            blocked_by = getattr(mimo_recommendation, "blocked_by", None) or "policy"
+            escalation = getattr(mimo_recommendation, "escalation_reason", None) or getattr(mimo_recommendation, "reason", "mimo_blocked")
+            message = f"MIMO blocked model selection: blocked_by={blocked_by} escalation={escalation}"
+            self.console.emit("MODEL_SELECTION", message)
+            return AgentResult(task.task_id, "orchestrator", TaskStatus.FAILED, {"summary": message, "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, [message], [])
         choice = self.mimo_director.validate_and_correct(
             choice,
             task,

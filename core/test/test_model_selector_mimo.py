@@ -82,3 +82,49 @@ def test_model_selector_uses_recommended_model_when_preferred_missing():
     )
     assert choice.model_name == "qwen-2.5-7b-instruct"
     assert choice.provider == "local"
+
+
+def test_model_selector_exposes_structured_selection_trace():
+    selector = ModelSelector()
+    task = _task(TaskType.PLAN, "prepare a layered execution plan")
+    choice = selector.select(
+        task,
+        advisory_context={
+            "local_llm": {
+                "ready": True,
+                "should_delegate": True,
+                "preferred_model": "qwen-2.5-7b-instruct",
+                "budget_pressure": "high",
+                "context_depth": 5,
+                "profile_weights": {"quality": 1.4, "budget": 1.1, "vfs": 1.2},
+                "task_family": "plan",
+            }
+        },
+    )
+
+    assert choice.selection_trace is not None
+    assert choice.selection_trace["provider"] == "local"
+    assert choice.selection_trace["reason"] == choice.reason
+    assert choice.selection_trace["budget_pressure"] == "high"
+    assert choice.selection_trace["context_depth"] >= 5
+
+
+def test_model_selector_respects_local_llm_primary_owner_for_plan():
+    selector = ModelSelector()
+    task = _task(TaskType.PLAN, "prepare a staged rollout plan")
+    choice = selector.select(
+        task,
+        advisory_context={
+            "local_llm": {
+                "ready": True,
+                "should_delegate": False,
+                "recommended_owner": "local_llm",
+                "recommended_model": "qwen-2.5-7b-instruct",
+                "budget_pressure": "low",
+                "task_family": "planning",
+            }
+        },
+    )
+    assert choice.model_name == "qwen-2.5-7b-instruct"
+    assert choice.provider == "local"
+    assert choice.reason.startswith("local_llm_primary_owner_")

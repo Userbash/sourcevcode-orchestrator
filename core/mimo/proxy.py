@@ -12,6 +12,8 @@ from .state import MimoStateContext
 
 logger = logging.getLogger(__name__)
 
+MIMO_UNAVAILABLE_DECISION = "MIMO_UNAVAILABLE_DECISION"
+
 
 @dataclass(slots=True)
 class TaskKPIWindow:
@@ -25,6 +27,21 @@ class TaskKPIWindow:
         avg_latency = sum(self.latencies) / count
         avg_quality = sum(self.quality_scores) / max(1, len(self.quality_scores))
         return {"success_rate": round(success_rate, 3), "avg_latency": round(avg_latency, 2), "avg_quality": round(avg_quality, 3)}
+
+
+@dataclass(slots=True)
+class MimoRecommendation:
+    provider: str
+    model_name: str
+    confidence: float
+    allow: bool
+    reason: str
+    selection_trace: list[dict[str, Any]] = field(default_factory=list)
+    requires_escalation: bool = False
+    escalation_reason: str | None = None
+    blocked_by: str | None = None
+    fallback_options: list[dict[str, str]] = field(default_factory=list)
+    decision_mode: str = "mimo_control"
 
 
 class MimoOrchestrationDirector:
@@ -45,6 +62,9 @@ class MimoOrchestrationDirector:
         self.profile_manifest_path = self.profile_dir / "manifest.json"
         self.task_profiles: dict[str, dict[str, Any]] = self._load_profiles()
         self.task_kpi_windows: dict[tuple[str, str], TaskKPIWindow] = {}
+        self.last_failure_reason: str | None = None
+        self.recovery_attempts: int = 0
+        self.last_sync_at: str | None = None
         self._load_persisted_kpi_windows()
 
     def set_budget_module(self, budget_module: Any | None) -> None:
@@ -351,6 +371,245 @@ class MimoOrchestrationDirector:
         except Exception as exc:
             logger.debug("MIMO KPI persistence skipped: %s", exc)
 
+    @staticmethod
+    def _normalize_provider_name(provider: str | None) -> str:
+        normalized = str(provider or "local").strip().lower()
+        if normalized in {"antigravity-cli", "agy", "gemini", "gemini-cli", "google"}:
+            return "antigravity"
+        if normalized in {"local_llm", "ollama"}:
+            return "local"
+        return normalized or "local"
+
+    def _provider_health(self, advisory_context: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+        advisory_context = advisory_context or {}
+        providers: dict[str, dict[str, Any]] = {}
+        snapshot = self.antigravity_snapshot()
+        if isinstance(snapshot, dict):
+            raw_providers = snapshot.get("providers")
+            if isinstance(raw_providers, dict):
+                for provider, state in raw_providers.items():
+                    if not isinstance(state, dict):
+                        continue
+                    normalized = dict(state)
+                    status_value = str(normalized.get("status") or "").strip().lower()
+                    if "ready" not in normalized:
+                        normalized["ready"] = status_value in {"healthy", "ready", "ok"}
+                    providers[self._normalize_provider_name(provider)] = normalized
+            elif snapshot:
+                normalized = dict(snapshot)
+                status_value = str(normalized.get("status") or "").strip().lower()
+                if "ready" not in normalized:
+                    normalized["ready"] = status_value in {"healthy", "ready", "ok"}
+                providers["antigravity"] = normalized
+        local = advisory_context.get("local_llm")
+        if isinstance(local, dict):
+            providers["local"] = {
+                "ready": bool(local.get("ready")),
+                "status": "ready" if local.get("ready") else str(local.get("status") or "degraded"),
+                "error": local.get("error"),
+            }
+        return providers
+
+    @staticmethod
+    def _capability_tags_for_task(task: Any) -> set[str]:
+        task_type = str(getattr(getattr(task, "type", None), "value", None) or getattr(task, "type", "unknown")).lower()
+        mapping = {
+            "plan": {"plan", "planning", "docs", "research", "review"},
+            "docs": {"docs", "documentation", "research", "review"},
+            "research": {"research", "analysis", "docs", "review"},
+            "review": {"review", "research", "docs"},
+            "code": {"code"},
+            "test": {"test", "verification"},
+            "fix": {"code", "fix"},
+        }
+        return mapping.get(task_type, {task_type})
+
+    def resolve_candidate_models(self, task: Any, advisory_context: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        advisory_context = advisory_context or {}
+        provider_health = self._provider_health(advisory_context)
+        capability_tags = self._capability_tags_for_task(task)
+        cached_models = list(self.bridge.get_cached_models()) if hasattr(self.bridge, "get_cached_models") else []
+        candidates: list[dict[str, Any]] = []
+        for model in cached_models:
+            provider = self._normalize_provider_name(getattr(model, "provider", "local"))
+            blocked = bool(getattr(model, "blocked", False))
+            ready = getattr(model, "ready", None)
+            status = str(getattr(model, "status", "")).strip().lower()
+            health = provider_health.get(provider)
+            health_ready = True if not isinstance(health, dict) or not health else bool(health.get("ready", False))
+            tags = {str(item).strip().lower() for item in (getattr(model, "capability_tags", None) or []) if str(item).strip()}
+            if blocked:
+                continue
+            if ready is False or status in {"offline", "error", "disabled"}:
+                continue
+            if not health_ready:
+                continue
+            if tags and capability_tags.isdisjoint(tags):
+                continue
+            candidates.append({
+                "provider": provider,
+                "model_name": str(getattr(model, "id", "") or getattr(model, "full_id", "")).strip(),
+                "full_id": str(getattr(model, "full_id", "")).strip(),
+                "context_window": getattr(model, "context_window", None),
+                "capability_tags": sorted(tags),
+                "cost_class": getattr(model, "cost_class", None),
+                "source": "mimo_inventory",
+            })
+        if candidates:
+            candidates.sort(key=lambda item: (0 if item["provider"] == "local" else 1, item["cost_class"] not in {"low", None}, -(int(item["context_window"] or 0))))
+            return candidates
+        return self._fallback_options(task, advisory_context)
+
+    @staticmethod
+    def _default_local_model(task_type: str) -> str:
+        if task_type in {"docs", "research", "review", "plan"}:
+            return "qwen-2.5-7b-instruct"
+        return "qwen2.5:32b-instruct-q4_k_m"
+
+    @staticmethod
+    def _unavailable_decision_event(*, mode: str, allow: bool, reason: str, provider: str, model_name: str) -> dict[str, Any]:
+        return {
+            "event": "decision_mode",
+            "event_type": MIMO_UNAVAILABLE_DECISION,
+            "mode": mode,
+            "allow": allow,
+            "reason": reason,
+            "provider": provider,
+            "model_name": model_name,
+        }
+
+    def _fallback_options(self, task: Any, advisory_context: dict[str, Any] | None = None) -> list[dict[str, str]]:
+        advisory_context = advisory_context or {}
+        task_type = getattr(getattr(task, "type", None), "value", None) or str(getattr(task, "type", "unknown"))
+        local = advisory_context.get("local_llm") if isinstance(advisory_context.get("local_llm"), dict) else {}
+        preferred_local = str((local or {}).get("recommended_model") or self._default_local_model(str(task_type).lower())).strip()
+        options = [{"provider": "local", "model_name": preferred_local}]
+        if str(task_type).lower() in {"plan", "review", "research"}:
+            options.append({"provider": "openai", "model_name": "gpt-4o"})
+        return options
+
+    def _safe_fallback_recommendation(self, task: Any, advisory_context: dict[str, Any] | None = None) -> MimoRecommendation:
+        advisory_context = advisory_context or {}
+        task_type = str(getattr(getattr(task, "type", None), "value", None) or getattr(task, "type", "unknown")).lower()
+        complexity = str(getattr(getattr(task, "complexity", None), "value", None) or getattr(task, "complexity", "medium")).lower()
+        local = advisory_context.get("local_llm") if isinstance(advisory_context.get("local_llm"), dict) else {}
+        high_risk_tokens = {"security", "auth", "rbac", "payment", "production", "migration", "destructive"}
+        task_text = self._task_text(task)
+        is_high_risk = complexity in {"high", "critical"} or any(token in task_text for token in high_risk_tokens)
+        if is_high_risk:
+            model_name = self._default_local_model(task_type)
+            return MimoRecommendation(
+                provider="local",
+                model_name=model_name,
+                confidence=0.1,
+                allow=False,
+                reason="mimo_unavailable_requires_escalation",
+                selection_trace=[self._unavailable_decision_event(mode="safe_fallback", allow=False, reason="mimo_unavailable_requires_escalation", provider="local", model_name=model_name)],
+                requires_escalation=True,
+                escalation_reason="mimo_unavailable_high_risk",
+                blocked_by="policy",
+                fallback_options=self._fallback_options(task, advisory_context),
+                decision_mode="safe_fallback",
+            )
+        if bool((local or {}).get("ready")) and str((local or {}).get("recommended_owner") or "").strip().lower() == "local_llm":
+            surrogate_model = str((local or {}).get("recommended_model") or (local or {}).get("preferred_model") or self._default_local_model(task_type)).strip()
+            return MimoRecommendation(
+                provider="local",
+                model_name=surrogate_model,
+                confidence=0.72,
+                allow=True,
+                reason="local_llm_surrogate_controller",
+                selection_trace=[self._unavailable_decision_event(mode="surrogate_controller", allow=True, reason="local_llm_surrogate_controller", provider="local", model_name=surrogate_model)],
+                fallback_options=self._fallback_options(task, advisory_context),
+                decision_mode="surrogate_controller",
+            )
+        model_name = self._default_local_model(task_type)
+        return MimoRecommendation(
+            provider="local",
+            model_name=model_name,
+            confidence=0.45,
+            allow=True,
+            reason="mimo_unavailable_safe_fallback",
+            selection_trace=[self._unavailable_decision_event(mode="safe_fallback", allow=True, reason="mimo_unavailable_safe_fallback", provider="local", model_name=model_name)],
+            fallback_options=self._fallback_options(task, advisory_context),
+            decision_mode="safe_fallback",
+        )
+
+    def recommend_model(self, task: Any, advisory_context: dict[str, Any] | None = None, *, current_budget: float, memory_context: dict[str, Any] | None = None) -> MimoRecommendation:
+        advisory_context = advisory_context or {}
+        requested_model = str(advisory_context.get("selected_model") or getattr(task, "assigned_model", "") or "unknown")
+        context = self.build_selection_context(requested_model, task, current_budget, memory_context=memory_context)
+        provider_health = self._provider_health(advisory_context)
+        context["provider_health"] = provider_health
+        context["decision_mode"] = "mimo_control" if self.is_available else "safe_fallback"
+        if not self.is_available:
+            return self._safe_fallback_recommendation(task, advisory_context)
+
+        task_type = str(context.get("task_type") or "unknown").lower()
+        inventory_candidates = self.resolve_candidate_models(task, advisory_context)
+        normalized_provider = self._normalize_provider_name(str(advisory_context.get("selected_provider") or context.get("selected_provider") or (inventory_candidates[0].get("provider") if inventory_candidates else "local")))
+        selected_model = str(advisory_context.get("selected_model") or context.get("selected_model") or requested_model or (inventory_candidates[0].get("model_name") if inventory_candidates else self._default_local_model(task_type))).strip()
+        local = advisory_context.get("local_llm") if isinstance(advisory_context.get("local_llm"), dict) else {}
+        complexity = str(getattr(getattr(task, "complexity", None), "value", None) or context.get("task_complexity") or "medium").lower()
+        trace = list(context.get("selection_trace") or [])
+        trace.append({"event": "provider_health", "providers": sorted(provider_health)})
+
+        if not bool(context.get("context_window_ok", True)):
+            return MimoRecommendation(
+                provider=normalized_provider,
+                model_name=selected_model,
+                confidence=0.2,
+                allow=False,
+                reason="mimo_recommendation_blocked_context_limit",
+                selection_trace=trace,
+                requires_escalation=True,
+                escalation_reason="context_limit_exceeded",
+                blocked_by="context_limit",
+                fallback_options=self._fallback_options(task, advisory_context),
+            )
+
+        health = provider_health.get(normalized_provider)
+        if isinstance(health, dict) and health and not bool(health.get("ready", False)):
+            return MimoRecommendation(
+                provider=normalized_provider,
+                model_name=selected_model,
+                confidence=0.2,
+                allow=False,
+                reason="mimo_recommendation_blocked_provider_health",
+                selection_trace=trace,
+                requires_escalation=True,
+                escalation_reason=str(health.get("error") or health.get("status") or "provider_unhealthy"),
+                blocked_by="health",
+                fallback_options=self._fallback_options(task, advisory_context),
+            )
+
+        if str((local or {}).get("recommended_owner") or "").strip().lower() == "local_llm" and task_type in {"plan", "docs", "research", "review"} and complexity in {"low", "medium"}:
+            model_name = str((local or {}).get("recommended_model") or (local or {}).get("preferred_model") or self._default_local_model(task_type)).strip()
+            trace.append({"event": "mimo_recommendation", "owner": "local_llm", "provider": "local", "model_name": model_name})
+            return MimoRecommendation(
+                provider="local",
+                model_name=model_name,
+                confidence=0.74,
+                allow=True,
+                reason=f"mimo_recommend_local_llm_owner_{task_type}",
+                selection_trace=trace,
+                fallback_options=self._fallback_options(task, advisory_context),
+            )
+
+        preferred_candidate = inventory_candidates[0] if inventory_candidates else None
+        preferred_provider = str((preferred_candidate or {}).get("provider") or normalized_provider).strip()
+        preferred_model = str(context.get("preferred_model") or selected_model or (preferred_candidate or {}).get("model_name") or self._default_local_model(task_type)).strip()
+        trace.append({"event": "mimo_recommendation", "provider": preferred_provider, "model_name": preferred_model, "inventory_candidates": len(inventory_candidates)})
+        return MimoRecommendation(
+            provider=preferred_provider,
+            model_name=preferred_model,
+            confidence=max(0.35, float((context.get("rolling_kpi") or {}).get("success_rate") or 0.5)),
+            allow=True,
+            reason="mimo_recommend_profile_selected",
+            selection_trace=trace,
+            fallback_options=self._fallback_options(task, advisory_context),
+        )
+
     def safe_sync(self) -> None:
         try:
             import asyncio
@@ -366,9 +625,28 @@ class MimoOrchestrationDirector:
                 for model in models:
                     self.state.set_context_limit(model.id or model.full_id, int(model.context_window or 0))
             self.is_available = self.bridge.is_cli_alive
+            if self.is_available:
+                self.last_failure_reason = None
+                self.recovery_attempts = 0
+                self.last_sync_at = Path(__file__).stat().st_mtime_ns and __import__('datetime').datetime.now(__import__('datetime').UTC).isoformat()
         except Exception as exc:
             self.is_available = False
+            self.last_failure_reason = str(exc)
+            self.recovery_attempts += 1
+            self.last_sync_at = __import__('datetime').datetime.now(__import__('datetime').UTC).isoformat()
             logger.warning("MIMO director sync failed: %s", exc)
+
+    def _runtime_health(self) -> dict[str, Any]:
+        return {
+            "ready": bool(self.is_available),
+            "profiles_loaded": len(self.task_profiles),
+            "bridge_cli_alive": bool(getattr(self.bridge, "is_cli_alive", False)),
+            "profile_manifest_present": self.profile_manifest_path.exists(),
+            "status_source_configured": self._status_source is not None,
+            "failure_reason": self.last_failure_reason,
+            "recovery_attempts": self.recovery_attempts,
+            "last_sync_at": self.last_sync_at,
+        }
 
     def build_selection_context(self, model_name: str, task: Any, current_budget: float, memory_context: dict[str, Any] | None = None) -> dict[str, Any]:
         task_type = getattr(getattr(task, "type", None), "value", None) or str(getattr(task, "type", "unknown"))
@@ -410,10 +688,27 @@ class MimoOrchestrationDirector:
         context["vfs_pressure"] = self._vfs_pressure(task, context)
         context["selected_provider"] = str(context.get("selected_provider") or context.get("provider") or "local")
         context["selected_model"] = model_name
+        context["provider_health"] = self._provider_health()
+        context["decision_mode"] = "mimo_control" if self.is_available else "safe_fallback"
+        context["mimo_runtime_health"] = self._runtime_health()
         context["task_profile"] = self._task_profile(task_type, task=task, context=context)
         context["profile_weights"] = self._profile_weights(context["task_type"], str(context.get("selected_provider") or "local"), model_name, task=task, context=context)
         context["rolling_kpi"] = self._rolling_kpi(task, model_name)
         context["context_depth"] = self._context_depth_for(task, context, model_name)
+        context["selection_trace"] = [
+            {
+                "event": "runtime_health",
+                "ready": context["mimo_runtime_health"]["ready"],
+                "profiles_loaded": context["mimo_runtime_health"]["profiles_loaded"],
+            },
+            {
+                "event": "profile_selected",
+                "task_type": task_type,
+                "profile_key": str(context["task_profile"].get("profile_key") or context["task_profile"].get("task_type") or task_type),
+                "requested_model": model_name,
+                "preferred_model": str(context.get("preferred_model") or model_name),
+            },
+        ]
         return context
 
     def validate_and_correct(self, model: Any, task: Any, current_budget: float, memory_context: dict[str, Any] | None = None) -> Any:

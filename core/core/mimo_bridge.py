@@ -13,6 +13,10 @@ class MimoModel:
     provider: str
     status: str
     context_window: Optional[int]
+    capability_tags: list[str] | None = None
+    cost_class: str | None = None
+    readiness: bool | None = None
+    blocked: bool = False
 
 class MimoBridge:
     def get_models(self) -> List[MimoModel]:
@@ -66,12 +70,19 @@ class MimoBridge:
             if json_str.strip():
                 try:
                     data = json.loads(json_str)
+                    capability_tags = data.get("capabilities") or data.get("capabilityTags") or []
+                    if not isinstance(capability_tags, list):
+                        capability_tags = []
                     results.append(MimoModel(
                         full_id=full_id,
                         id=data.get("id", ""),
                         provider=data.get("providerID", ""),
                         status=data.get("status", ""),
-                        context_window=data.get("limit", {}).get("context")
+                        context_window=data.get("limit", {}).get("context"),
+                        capability_tags=[str(item).strip() for item in capability_tags if str(item).strip()],
+                        cost_class=str(data.get("costClass") or data.get("cost_class") or "").strip() or None,
+                        readiness=bool(data.get("ready")) if "ready" in data else None,
+                        blocked=bool(data.get("blocked", False)),
                     ))
                 except json.JSONDecodeError:
                     pass

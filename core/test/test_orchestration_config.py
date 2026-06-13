@@ -11,13 +11,14 @@ def test_safe_standard_tasks_do_not_need_confirmation_by_default():
     assert config.should_ask_confirmation({"type": "docs", "risk_level": "low"}) is False
 
 
-def test_destructive_external_and_unsafe_tasks_need_confirmation():
+def test_full_auto_defaults_do_not_need_confirmation_even_for_destructive_tasks():
     config = OrchestrationConfig()
 
-    assert config.should_ask_confirmation({"action": "database_delete", "risk_level": "low"}) is True
-    assert config.should_ask_confirmation({"type": "code", "requires_external_side_effect": True}) is True
-    assert config.should_ask_confirmation({"type": "refactor", "risk_level": "unsafe"}) is True
-    assert config.should_ask_confirmation({"type": "code", "manual_only": True}) is True
+    assert config.execution_mode == "full_auto"
+    assert config.should_ask_confirmation({"action": "database_delete", "risk_level": "low"}) is False
+    assert config.should_ask_confirmation({"type": "code", "requires_external_side_effect": True}) is False
+    assert config.should_ask_confirmation({"type": "refactor", "risk_level": "unsafe"}) is False
+    assert config.should_ask_confirmation({"type": "code", "manual_only": True}) is False
 
 
 def test_cli_flags_enable_non_interactive_bridge_mode():
@@ -29,8 +30,10 @@ def test_cli_flags_enable_non_interactive_bridge_mode():
 
     assert config.enabled_by_default is True
     assert config.default_mode == "core"
+    assert config.execution_mode == "full_auto"
     assert config.ask_confirmation is False
     assert config.auto_approve_safe_tasks is True
+    assert config.require_confirmation_for_destructive is False
     assert config.non_interactive is True
 
 
@@ -39,19 +42,21 @@ def test_env_defaults_enable_core_without_prompt(monkeypatch):
     monkeypatch.setenv("AI_BRIDGE_DEFAULT", "true")
     monkeypatch.setenv("AI_BRIDGE_AUTO_APPROVE", "true")
     monkeypatch.setenv("AI_BRIDGE_NON_INTERACTIVE", "true")
-    monkeypatch.setenv("AI_BRIDGE_CONFIRMATION_POLICY", "safe-only")
+    monkeypatch.setenv("AI_BRIDGE_CONFIRMATION_POLICY", "full_auto")
 
     config = OrchestrationConfig.from_env()
 
     assert config.enabled_by_default is True
+    assert config.execution_mode == "full_auto"
     assert config.ask_confirmation is False
+    assert config.require_confirmation_for_destructive is False
     assert config.non_interactive is True
     assert config.should_ask_confirmation({"type": "healthcheck", "risk_level": "low"}) is False
-    assert config.should_ask_confirmation({"action": "force_push", "risk_level": "medium"}) is True
+    assert config.should_ask_confirmation({"action": "force_push", "risk_level": "medium"}) is False
 
 
-def test_security_manager_delegates_confirmation_policy():
+def test_security_manager_inherits_full_auto_confirmation_policy():
     security = SecurityManager(orchestration=OrchestrationConfig())
 
     assert security.should_ask_confirmation({"type": "metrics", "risk_level": "low"}) is False
-    assert security.should_ask_confirmation({"action": "secret_change"}) is True
+    assert security.should_ask_confirmation({"action": "secret_change"}) is False

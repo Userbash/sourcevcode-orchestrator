@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from .control_profiles import DevToolkitModeRegistry
 from .kernel_protocol import KernelAPI, KernelModule
 from .models import ExecutionPlan, Priority, Task, TaskContext, TaskInput, TaskType
 
@@ -95,6 +96,7 @@ class DevToolkitModule(KernelModule):
     _clipboard: dict[str, list[DevClipboardItem]] = field(default_factory=lambda: defaultdict(list))
     _audit_logs: list[DevToolkitAuditLog] = field(default_factory=list)
     _last_result: dict[str, Any] = field(default_factory=dict)
+    _mode_registry: DevToolkitModeRegistry = field(default_factory=DevToolkitModeRegistry)
 
     def on_load(self, api: KernelAPI) -> None:
         self._api = api
@@ -108,6 +110,7 @@ class DevToolkitModule(KernelModule):
         return session
 
     def load_or_create_session(self, session_id: str | None = None, *, mode: str = "plan", repo_context: bool = False) -> DevChatSession:
+        mode = self._normalize_mode(mode)
         normalized = (session_id or "").strip()
         if normalized and normalized in self._sessions:
             session = self._sessions[normalized]
@@ -148,8 +151,7 @@ class DevToolkitModule(KernelModule):
 
     @staticmethod
     def _normalize_mode(mode: str) -> str:
-        normalized = (mode or "plan").strip().lower()
-        return normalized if normalized in {"plan", "dry_run", "apply", "review", "repo"} else "plan"
+        return DevToolkitModeRegistry().resolve(mode).slug
 
     @staticmethod
     def _repo_hint(task: str) -> dict[str, Any]:
@@ -161,8 +163,9 @@ class DevToolkitModule(KernelModule):
         }
 
     def build_dev_context(self, *, session: DevChatSession, message: str, repo_context: bool, mode: str) -> DevToolkitExecutionContext:
+        mode_profile = self._mode_registry.resolve(mode)
         messages = list(self._messages.get(session.session_id, []))
-        permissions = ["devtoolkit:read", "devtoolkit:plan"]
+        permissions = list(mode_profile.permissions)
         if repo_context:
             permissions.append("devtoolkit:repo")
 
@@ -171,14 +174,18 @@ class DevToolkitModule(KernelModule):
             request=DevToolkitRequest(
                 session_id=session.session_id,
                 message=message,
-                mode=mode,
+                mode=mode_profile.slug,
                 repo_context=repo_context,
+                allow_code_changes=mode_profile.allow_code_changes,
+                allow_execution=mode_profile.allow_execution,
+                dry_run=mode_profile.dry_run,
             ),
             messages=messages,
-            permissions=permissions,
+            permissions=sorted(set(permissions)),
         )
 
     def _build_task(self, request: DevToolkitRequest, session: DevChatSession) -> Task:
+        mode_profile = self._mode_registry.resolve(request.mode)
         hints = self._repo_hint(request.message)
         task_context = TaskContext(
             project="dev-toolkit",
@@ -191,15 +198,11 @@ class DevToolkitModule(KernelModule):
                 description=request.message.strip(),
                 files=[],
                 constraints=[
-                    "read-only planning",
-                    f"mode={request.mode}",
+                    *mode_profile.task_constraints,
+                    f"mode={mode_profile.slug}",
                     f"repo_context={str(request.repo_context).lower()}",
                 ],
-                acceptance_criteria=[
-                    "return plan only",
-                    "do not modify files",
-                    "do not run shell commands",
-                ],
+                acceptance_criteria=list(mode_profile.acceptance_criteria),
             ),
             context=task_context,
             priority=Priority.NORMAL,
@@ -208,11 +211,11 @@ class DevToolkitModule(KernelModule):
         task.required_capability = "plan"
         task.routing_hints = {
             "source": "dev_toolkit",
-            "mode": request.mode,
+            "mode": mode_profile.slug,
             "repo_context": request.repo_context,
-            "allow_code_changes": request.allow_code_changes,
-            "allow_execution": request.allow_execution,
-            "dry_run": request.dry_run,
+            "allow_code_changes": mode_profile.allow_code_changes,
+            "allow_execution": mode_profile.allow_execution,
+            "dry_run": mode_profile.dry_run,
             **hints,
         }
         return task

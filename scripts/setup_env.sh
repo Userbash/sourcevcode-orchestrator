@@ -1,15 +1,26 @@
 # Environment setup for Podman and Host Utilities
-export PATH=/var/home/sanya/.local/bin:$PATH
+set_local_bin() {
+    local local_bin="$HOME/.local/bin"
+    case ":$PATH:" in
+        *":$local_bin:"*) ;;
+        *) export PATH="$local_bin:$PATH" ;;
+    esac
+}
 
-# Aliases for standardization
-alias docker=/var/home/sanya/.local/bin/podman
-alias docker-compose='/var/home/sanya/.local/bin/podman-compose'
-alias podman-compose='/var/home/sanya/.local/bin/podman-compose'
+set_local_bin
+
+if [ -x "$HOME/.local/bin/podman" ]; then
+    alias docker="$HOME/.local/bin/podman"
+fi
+if [ -x "$HOME/.local/bin/podman-compose" ]; then
+    alias docker-compose="$HOME/.local/bin/podman-compose"
+    alias podman-compose="$HOME/.local/bin/podman-compose"
+fi
 
 # Verify utilities presence
 echo "Verifying environment:"
 for cmd in podman podman-compose ss lsof netstat; do
-    if command -v $cmd &> /dev/null; then
+    if command -v "$cmd" >/dev/null 2>&1; then
         echo "✓ $cmd found"
     else
         echo "✗ $cmd missing"

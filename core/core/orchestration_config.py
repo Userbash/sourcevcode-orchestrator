@@ -5,6 +5,8 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Any
 
+from .control_profiles import ControlProfileRegistry
+
 class ExecutionMode(Enum):
     MANUAL = "manual"
     ASSISTED = "assisted"
@@ -80,9 +82,9 @@ DESTRUCTIVE_MARKERS = {
 class ConfirmationPolicy:
     ask_for_low_risk_tasks: bool = False
     ask_for_medium_risk_tasks: bool = False
-    ask_for_high_risk_tasks: bool = True
-    ask_for_destructive_actions: bool = True
-    ask_for_external_api_calls: bool = True
+    ask_for_high_risk_tasks: bool = False
+    ask_for_destructive_actions: bool = False
+    ask_for_external_api_calls: bool = False
 
 
 @dataclass(slots=True)
@@ -98,6 +100,7 @@ class SafetyGuards:
 class OrchestrationConfig:
     enabled_by_default: bool = True
     ask_confirmation: bool = False
+    execution_mode: str = ExecutionMode.FULL_AUTO.value
     default_mode: str = "core"
     auto_route_tasks: bool = True
     auto_start_agents: bool = True
@@ -105,7 +108,8 @@ class OrchestrationConfig:
     auto_review: bool = True
     auto_test: bool = True
     auto_approve_safe_tasks: bool = True
-    require_confirmation_for_destructive: bool = True
+    require_confirmation_for_destructive: bool = False
+    blocked_risk_levels: list[str] = field(default_factory=list)
     default_engine: str = "core"
     non_interactive: bool = True
     training_consolidation_interval_sec: int = 300
@@ -140,15 +144,26 @@ class OrchestrationConfig:
 
     @classmethod
     def from_env(cls) -> OrchestrationConfig:
+        profiles = ControlProfileRegistry()
         enabled = _env_bool("AI_BRIDGE_ENABLED", True) and _env_bool("AI_BRIDGE_DEFAULT", True)
         auto_approve = _env_bool("AI_BRIDGE_AUTO_APPROVE", True)
         non_interactive = _env_bool("AI_BRIDGE_NON_INTERACTIVE", True)
-        safe_only = os.getenv("AI_BRIDGE_CONFIRMATION_POLICY", "safe-only").lower() == "safe-only"
+        execution_mode = os.getenv("AI_BRIDGE_EXECUTION_MODE", ExecutionMode.FULL_AUTO.value).strip().lower() or ExecutionMode.FULL_AUTO.value
+        if execution_mode not in {mode.value for mode in ExecutionMode}:
+            execution_mode = ExecutionMode.FULL_AUTO.value
+        policy_env = os.getenv("AI_BRIDGE_CONFIRMATION_POLICY", execution_mode).strip().lower() or execution_mode
+        if policy_env == "safe-only":
+            policy_env = ExecutionMode.AUTO_SAFE.value
+        execution_profile = profiles.get(execution_mode)
+        selected_profile = profiles.get(policy_env if policy_env in {mode.value for mode in ExecutionMode} else execution_profile.slug)
+        full_auto = selected_profile.slug == ExecutionMode.FULL_AUTO.value
+
         return cls(
             enabled_by_default=enabled,
-            ask_confirmation=not auto_approve,
-            auto_approve_safe_tasks=auto_approve,
-            non_interactive=non_interactive,
+            ask_confirmation=selected_profile.ask_confirmation,
+            execution_mode=execution_profile.slug,
+            auto_approve_safe_tasks=selected_profile.auto_approve_safe_tasks if full_auto else auto_approve and selected_profile.auto_approve_safe_tasks,
+            non_interactive=non_interactive or selected_profile.non_interactive_default,
             training_consolidation_interval_sec=_env_int("AI_BRIDGE_TRAINING_CONSOLIDATION_INTERVAL_SEC", 300),
             trained_memory_quality_threshold=_env_float("AI_BRIDGE_TRAINED_MEMORY_QUALITY_THRESHOLD", 0.75),
             trained_memory_quality_thresholds_by_task={
@@ -176,19 +191,25 @@ class OrchestrationConfig:
             kpi_rejection_summary_path=(os.getenv("AI_BRIDGE_KPI_REJECTION_SUMMARY_PATH") or "").strip(),
             kpi_dashboard_interval_sec=_env_int("AI_BRIDGE_KPI_DASHBOARD_INTERVAL_SEC", 3600),
             kpi_dashboard_output_path=(os.getenv("AI_BRIDGE_KPI_DASHBOARD_OUTPUT_PATH") or "memory_store/kpi_dashboard_24h.json").strip(),
+            require_confirmation_for_destructive=selected_profile.require_confirmation_for_destructive,
+            blocked_risk_levels=list(selected_profile.blocked_risk_levels),
             confirmation_policy=ConfirmationPolicy(
-                ask_for_low_risk_tasks=False if safe_only else not auto_approve,
-                ask_for_medium_risk_tasks=False if safe_only else not auto_approve,
-                ask_for_high_risk_tasks=True,
-                ask_for_destructive_actions=True,
-                ask_for_external_api_calls=True,
+                ask_for_low_risk_tasks=bool(selected_profile.confirmation_policy.get("ask_for_low_risk_tasks", False)),
+                ask_for_medium_risk_tasks=bool(selected_profile.confirmation_policy.get("ask_for_medium_risk_tasks", False)),
+                ask_for_high_risk_tasks=bool(selected_profile.confirmation_policy.get("ask_for_high_risk_tasks", not full_auto)),
+                ask_for_destructive_actions=bool(selected_profile.confirmation_policy.get("ask_for_destructive_actions", not full_auto)),
+                ask_for_external_api_calls=bool(selected_profile.confirmation_policy.get("ask_for_external_api_calls", not full_auto)),
             ),
         )
 
     def apply_cli_flags(self, *, yes: bool = False, auto: bool = False, use_bridge: bool = False, non_interactive: bool = False, high_risk_trained_memory: bool = False) -> None:
         if yes or auto:
             self.ask_confirmation = False
+            self.execution_mode = ExecutionMode.FULL_AUTO.value
             self.auto_approve_safe_tasks = True
+            self.require_confirmation_for_destructive = False
+            self.blocked_risk_levels = []
+            self.confirmation_policy = ConfirmationPolicy()
         if use_bridge:
             self.enabled_by_default = True
             self.default_mode = "core"
@@ -199,7 +220,13 @@ class OrchestrationConfig:
             self.high_risk_trained_memory_enabled = True
 
     def should_ask_confirmation(self, task: Any) -> bool:
+        if self.execution_mode == ExecutionMode.FULL_AUTO.value:
+            return False
+        if self.execution_mode == ExecutionMode.MANUAL.value:
+            return True
         if not self.enabled_by_default:
+            return True
+        if str(RiskClassifier.classify(task).value).lower() in set(self.blocked_risk_levels):
             return True
         if _get_bool(task, "manual_only"):
             return True
@@ -232,6 +259,7 @@ class OrchestrationConfig:
         return {
             "enabled_by_default": self.enabled_by_default,
             "ask_confirmation": self.ask_confirmation,
+            "execution_mode": self.execution_mode,
             "default_mode": self.default_mode,
             "auto_route_tasks": self.auto_route_tasks,
             "auto_start_agents": self.auto_start_agents,
@@ -240,6 +268,7 @@ class OrchestrationConfig:
             "auto_test": self.auto_test,
             "auto_approve_safe_tasks": self.auto_approve_safe_tasks,
             "require_confirmation_for_destructive": self.require_confirmation_for_destructive,
+            "blocked_risk_levels": self.blocked_risk_levels,
             "default_engine": self.default_engine,
             "non_interactive": self.non_interactive,
             "training_consolidation_interval_sec": self.training_consolidation_interval_sec,

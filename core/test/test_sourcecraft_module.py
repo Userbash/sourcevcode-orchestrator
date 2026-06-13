@@ -396,3 +396,123 @@ def test_sourcecraft_create_pr_uses_src_runner_in_dry_run(tmp_path, monkeypatch)
         "--reviewer",
         "bob",
     ]
+
+
+
+def test_sourcecraft_ensure_ready_reports_runtime_health(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    def fake_run(command, *, repo_path=".", timeout_sec=None):
+        joined = " ".join(command)
+        if joined == "dh sh -lc command -v gh >/dev/null 2>&1":
+            return {"ok": True, "stdout": "", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh gh auth status":
+            return {"ok": True, "stdout": "logged in", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.name":
+            return {"ok": True, "stdout": "Userbash", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.email":
+            return {"ok": True, "stdout": "wairuste@gmail.com", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "git remote get-url origin":
+            return {"ok": True, "stdout": "https://github.com/Userbash/sourcevcode-orchestrator.git", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "git symbolic-ref --short HEAD":
+            return {"ok": True, "stdout": "feat/sourcecraft-runtime-health", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh gh repo view Userbash/sourcevcode-orchestrator":
+            return {"ok": True, "stdout": "repo ok", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        raise AssertionError(joined)
+
+    monkeypatch.setattr(module, "_run_command", fake_run)
+    report = module.ensure_ready(repo_path=".")
+
+    assert report["status"] == "ready"
+    assert report["src_ready"] is True
+    assert report["ghbox_ready"] is True
+    assert report["gh_auth_ready"] is True
+    assert report["git_identity"]["name"] == "Userbash"
+    assert report["repo_slug"] == "Userbash/sourcevcode-orchestrator"
+    assert module.finalize()["runtime"]["status"] == "ready"
+
+
+def test_sourcecraft_push_branch_requires_preview_token(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    result = module.execute_repo_action(
+        "push_branch",
+        repo_path=".",
+        branch="feat/sourcecraft-runtime-health",
+        allow_mutation=True,
+        allow_production_repo=True,
+    )
+
+    assert result["status"] == "rejected"
+    assert "preview_token" in result["reason"]
+
+
+def test_sourcecraft_prepare_feature_branch_dry_run_builds_safe_workflow(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    result = module.execute_repo_action(
+        "prepare_feature_branch",
+        repo_path=".",
+        branch="feat/sourcecraft-runtime-health",
+        dry_run=True,
+        allow_mutation=True,
+    )
+
+    assert result["status"] == "dry_run"
+    assert result["runner"] == "workflow"
+    assert result["workflow"][0] == ["git", "status", "--short"]
+    assert ["git", "fetch", "origin", "main"] in result["workflow"]
+    assert result["branch_policy"]["valid"] is True
+
+
+def test_sourcecraft_build_execution_plan_creates_parallel_repo_and_policy_steps(tmp_path, monkeypatch):
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+    task = Task(TaskType.PLAN, TaskInput("Prepare repository governance report and PR workflow"), TaskContext("demo", ".", "main"), required_capability="sourcecraft")
+
+    plan = module.build_execution_plan(task)
+
+    assert len(plan.atomic_tasks) >= 4
+    assert plan.atomic_tasks[0].required_capability == "sourcecraft"
+    capabilities = {item.required_capability for item in plan.atomic_tasks}
+    assert "sourcecraft" in capabilities
+    assert plan.draft_layers[1]["parallel"] is True
+
+
+def test_orchestrator_prefers_sourcecraft_execution_plan(monkeypatch):
+    from core.core.models import ExecutionPlan, Task, TaskContext, TaskInput, TaskType
+
+    orchestrator = Orchestrator()
+    task = Task(TaskType.PLAN, TaskInput("Prepare repository governance report and PR workflow"), TaskContext("demo", ".", "main"), required_capability="sourcecraft")
+    expected = ExecutionPlan(root_task_id=task.task_id, atomic_tasks=[task], draft_layers=[{"name": "sourcecraft_runtime"}])
+
+    class _SourceCraft:
+        def build_execution_plan(self, task_obj, context=None):
+            return expected
+
+    monkeypatch.setattr(orchestrator, "module_manager", SimpleNamespace(get_module=lambda name: _SourceCraft() if name == "sourcecraft" else None))
+
+    plan = orchestrator.create_execution_plan(task)
+
+    assert plan is expected

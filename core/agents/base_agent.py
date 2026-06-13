@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
 from core.core.host_bridge import HostBridge
 from core.core.kernel_api import KernelAPI
 from core.core.models import AgentHealth, AgentResult, AgentStatus, ResultOutput, Task, TaskStatus

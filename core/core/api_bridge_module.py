@@ -67,6 +67,11 @@ class SourceCraftRepoRequest(BaseModel):
     rebase: bool = False
     delete_branch: bool = False
     wait: bool = True
+    preview_token: str | None = None
+    allow_production_repo: bool = False
+    allow_default_branch_merge: bool = False
+    session_id: str | None = None
+    actor_id: str = "sourcecraft"
 
 
 @dataclass
@@ -199,7 +204,9 @@ class APIBridgeModule:
         module_state = module_manager.finalize() if module_manager and hasattr(module_manager, "finalize") else {}
         sourcecraft = self._sourcecraft_snapshot()
         postgres = self._postgres_snapshot()
-        overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0 and postgres.get("status") == "ok"
+        postgres_required = bool(os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip())
+        postgres_ok = postgres.get("status") == "ok" or (not postgres_required and postgres.get("snapshot", {}).get("postgres_state") == "missing")
+        overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0 and postgres_ok
 
         return {
             "status": "ok" if overall_ok else "degraded",
@@ -432,6 +439,11 @@ class APIBridgeModule:
             rebase=request.rebase,
             delete_branch=request.delete_branch,
             wait=request.wait,
+            preview_token=request.preview_token,
+            allow_production_repo=request.allow_production_repo,
+            allow_default_branch_merge=request.allow_default_branch_merge,
+            session_id=request.session_id,
+            actor_id=request.actor_id,
         )
         return {
             "status": result.get("status", "ok"),
