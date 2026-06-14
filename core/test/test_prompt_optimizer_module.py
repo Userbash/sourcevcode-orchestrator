@@ -140,6 +140,9 @@ def test_before_task_turns_text_into_structured_instruction():
 
 
 class _FakeHybridMemoryWithTrained(_FakeHybridMemory):
+    def retrieve_reusable_task_context(self, **kwargs):
+        return {"matched": True, "brief": "--- REUSABLE TASK MEMORY (code, Top 1) ---\n[Reuse: 0.91] [Capability: code] [Sources: [77]] reuse the staged parser refactor plan", "similarity": 0.91, "fingerprint": "abc123", "count": 1, "source_ids": [77]}
+
     def get_trained_memory_context(self, session_id: str, agent_id: str, memory_domain: str, top_k: int = 3):
         return {
             "brief": "--- TRAINED MEMORY BRIEF (prompt:code, Top 1) ---\n[Quality: 0.95] [Domain: prompt:code] [Sources: [101, 102]] prefer phased changes",
@@ -173,6 +176,9 @@ def test_prompt_optimizer_includes_trained_memory_context():
     assert "TRAINED MEMORY:" in task.input.description
     assert "prefer phased changes" in task.input.description
     assert "trained_memory_domain: prompt:code" in task.input.description
+    assert "REUSABLE TASK MEMORY:" in task.input.description
+    assert "reuse the staged parser refactor plan" in task.input.description
+    assert task.routing_hints["memory_reuse"]["matched"] is True
 
 
 class _FakeHybridMemoryRecorder(_FakeHybridMemory):

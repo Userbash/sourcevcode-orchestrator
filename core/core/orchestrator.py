@@ -1025,6 +1025,20 @@ class Orchestrator:
                 context["trained_memory_disabled_for_risk"] = not high_risk_trained_memory
         else:
             context["trained_memory_disabled_for_risk"] = True
+
+        capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
+        reusable = self.session_memory.hybrid.retrieve_reusable_task_context(
+            task=task,
+            agent_id=f"shared:{capability}",
+            capability=capability,
+            top_k=2 if task.type in {TaskType.CODE, TaskType.REVIEW, TaskType.TEST} else 1,
+            token_limit=160 if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST} else 140,
+        )
+        if reusable.get("matched") and str(reusable.get("brief") or "").strip():
+            context["reusable_task_memory_brief"] = str(reusable.get("brief") or "")
+            context["reusable_task_memory_similarity"] = float(reusable.get("similarity", 0.0) or 0.0)
+            context["reusable_task_memory_fingerprint"] = str(reusable.get("fingerprint") or "")
+            context["reusable_task_memory_count"] = int(reusable.get("count", 0) or 0)
         return context
 
     def _model_usage_module(self) -> ModelUsageModule | None:
@@ -1486,6 +1500,18 @@ class Orchestrator:
                 result={"summary": command_summary, "status": result.status.value},
                 success=result.status == TaskStatus.DONE,
             )
+            if result.status == TaskStatus.DONE and command_summary.strip():
+                try:
+                    self.session_memory.hybrid.store_reusable_task_memory(
+                        task=task,
+                        agent_id=agent_id,
+                        summary=command_summary,
+                        quality_score=quality.score,
+                        provider=result.provider or (agent_record.provider if agent_record else choice.provider),
+                        model_name=result.model_name or (agent_record.model_name if agent_record else choice.model_name),
+                    )
+                except Exception as exc:
+                    self.log("warning", f"[MEMORY] Failed to store reusable task memory: {exc}")
             if task.cache_policy in {"write_only", "read_write"}:
                 scope_name = (task.memory_scope or "task").lower()
                 scope = MemoryScope.TASK
@@ -1522,10 +1548,14 @@ class Orchestrator:
             model_usage_state = self.module_state().get("model_usage", {})
             history = model_usage_state.get("history", []) if isinstance(model_usage_state, dict) else []
             tokens_used = None
+            estimated_cost_usd = None
+            cost_components = {}
             if isinstance(history, list) and history:
                 for item in reversed(history):
                     if isinstance(item, dict) and item.get("task_id") == task.task_id:
                         tokens_used = item.get("tokens_used")
+                        estimated_cost_usd = item.get("estimated_cost_usd")
+                        cost_components = dict(item.get("cost_components") or {})
                         break
             lifecycle_payload = {
                 "event_type": "task_lifecycle",
@@ -1542,6 +1572,8 @@ class Orchestrator:
                 "finished_at": finished_at.isoformat(),
                 "latency_ms": latency_ms,
                 "tokens_used": tokens_used,
+                "estimated_cost_usd": estimated_cost_usd,
+                "cost_components": cost_components,
                 "errors_count": len(result.errors or []),
             }
             self.kpi_events.write(lifecycle_payload)

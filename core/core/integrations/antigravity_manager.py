@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,14 @@ class AntigravityManager:
             return 900
 
     @staticmethod
+    def _interactive_login_cooldown_sec() -> int:
+        raw = os.getenv("AI_BRIDGE_ANTIGRAVITY_INTERACTIVE_LOGIN_COOLDOWN_SEC", "300").strip()
+        try:
+            return max(60, int(raw))
+        except ValueError:
+            return 300
+
+    @staticmethod
     def _recent_session_grace_sec() -> int:
         raw = os.getenv("AI_BRIDGE_ANTIGRAVITY_SESSION_GRACE_SEC", "43200").strip()
         try:
@@ -75,11 +84,35 @@ class AntigravityManager:
         payload.setdefault("auth_marker_present", self.session_store.auth_marker_present())
         return payload
 
+    def _active_interactive_session(self) -> dict[str, Any] | None:
+        session = self.session_store.load_interactive_session()
+        if not session.get("session_id"):
+            return None
+        if not self.session_store.interactive_session_active(session_id=str(session.get("session_id") or "")):
+            return None
+        return session
+
+    def _pending_session_response(self, verify: dict[str, Any], session: dict[str, Any], *, reason: str) -> dict[str, Any]:
+        payload = dict(verify or {})
+        payload["ok"] = False
+        payload["login_suppressed"] = True
+        payload["suppression_reason"] = reason
+        payload["interactive_session"] = session
+        payload["action"] = "login_pending"
+        return payload
+
     def _maybe_suppress_login(self, verify: dict[str, Any]) -> dict[str, Any] | None:
+        active_session = self._active_interactive_session()
+        if active_session is not None:
+            return self._pending_session_response(verify, active_session, reason="interactive_session_active")
         failure_kind = str(verify.get("failure_kind") or "unknown")
         if self.session_store.login_failure_cooldown_active(cooldown_sec=self._login_failure_cooldown_sec()):
             verify["login_suppressed"] = True
             verify["suppression_reason"] = "login_failure_cooldown"
+            return verify
+        if failure_kind == "auth_required" and self.session_store.login_started_cooldown_active(cooldown_sec=self._interactive_login_cooldown_sec()):
+            verify["login_suppressed"] = True
+            verify["suppression_reason"] = "interactive_login_recently_started"
             return verify
         if failure_kind in {"transient", "unknown"} and bool(verify.get("auth_marker_present")) and self.session_store.recently_verified(within_sec=self._recent_session_grace_sec()):
             verify["login_suppressed"] = True
@@ -161,11 +194,29 @@ class AntigravityManager:
     def verify_auth(self) -> dict[str, Any]:
         return self._annotate_verify_result(self._run_login_helper(["--verify", "--json"], timeout=max(self.probe_timeout, 45)))
 
+    def interactive_session_status(self, session_id: str | None = None) -> dict[str, Any]:
+        session = self.session_store.load_interactive_session(session_id)
+        session["active"] = self.session_store.interactive_session_active(session_id=str(session.get("session_id") or session_id or "")) if (session.get("session_id") or session_id) else False
+        return session
+
+    def submit_interactive_input(self, text: str, session_id: str | None = None) -> dict[str, Any]:
+        target_session_id = str(session_id or self.session_store.load().get("interactive_session_id") or "").strip()
+        if not target_session_id:
+            return {"ok": False, "error": "missing_active_session", "message": "No active Antigravity interactive session exists."}
+        session = self.interactive_session_status(target_session_id)
+        if not session.get("active"):
+            return {"ok": False, "error": "inactive_session", "message": "The Antigravity interactive session is no longer active.", "session": session}
+        updated = self.session_store.append_interactive_input(target_session_id, text)
+        return {"ok": True, "message": "Input queued for the active Antigravity interactive session.", "session": updated}
+
     def _confirmed_ready(self) -> dict[str, Any]:
         verify = self.verify_auth()
         if verify.get("ok"):
             models = list(verify.get("models") or [])
             self.session_store.record_success(models=models, auth_mode=str(verify.get("auth_mode") or "agy_oauth"))
+            active = self._active_interactive_session()
+            if active is not None:
+                self.session_store.finish_interactive_session(str(active.get("session_id") or ""), state="ready", message="Antigravity session confirmed and kept alive.")
             verify["action"] = "verify"
             return verify
 
@@ -175,6 +226,9 @@ class AntigravityManager:
             if probe.get("ok"):
                 model_list = [line.strip() for line in models.get("stdout", "").splitlines() if line.strip()]
                 self.session_store.record_success(models=model_list, auth_mode="agy_oauth")
+                active = self._active_interactive_session()
+                if active is not None:
+                    self.session_store.finish_interactive_session(str(active.get("session_id") or ""), state="ready", message="Antigravity session confirmed and kept alive.")
                 return {
                     "ok": True,
                     "action": "verify_after_login",
@@ -206,13 +260,16 @@ class AntigravityManager:
 
         last: dict[str, Any] = verify
         for attempt in range(1, 4):
-            login = self._run_login_helper(["--login", "--timeout", str(self.login_timeout)], timeout=self.login_timeout + 20)
-            login["action"] = "login"
+            self.session_store.record_login_started()
+            login = self._run_login_helper(["--managed-login-start", "--timeout", str(self.login_timeout), "--json"], timeout=self.login_timeout + 20)
+            login["action"] = "managed_login_start"
             login["attempt"] = attempt
+            session = dict(login.get("session") or {})
+            if login.get("ok") and session.get("session_id"):
+                return self._pending_session_response(verify, session, reason="interactive_session_active")
             if login.get("ok"):
                 confirmation = self._confirmed_ready()
                 if confirmation.get("ok"):
-                    self.session_store.record_success(models=list(confirmation.get("models") or []), auth_mode=str(confirmation.get("auth_mode") or "agy_oauth"))
                     confirmation["action"] = "login_confirmed"
                     confirmation["attempt"] = attempt
                     return confirmation
@@ -221,14 +278,12 @@ class AntigravityManager:
                 self.session_store.record_login_failure(str(login.get("verify_error") or "login_not_confirmed"), failure_kind=str(confirmation.get("failure_kind") or "unknown"))
                 last = login
             else:
-                self.session_store.record_login_failure(str(login.get("stderr") or login.get("error") or "login_failed"), failure_kind="auth_required")
+                self.session_store.record_login_failure(str(login.get("stderr") or login.get("error") or login.get("message") or "login_failed"), failure_kind="auth_required")
                 last = login
+            last = login
             if attempt < 3:
-                import time
                 time.sleep(min(8.0, 1.5 * attempt))
         return last
-
-
 
     @staticmethod
     def _cli_missing(probe: dict[str, Any]) -> bool:
@@ -264,6 +319,8 @@ class AntigravityManager:
         status = self.status()
         auth_probe = dict(status.get("auth_probe") or {})
         store = self.session_store.snapshot()
+        active_session = self.interactive_session_status()
+        active = bool(active_session.get("active"))
         failure_kind = str(auth_probe.get("failure_kind") or "")
         ready = bool(status.get("ready"))
         login_suppressed = bool(auth_probe.get("login_suppressed"))
@@ -274,16 +331,21 @@ class AntigravityManager:
             user_action_required = False
             message_for_user = "Antigravity session is active. No login action is required."
             message_for_orchestrator = "Continue using Antigravity normally and refresh status on schedule."
-        elif failure_kind == "auth_required":
-            session_state = "auth_required"
+        elif active and str(active_session.get("state") or "") == "waiting_code":
+            session_state = "waiting_code"
             user_action_required = True
-            message_for_user = "Antigravity login is required once to restore the session."
-            message_for_orchestrator = "Request one interactive user login and avoid repeated auto-login loops."
-        elif failure_kind == "cli_missing":
-            session_state = "cli_missing"
-            user_action_required = True
-            message_for_user = "Antigravity CLI is missing or not executable on this machine."
-            message_for_orchestrator = "Do not retry login. Report a runtime dependency problem instead."
+            message_for_user = "Antigravity is waiting for the authorization code. Submit it through the bridge session instead of restarting login."
+            message_for_orchestrator = "Keep the existing managed login session alive and wait for user input through the bridge."
+        elif active and str(active_session.get("state") or "") in {"waiting_browser", "login_pending", "running", "starting", "pending_verification"}:
+            session_state = "login_pending"
+            user_action_required = False
+            message_for_user = "Antigravity login is already running. Finish the current browser flow and wait for session verification."
+            message_for_orchestrator = "Do not reopen the browser. Preserve the active managed login session until it resolves."
+        elif login_suppressed and suppression_reason == "interactive_login_recently_started":
+            session_state = "login_pending"
+            user_action_required = False
+            message_for_user = "Antigravity authorization was already opened recently. Finish the existing browser login instead of starting a new one."
+            message_for_orchestrator = "Do not open the browser again yet. Wait for the existing interactive login window to complete or expire."
         elif login_suppressed and suppression_reason == "cached_session_recently_verified":
             session_state = "degraded_transient"
             user_action_required = False
@@ -294,6 +356,16 @@ class AntigravityManager:
             user_action_required = False
             message_for_user = "Recent login attempt already failed. The system is waiting before asking again."
             message_for_orchestrator = "Honor cooldown and avoid repeated login prompts until the cooldown expires."
+        elif failure_kind == "auth_required":
+            session_state = "auth_required"
+            user_action_required = True
+            message_for_user = "Antigravity login is required once to restore the session."
+            message_for_orchestrator = "Request one interactive user login and avoid repeated auto-login loops."
+        elif failure_kind == "cli_missing":
+            session_state = "cli_missing"
+            user_action_required = True
+            message_for_user = "Antigravity CLI is missing or not executable on this machine."
+            message_for_orchestrator = "Do not retry login. Report a runtime dependency problem instead."
         else:
             session_state = "degraded_unknown"
             user_action_required = False
@@ -308,14 +380,33 @@ class AntigravityManager:
             "auth_mode": str(status.get("auth_mode") or store.get("auth_mode") or "agy_oauth"),
             "last_success_at": store.get("last_success_at", ""),
             "last_login_failure_at": store.get("last_login_failure_at", ""),
+            "last_login_started_at": store.get("last_login_started_at", ""),
+            "last_browser_opened_at": store.get("last_browser_opened_at", ""),
+            "last_browser_url": store.get("last_browser_url", ""),
             "session_age_sec": self.session_store.success_age_sec(),
+            "login_started_age_sec": self.session_store.login_started_age_sec(),
+            "browser_open_age_sec": self.session_store.browser_open_age_sec(),
             "login_failure_age_sec": self.session_store.login_failure_age_sec(),
+            "interactive_session_age_sec": self.session_store.interactive_session_age_sec(),
             "login_suppressed": login_suppressed,
             "suppression_reason": suppression_reason,
             "message_for_user": message_for_user,
             "message_for_orchestrator": message_for_orchestrator,
+            "interactive_session": {
+                "session_id": active_session.get("session_id", ""),
+                "state": active_session.get("state", "idle"),
+                "owner": active_session.get("owner", ""),
+                "control_mode": active_session.get("control_mode", "bridge"),
+                "message": active_session.get("message", ""),
+                "browser_url": active_session.get("browser_url", ""),
+                "last_prompt": active_session.get("last_prompt", ""),
+                "input_hint": active_session.get("input_hint", ""),
+                "user_input_required": bool(active_session.get("user_input_required")),
+                "transcript_path": active_session.get("transcript_path", ""),
+                "active": active,
+            },
             "responsibility": {
-                "interactive_login": "user" if session_state == "auth_required" else "AntigravityManager",
+                "interactive_login": "user" if session_state in {"auth_required", "waiting_code"} else "AntigravityManager",
                 "session_validation": "AntigravityManager",
                 "runtime_watchdog": "AntigravityStatusModule",
                 "relogin_policy": "AntigravityManager",

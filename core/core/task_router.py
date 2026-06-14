@@ -158,6 +158,17 @@ class TaskRouter:
         complexity = self.estimate_complexity(task)
         high_risk = self._requires_openai_priority(task)
 
+        reuse_hint = task.routing_hints.get("memory_reuse", {}) if isinstance(task.routing_hints, dict) else {}
+        reuse_matched = bool(reuse_hint.get("matched"))
+        reuse_similarity = float(reuse_hint.get("similarity", 0.0) or 0.0)
+
+        if reuse_matched and reuse_similarity >= 0.78 and complexity in {"low", "medium"} and not high_risk:
+            non_openai = [agent for agent in candidates if agent.provider != "openai"]
+            if non_openai:
+                preferred_group = self._preferred_non_openai_group(task, complexity, non_openai)
+                if preferred_group:
+                    return preferred_group
+
         if complexity in {"low", "medium"} and not high_risk:
             non_openai = [agent for agent in candidates if agent.provider != "openai"]
             if non_openai:

@@ -7,9 +7,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .bridge import MimoAsyncBridge
+from .bridge import MimoAsyncBridge, MimoModelSnapshot
 from .state import MimoStateContext
 from core.core.mistral_governance import MistralGovernance
+from core.core.model_value import compute_model_value, context_fit_score, memory_efficiency_score
+from core.core.openai_model_registry import OpenAIModelRegistry
+from core.core.qwen_model_registry import QwenModelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +385,85 @@ class MimoOrchestrationDirector:
             return "local"
         return normalized or "local"
 
+    @staticmethod
+    def _cost_class_score(cost_class: str | None) -> float:
+        normalized = str(cost_class or "").strip().lower()
+        if normalized in {"low", "cheap", "budget"}:
+            return 1.0
+        if normalized in {"medium", "standard"}:
+            return 0.7
+        if normalized in {"high", "premium", "expensive"}:
+            return 0.35
+        return 0.8
+
+    def _observed_model_cost(self, model_name: str, provider: str) -> dict[str, Any]:
+        history = []
+        if self._budget_module is not None:
+            history = list(getattr(self._budget_module, "history", []) or [])
+        model_norm = str(model_name or "").strip()
+        provider_norm = self._normalize_provider_name(provider)
+        costs: list[float] = []
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("model") or "").strip() != model_norm:
+                continue
+            if self._normalize_provider_name(str(item.get("provider") or "local")) != provider_norm:
+                continue
+            costs.append(float(item.get("estimated_cost_usd") or 0.0))
+            if len(costs) >= 25:
+                break
+        if not costs:
+            return {"avg_cost_usd": 0.0, "samples": 0, "cost_efficiency": 1.0}
+        avg_cost = sum(costs) / max(1, len(costs))
+        return {
+            "avg_cost_usd": round(avg_cost, 6),
+            "samples": len(costs),
+            "cost_efficiency": round(max(0.0, min(1.0, 1.0 / (1.0 + (avg_cost * 25.0)))), 4),
+        }
+
+    def _candidate_value(self, task: Any, candidate: dict[str, Any], advisory_context: dict[str, Any] | None = None) -> tuple[float, dict[str, Any]]:
+        advisory_context = advisory_context or {}
+        provider = str(candidate.get("provider") or "local")
+        model_name = str(candidate.get("model_name") or "")
+        rolling = self._rolling_kpi(task, model_name)
+        observed_cost = self._observed_model_cost(model_name, provider)
+        mimo_context = advisory_context.get("mimo") if isinstance(advisory_context.get("mimo"), dict) else {}
+        budget_pressure = str((mimo_context or {}).get("budget_pressure") or "normal").lower()
+        weights = self._profile_weights(
+            getattr(getattr(task, "type", None), "value", None) or str(getattr(task, "type", "unknown")),
+            provider,
+            model_name,
+            task=task,
+            context={"budget_pressure": budget_pressure},
+        )
+        memory_efficiency = float((mimo_context or {}).get("memory_efficiency") or 1.0)
+        health = self._provider_health(advisory_context).get(provider, {})
+        availability = 1.0 if not isinstance(health, dict) or not health else (1.0 if bool(health.get("ready", False)) else 0.25)
+        tags = set(candidate.get("capability_tags") or [])
+        specialization = 1.0 if not tags or not self._capability_tags_for_task(task).isdisjoint(tags) else 0.35
+        value_payload = compute_model_value(
+            success_rate=float(rolling.get("success_rate") or 0.5),
+            quality_score=float(rolling.get("avg_quality") or 0.5),
+            latency_ms=float(rolling.get("avg_latency") or 0.0) * 1000.0,
+            cost_usd=float(observed_cost.get("avg_cost_usd") or 0.0),
+            memory_efficiency=memory_efficiency,
+            availability=availability,
+            specialization=specialization,
+            context_fit=context_fit_score(candidate.get("context_window")),
+        )
+        diagnostics = dict(value_payload.get("components") or {})
+        diagnostics.update({
+            "observed_avg_cost_usd": float(observed_cost.get("avg_cost_usd") or 0.0),
+            "cost_samples": int(observed_cost.get("samples") or 0),
+            "budget_weight": round(float(weights.get("budget", 1.0)), 4),
+            "cost_class": str(candidate.get("cost_class") or ""),
+        })
+        budget_weight = max(0.7, min(1.0, float(weights.get("budget", 1.0))))
+        weighted_value = float(value_payload.get("value_score") or 0.0) * budget_weight
+        diagnostics["applied_budget_weight"] = round(budget_weight, 4)
+        return round(min(1.0, weighted_value), 6), diagnostics
+
     def _provider_health(self, advisory_context: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
         advisory_context = advisory_context or {}
         providers: dict[str, dict[str, Any]] = {}
@@ -448,7 +530,7 @@ class MimoOrchestrationDirector:
                 continue
             if tags and capability_tags.isdisjoint(tags):
                 continue
-            candidates.append({
+            candidate = {
                 "provider": provider,
                 "model_name": str(getattr(model, "id", "") or getattr(model, "full_id", "")).strip(),
                 "full_id": str(getattr(model, "full_id", "")).strip(),
@@ -456,9 +538,13 @@ class MimoOrchestrationDirector:
                 "capability_tags": sorted(tags),
                 "cost_class": getattr(model, "cost_class", None),
                 "source": "mimo_inventory",
-            })
+            }
+            value_score, diagnostics = self._candidate_value(task, candidate, advisory_context)
+            candidate["value_score"] = value_score
+            candidate["value_diagnostics"] = diagnostics
+            candidates.append(candidate)
         if candidates:
-            candidates.sort(key=lambda item: (0 if item["provider"] == "local" else 1, item["cost_class"] not in {"low", None}, -(int(item["context_window"] or 0))))
+            candidates.sort(key=lambda item: (-float(item.get("value_score") or 0.0), -float((item.get("value_diagnostics") or {}).get("cost_efficiency") or 0.0), -(int(item.get("context_window") or 0))))
             return candidates
         return self._fallback_options(task, advisory_context)
 
@@ -615,7 +701,8 @@ class MimoOrchestrationDirector:
         preferred_candidate = inventory_candidates[0] if inventory_candidates else None
         preferred_provider = str((preferred_candidate or {}).get("provider") or normalized_provider).strip()
         preferred_model = str(context.get("preferred_model") or selected_model or (preferred_candidate or {}).get("model_name") or self._default_local_model(task_type)).strip()
-        trace.append({"event": "mimo_recommendation", "provider": preferred_provider, "model_name": preferred_model, "inventory_candidates": len(inventory_candidates)})
+        preferred_value = dict((preferred_candidate or {}).get("value_diagnostics") or {})
+        trace.append({"event": "mimo_recommendation", "provider": preferred_provider, "model_name": preferred_model, "inventory_candidates": len(inventory_candidates), "value_score": float((preferred_candidate or {}).get("value_score") or 0.0), "value_diagnostics": preferred_value})
         return MimoRecommendation(
             provider=preferred_provider,
             model_name=preferred_model,
@@ -689,6 +776,8 @@ class MimoOrchestrationDirector:
         context_bytes = len(str(memory_context).encode("utf-8"))
         context["memory_context_bytes"] = context_bytes
         context["context_window_ok"] = self.state.validate_context_limit(model_name, context_bytes)
+        memory_diag = self._memory_source.diagnostic_snapshot() if self._memory_source is not None and hasattr(self._memory_source, "diagnostic_snapshot") else {}
+        context["memory_diagnostics"] = memory_diag if isinstance(memory_diag, dict) else {}
         if self._memory_source is not None and hasattr(self._memory_source, "list_keys"):
             try:
                 context["memory_keys_count"] = len(self._memory_source.list_keys())
@@ -706,6 +795,7 @@ class MimoOrchestrationDirector:
         context["selected_model"] = model_name
         context["provider_health"] = self._provider_health(memory_context if isinstance(memory_context, dict) else None)
         context["decision_mode"] = "mimo_control" if self.is_available else "safe_fallback"
+        context["memory_efficiency"] = memory_efficiency_score(memory_context_bytes=context_bytes, context_window=self.state.model_context_limits.get(model_name), memory_keys_count=context.get("memory_keys_count"), hot_count=context.get("memory_diagnostics", {}).get("hot_count"), hot_capacity=context.get("memory_diagnostics", {}).get("hot_capacity"), persistent_enabled=context.get("memory_diagnostics", {}).get("persistent_enabled"))
         context["mimo_runtime_health"] = self._runtime_health()
         mistral_health = context["provider_health"].get("mistral") if isinstance(context.get("provider_health"), dict) else {}
         context["mistral_governance"] = self.mistral_governance.build_profile(
@@ -892,6 +982,120 @@ class MimoOrchestrationDirector:
             persistent.store_memory(session_id=session_id, agent_id=model_name, memory_type=f"kpi_task:{task_type}", content=content, metadata={"key": f"{task_type}:{session_id}"}, importance_score=min(1.0, max(0.1, score)))
         except Exception as exc:
             logger.debug("MIMO aggregate persistence skipped: %s", exc)
+
+    def _aggregate_model_kpi(self, model_name: str) -> dict[str, float]:
+        success_weight = 0.0
+        latency_weight = 0.0
+        quality_weight = 0.0
+        sample_weight = 0.0
+        for (task_type, model), window in self.task_kpi_windows.items():
+            if model != model_name:
+                continue
+            snap = window.snapshot()
+            samples = float(max(1, len(window.latencies)))
+            success_weight += float(snap.get("success_rate") or 0.5) * samples
+            latency_weight += float(snap.get("avg_latency") or 0.0) * samples
+            quality_weight += float(snap.get("avg_quality") or 0.5) * samples
+            sample_weight += samples
+        if sample_weight <= 0:
+            return {"success_rate": 0.5, "avg_latency": 0.0, "avg_quality": 0.5, "sample_size": 0.0}
+        return {
+            "success_rate": round(success_weight / sample_weight, 4),
+            "avg_latency": round(latency_weight / sample_weight, 4),
+            "avg_quality": round(quality_weight / sample_weight, 4),
+            "sample_size": sample_weight,
+        }
+
+    def _report_inventory(self) -> list[Any]:
+        inventory = list(self.bridge.get_cached_models()) if hasattr(self.bridge, "get_cached_models") else []
+        if inventory:
+            return inventory
+
+        fallback_models: list[tuple[str, str, int | None, str, list[str]]] = [
+            ("local", "qwen-2.5-7b-instruct", 131072, "low", ["docs", "research", "review"]),
+            ("local", "qwen2.5:32b-instruct-q4_k_m", 65536, "medium", ["code", "review", "fix"]),
+            ("local", "deepseek-r1:14b", 65536, "medium", ["code", "review", "research"]),
+            ("mistral", "mistral-medium-latest", 131072, "medium", ["docs", "research", "review"]),
+            ("mistral", "mistral-large-latest", 131072, "high", ["code", "review", "research"]),
+            ("mistral", "codestral-latest", 131072, "medium", ["code", "fix", "test"]),
+            ("mistral", "devstral-latest", 131072, "medium", ["code", "fix", "review"]),
+        ]
+
+        try:
+            openai_catalog = OpenAIModelRegistry().get_catalog()
+            openai_models = openai_catalog.all_models or ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5-mini", "gpt-5.1", "gpt-5-codex"]
+        except Exception:
+            openai_models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5-mini", "gpt-5.1", "gpt-5-codex"]
+        for model_name in openai_models:
+            fallback_models.append(("openai", model_name, 128000, "medium", ["docs", "code", "review", "research"]))
+
+        try:
+            qwen_catalog = QwenModelRegistry().get_catalog()
+            qwen_models = qwen_catalog.coder + qwen_catalog.instruct + qwen_catalog.max + qwen_catalog.plus + qwen_catalog.turbo + qwen_catalog.standard
+        except Exception:
+            qwen_models = ["qwen-2.5-coder-32b", "qwen-2.5-7b-instruct"]
+        for model_name in qwen_models:
+            fallback_models.append(("local", model_name, 131072, "low" if "7b" in model_name.lower() else "medium", ["docs", "code", "review"]))
+
+        deduped: list[Any] = []
+        seen: set[tuple[str, str]] = set()
+        for provider, model_name, context_window, cost_class, tags in fallback_models:
+            key = (provider, model_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(MimoModelSnapshot(
+                full_id=f"{provider}/{model_name}",
+                id=model_name,
+                provider=provider,
+                status="synthetic",
+                context_window=context_window,
+                capability_tags=tags,
+                cost_class=cost_class,
+                ready=True,
+                blocked=False,
+            ))
+        return deduped
+
+    def model_value_report(self, advisory_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        advisory_context = advisory_context or {}
+        memory_diag = self._memory_source.diagnostic_snapshot() if self._memory_source is not None and hasattr(self._memory_source, "diagnostic_snapshot") else {}
+        memory_efficiency = float(memory_diag.get("memory_efficiency_score") or 1.0)
+        rows: list[dict[str, Any]] = []
+        inventory = self._report_inventory()
+        for model in inventory:
+            provider = self._normalize_provider_name(getattr(model, "provider", "local"))
+            model_name = str(getattr(model, "id", "") or getattr(model, "full_id", "")).strip()
+            aggregate = self._aggregate_model_kpi(model_name)
+            observed_cost = self._observed_model_cost(model_name, provider)
+            value = compute_model_value(
+                success_rate=float(aggregate.get("success_rate") or 0.5),
+                quality_score=float(aggregate.get("avg_quality") or 0.5),
+                latency_ms=float(aggregate.get("avg_latency") or 0.0) * 1000.0,
+                cost_usd=float(observed_cost.get("avg_cost_usd") or 0.0),
+                memory_efficiency=memory_efficiency,
+                availability=1.0 if bool(getattr(model, "ready", True)) else 0.25,
+                specialization=1.0,
+                context_fit=context_fit_score(getattr(model, "context_window", None)),
+            )
+            rows.append({
+                "provider": provider,
+                "model": model_name,
+                "avg_cost_usd": float(observed_cost.get("avg_cost_usd") or 0.0),
+                "cost_samples": int(observed_cost.get("samples") or 0),
+                "latency_sec": float(aggregate.get("avg_latency") or 0.0),
+                "quality": float(aggregate.get("avg_quality") or 0.5),
+                "success_rate": float(aggregate.get("success_rate") or 0.5),
+                "memory_efficiency": memory_efficiency,
+                "value_score": float(value.get("value_score") or 0.0),
+                "value_components": dict(value.get("components") or {}),
+                "context_window": int(getattr(model, "context_window", 0) or 0),
+                "cost_class": str(getattr(model, "cost_class", "") or ""),
+            })
+        rows.sort(key=lambda item: (-float(item.get("value_score") or 0.0), float(item.get("avg_cost_usd") or 0.0), float(item.get("latency_sec") or 0.0)))
+        for index, row in enumerate(rows, start=1):
+            row["rank"] = index
+        return {"generated_at": __import__('datetime').datetime.now(__import__('datetime').UTC).isoformat(), "memory_efficiency": memory_efficiency, "models": rows}
 
     def _remaining_budget_for_model(self, model_name: str, fallback_budget: float) -> float:
         if self._budget_module is None:

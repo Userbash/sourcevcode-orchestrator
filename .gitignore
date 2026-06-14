@@ -96,6 +96,8 @@ system_test_report.py
 # AI Bridge bootstrap artifacts
 .venv_ai_bridge/
 ai_bridge/runtime_report.json
+core/runtime_report.json
+core/mimo/profiles/rolling_kpi_store.json
 
 # Temporary AI Bridge files
 memory_store/

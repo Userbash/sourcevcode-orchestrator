@@ -242,7 +242,28 @@ class PromptOptimizerModule:
             objective = objective[:320].rstrip() + "..."
         return objective
 
-    def _extract_context(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> list[str]:
+    def _reusable_memory_context(self, task: Task, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._api:
+            return {"matched": False, "brief": "", "similarity": 0.0, "reason": "api_unavailable"}
+        memory = self._api.get_context("session_memory")
+        if not memory or not hasattr(memory, "hybrid"):
+            return {"matched": False, "brief": "", "similarity": 0.0, "reason": "memory_unavailable"}
+        hybrid = memory.hybrid
+        if not hasattr(hybrid, "retrieve_reusable_task_context"):
+            return {"matched": False, "brief": "", "similarity": 0.0, "reason": "reuse_unsupported"}
+        capability = str(getattr(task, "required_capability", "") or self._task_type_label(task))
+        try:
+            return hybrid.retrieve_reusable_task_context(
+                task=task,
+                agent_id=f"shared:{capability}",
+                capability=capability,
+                top_k=2 if task.type in {TaskType.CODE, TaskType.REVIEW, TaskType.TEST} else 1,
+                token_limit=self._memory_token_budget(task),
+            )
+        except Exception:
+            return {"matched": False, "brief": "", "similarity": 0.0, "reason": "reuse_lookup_failed"}
+
+    def _extract_context(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, reusable: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> list[str]:
         context_lines: list[str] = []
         if task.session_id:
             context_lines.append(f"session_id: {task.session_id}")
@@ -258,11 +279,16 @@ class PromptOptimizerModule:
             context_lines.append(f"acceptance_criteria: {', '.join(task.input.acceptance_criteria)}")
         if history:
             context_lines.append(f"recent_successful_history_items: {len(history)}")
-        trained = self._trained_memory_context(task)
+        trained = trained or self._trained_memory_context(task, context)
+        reusable = reusable or self._reusable_memory_context(task, context)
         brief = str(trained.get("brief") or "").strip()
         if brief and trained.get("trusted"):
             context_lines.append(f"trained_memory_domain: {trained.get('memory_domain', '')}")
             context_lines.append(f"trained_memory_brief: {brief[:240]}")
+        if reusable.get("matched") and str(reusable.get("brief") or "").strip():
+            context_lines.append(f"reusable_task_similarity: {float(reusable.get("similarity", 0.0) or 0.0):.2f}")
+            context_lines.append(f"reusable_task_fingerprint: {reusable.get("fingerprint", "")}")
+            context_lines.append(f"reusable_task_memory_brief: {str(reusable.get("brief") or "")[:240]}")
         decisions = self._memory_decisions(task)
         if decisions:
             context_lines.append(f"memory_decisions: {len(decisions)}")
@@ -429,9 +455,9 @@ class PromptOptimizerModule:
             except Exception:
                 pass
 
-    def _render_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> str:
+    def _render_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, reusable: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> str:
         objective = self._extract_objective(task)
-        context_lines = self._extract_context(task, history, offload, trained=trained, context=context)
+        context_lines = self._extract_context(task, history, offload, trained=trained, reusable=reusable, context=context)
         requirements = self._extract_requirements(task, offload)
         risks = self._extract_risks(task, offload)
         steps = self._extract_steps(task, history, offload)
@@ -493,11 +519,15 @@ class PromptOptimizerModule:
             self._api.log("warning", f"[OPTIMIZER] antigravity rewrite failed: {exc}")
         return None
 
-    def _compose_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, context: dict[str, Any] | None = None, trained: dict[str, Any] | None = None) -> str:
+    def _compose_instruction(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, context: dict[str, Any] | None = None, trained: dict[str, Any] | None = None, reusable: dict[str, Any] | None = None) -> str:
         trained = trained or self._trained_memory_context(task, context)
-        refined = self._render_instruction(task, history, offload, trained=trained, context=context)
+        reusable = reusable or self._reusable_memory_context(task, context)
+        refined = self._render_instruction(task, history, offload, trained=trained, reusable=reusable, context=context)
         if not self._is_high_risk_task(task):
             refined = self.apply_trained_memory(task, refined, trained=trained, context=context)
+
+        if reusable and reusable.get("matched") and str(reusable.get("brief") or "").strip():
+            refined = "\n".join([refined, "REUSABLE TASK MEMORY:", str(reusable.get("brief") or "").strip()])
 
         if history:
             compact_history = []
@@ -533,7 +563,8 @@ class PromptOptimizerModule:
         history = self._memory_history(task)
         offload = self._local_llm(task, context, history) if history else self._local_llm(task, context, [])
         trained = self._trained_memory_context(task, context)
-        instruction = self._compose_instruction(task, history, offload, context, trained)
+        reusable = self._reusable_memory_context(task, context)
+        instruction = self._compose_instruction(task, history, offload, context, trained, reusable)
 
         rewritten = None
         if offload and task.type in self._safe_offload_types():
@@ -552,9 +583,17 @@ class PromptOptimizerModule:
             "trained_memory_domain": str(trained.get("memory_domain") or ""),
             "source": "prompt_optimizer",
         }
+        task.routing_hints["memory_reuse"] = {
+            "matched": bool(reusable.get("matched")),
+            "similarity": float(reusable.get("similarity", 0.0) or 0.0),
+            "fingerprint": str(reusable.get("fingerprint") or ""),
+            "count": int(reusable.get("count", 0) or 0),
+            "source_ids": list(reusable.get("source_ids") or []),
+            "source": "prompt_optimizer",
+        }
         self._api.log(
             "info",
-            f"[OPTIMIZER] Prompt prepared: history={len(history)} local_llm={bool(offload)} antigravity={bool(rewritten)}",
+            f"[OPTIMIZER] Prompt prepared: history={len(history)} reusable={bool(reusable.get("matched"))} local_llm={bool(offload)} antigravity={bool(rewritten)}",
         )
 
     def after_task(self, task: Task, result: AgentResult, context: dict[str, Any]) -> None:

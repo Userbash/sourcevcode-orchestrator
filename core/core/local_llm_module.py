@@ -64,6 +64,7 @@ class LocalLLMModule(KernelModule):
             self.generate_timeout_sec = max(60.0, self.timeout_sec * 30)
         self.last_probe: dict[str, Any] = {}
         self.last_advisory: dict[str, Any] = {}
+        self.last_query_metrics: dict[str, Any] = {}
         self.adapter_state_path = Path(os.getenv("AI_BRIDGE_EXPERIENCE_ADAPTER_STATE_PATH", "memory_store/training/experience_adapter_state.json"))
         self._adapter_state_mtime_ns: int | None = None
         self._adapter_state_cache: dict[str, Any] = {}
@@ -317,11 +318,41 @@ class LocalLLMModule(KernelModule):
             raise
 
         payload = response.json() if response.content else {}
+        response_text = ""
         if isinstance(payload, dict):
-            text = payload.get("response")
-            if isinstance(text, str):
-                return text.strip()
-        return ""
+            text_value = payload.get("response")
+            if isinstance(text_value, str):
+                response_text = text_value.strip()
+            prompt_eval_count = int(payload.get("prompt_eval_count") or 0)
+            eval_count = int(payload.get("eval_count") or 0)
+            total_duration_ns = int(payload.get("total_duration") or 0)
+            load_duration_ns = int(payload.get("load_duration") or 0)
+            prompt_eval_duration_ns = int(payload.get("prompt_eval_duration") or 0)
+            eval_duration_ns = int(payload.get("eval_duration") or 0)
+        else:
+            prompt_eval_count = 0
+            eval_count = 0
+            total_duration_ns = 0
+            load_duration_ns = 0
+            prompt_eval_duration_ns = 0
+            eval_duration_ns = 0
+        latency_sec = float(total_duration_ns) / 1_000_000_000.0 if total_duration_ns > 0 else float(duration)
+        self.last_query_metrics = {
+            "provider": "local",
+            "model": target_model,
+            "endpoint": self.endpoint,
+            "latency_sec": round(latency_sec, 6),
+            "latency_ms": round(latency_sec * 1000.0, 3),
+            "wall_time_sec": round(float(duration), 6),
+            "prompt_eval_count": prompt_eval_count,
+            "eval_count": eval_count,
+            "prompt_eval_duration_sec": round(float(prompt_eval_duration_ns) / 1_000_000_000.0, 6) if prompt_eval_duration_ns > 0 else 0.0,
+            "eval_duration_sec": round(float(eval_duration_ns) / 1_000_000_000.0, 6) if eval_duration_ns > 0 else 0.0,
+            "load_duration_sec": round(float(load_duration_ns) / 1_000_000_000.0, 6) if load_duration_ns > 0 else 0.0,
+            "input_chars": len(prompt),
+            "output_chars": len(response_text),
+        }
+        return response_text
 
     def _advisory_base(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
         probe = self.can_use_model(self.model_name)

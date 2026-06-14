@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
@@ -10,6 +12,7 @@ from typing import Any
 from .memory_backend import BackendEntry, InMemoryBackend, MemoryBackend
 from .memory_settings import MemorySettings
 from .persistent_memory import PersistentMemoryManager
+from .model_value import memory_efficiency_score
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +234,15 @@ class HybridMemory:
                 backend_keys = []
         persistent_enabled = bool(getattr(self.persistent, "_pg_enabled", False))
         persistent_url = getattr(self.persistent, "database_url", "")
+        hot_capacity = int(getattr(self.settings, "hot_cache_max_entries", 0) or 0)
+        efficiency = memory_efficiency_score(
+            memory_context_bytes=0,
+            context_window=max(1, hot_capacity * 1024),
+            memory_keys_count=len(hot_keys),
+            hot_count=len(hot_keys),
+            hot_capacity=hot_capacity,
+            persistent_enabled=persistent_enabled,
+        )
         return {
             "hot_count": len(hot_keys),
             "backend_count": len(backend_keys),
@@ -243,6 +255,8 @@ class HybridMemory:
             "term_index_count": len(self._term_index),
             "trained_memory_degrade_count": len(self._trained_memory_degrade),
             "trained_memory_degrade_releases": self._trained_memory_degrade_releases,
+            "hot_capacity": hot_capacity,
+            "memory_efficiency_score": efficiency,
         }
 
     def fast_retrieve(
@@ -677,6 +691,244 @@ class HybridMemory:
             session_id=session_id,
             limit=limit or self.settings.command_window_size,
         )
+
+    @staticmethod
+    def _normalize_reuse_text(value: Any) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^a-z0-9_./:#\-\s]+", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def _reuse_terms(self, *, objective: str, files: list[str], constraints: list[str], acceptance_criteria: list[str]) -> list[str]:
+        buckets = [objective, *files, *constraints, *acceptance_criteria]
+        terms: list[str] = []
+        for raw in buckets:
+            normalized = self._normalize_reuse_text(raw)
+            if not normalized:
+                continue
+            for token in normalized.split():
+                if len(token) < 3:
+                    continue
+                if token not in terms:
+                    terms.append(token)
+        return terms[:48]
+
+    def build_task_reuse_fingerprint(
+        self,
+        *,
+        task_type: str,
+        objective: str,
+        files: list[str],
+        constraints: list[str],
+        acceptance_criteria: list[str],
+    ) -> tuple[str, list[str]]:
+        terms = self._reuse_terms(
+            objective=objective,
+            files=files,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
+        digest_source = "|".join([task_type.lower(), *terms])
+        fingerprint = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:16]
+        return fingerprint, terms
+
+    def store_reusable_task_memory(
+        self,
+        *,
+        task: Any,
+        agent_id: str,
+        summary: str,
+        quality_score: float = 0.0,
+        provider: str | None = None,
+        model_name: str | None = None,
+    ) -> str:
+        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", "unknown")) or "unknown").lower()
+        description = str(getattr(getattr(task, "input", None), "description", "") or "")
+        files = list(getattr(getattr(task, "input", None), "files", []) or [])
+        constraints = list(getattr(getattr(task, "input", None), "constraints", []) or [])
+        acceptance_criteria = list(getattr(getattr(task, "input", None), "acceptance_criteria", []) or [])
+        capability = str(getattr(task, "required_capability", "") or task_type)
+        project = str(getattr(getattr(task, "context", None), "project", "") or "")
+        branch = str(getattr(getattr(task, "context", None), "branch", "") or "")
+        session_id = str(getattr(task, "session_id", "") or getattr(task, "task_id", "default"))
+        fingerprint, fingerprint_terms = self.build_task_reuse_fingerprint(
+            task_type=task_type,
+            objective=description,
+            files=files,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
+        payload = {
+            "task_type": task_type,
+            "task_id": str(getattr(task, "task_id", "")),
+            "summary": str(summary or "")[:1200],
+            "objective": description[:400],
+            "files": files[:12],
+            "constraints": constraints[:12],
+            "acceptance_criteria": acceptance_criteria[:12],
+            "fingerprint": fingerprint,
+            "fingerprint_terms": fingerprint_terms,
+            "capability": capability,
+            "project": project,
+            "branch": branch,
+            "provider": str(provider or ""),
+            "model_name": str(model_name or ""),
+            "source_agent_id": agent_id,
+        }
+        metadata = {
+            "source": "reusable_task_memory",
+            "task_type": task_type,
+            "fingerprint": fingerprint,
+            "fingerprint_terms": fingerprint_terms,
+            "capability": capability,
+            "project": project,
+            "branch": branch,
+            "provider": str(provider or ""),
+            "model_name": str(model_name or ""),
+            "source_agent_id": agent_id,
+        }
+        shared_agent_id = f"shared:{capability}"
+        self.persistent.store_trained_memory(
+            session_id=session_id,
+            agent_id=shared_agent_id,
+            memory_domain=f"reuse:{task_type}",
+            content=payload,
+            source_memory_ids=[],
+            metadata=metadata,
+            quality_score=max(0.0, min(1.0, float(quality_score) or 0.0)),
+        )
+        self._emit_event("memory.reuse.events", {
+            "event_type": "memory.reuse.stored",
+            "session_id": session_id,
+            "task_type": task_type,
+            "fingerprint": fingerprint,
+            "capability": capability,
+            "project": project,
+            "provider": str(provider or ""),
+            "model_name": str(model_name or ""),
+            "source_agent_id": agent_id,
+        })
+        return fingerprint
+
+    def retrieve_reusable_task_context(
+        self,
+        *,
+        task: Any,
+        agent_id: str | None = None,
+        capability: str | None = None,
+        top_k: int = 2,
+        token_limit: int = 220,
+    ) -> dict[str, Any]:
+        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", "unknown")) or "unknown").lower()
+        description = str(getattr(getattr(task, "input", None), "description", "") or "")
+        files = list(getattr(getattr(task, "input", None), "files", []) or [])
+        constraints = list(getattr(getattr(task, "input", None), "constraints", []) or [])
+        acceptance_criteria = list(getattr(getattr(task, "input", None), "acceptance_criteria", []) or [])
+        project = str(getattr(getattr(task, "context", None), "project", "") or "")
+        capability = str(capability or getattr(task, "required_capability", "") or task_type)
+        fingerprint, query_terms = self.build_task_reuse_fingerprint(
+            task_type=task_type,
+            objective=description,
+            files=files,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
+        )
+        try:
+            records = self.persistent.list_trained_memories(limit=max(40, int(top_k) * 40))
+        except Exception:
+            records = []
+        if not records:
+            return {"matched": False, "brief": "", "fingerprint": fingerprint, "similarity": 0.0, "count": 0}
+
+        query_set = set(query_terms)
+        file_set = {item.lower() for item in files}
+        domain = f"reuse:{task_type}"
+        ranked: list[tuple[float, Any, dict[str, Any], dict[str, Any]]] = []
+        for record in records:
+            record_domain = str(getattr(record, "memory_domain", "") or "")
+            if record_domain != domain:
+                continue
+            metadata = dict(getattr(record, "metadata", {}) or {})
+            content = getattr(record, "content", {})
+            content = content if isinstance(content, dict) else {"summary": str(content or "")}
+            record_project = str(metadata.get("project") or content.get("project") or "")
+            if project and record_project and record_project != project:
+                continue
+            record_terms = metadata.get("fingerprint_terms") or content.get("fingerprint_terms") or []
+            record_terms = [str(item).lower() for item in record_terms if str(item).strip()]
+            record_set = set(record_terms)
+            if not record_set:
+                record_set = set(self._reuse_terms(
+                    objective=str(content.get("objective") or content.get("summary") or ""),
+                    files=list(content.get("files") or []),
+                    constraints=list(content.get("constraints") or []),
+                    acceptance_criteria=list(content.get("acceptance_criteria") or []),
+                ))
+            if not record_set:
+                continue
+            overlap = len(query_set & record_set) / max(1, len(query_set | record_set))
+            record_files = {str(item).lower() for item in (content.get("files") or []) if str(item).strip()}
+            file_overlap = len(file_set & record_files) / max(1, len(file_set | record_files)) if file_set and record_files else 0.0
+            record_capability = str(metadata.get("capability") or content.get("capability") or "")
+            score = overlap * 0.6
+            if file_overlap:
+                score += file_overlap * 0.15
+            if project and record_project == project:
+                score += 0.1
+            if capability and record_capability == capability:
+                score += 0.1
+            if str(metadata.get("fingerprint") or content.get("fingerprint") or "") == fingerprint:
+                score += 0.25
+            if agent_id and str(getattr(record, "agent_id", "")) == str(agent_id):
+                score += 0.05
+            quality_score = float(getattr(record, "quality_score", 0.0) or 0.0)
+            score += min(0.1, quality_score * 0.1)
+            if score < 0.45:
+                continue
+            ranked.append((score, record, metadata, content))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        chosen = ranked[: max(1, int(top_k))]
+        if not chosen:
+            return {"matched": False, "brief": "", "fingerprint": fingerprint, "similarity": 0.0, "count": 0}
+
+        budget_chars = max(200, int(token_limit) * 4)
+        lines = [f"--- REUSABLE TASK MEMORY ({task_type}, Top {len(chosen)}) ---"]
+        used = len(lines[0])
+        source_ids: list[int] = []
+        for score, record, metadata, content in chosen:
+            capability_label = str(metadata.get("capability") or content.get("capability") or "")
+            source_ids.append(int(getattr(record, "trained_memory_id", 0) or 0))
+            summary = str(content.get("summary") or content.get("objective") or "").strip()
+            if len(summary) > 420:
+                summary = summary[:417] + "..."
+            line = f"[Reuse: {score:.2f}] [Capability: {capability_label or task_type}] [Sources: [{getattr(record, 'trained_memory_id', 0)}]] {summary}"
+            if used + len(line) + 1 > budget_chars:
+                break
+            lines.append(line)
+            used += len(line) + 1
+        brief = "\n".join(lines)
+        similarity = float(chosen[0][0])
+        self._emit_event("memory.reuse.events", {
+            "event_type": "memory.reuse.recalled",
+            "task_type": task_type,
+            "fingerprint": fingerprint,
+            "similarity": similarity,
+            "count": len(chosen),
+            "project": project,
+            "capability": capability,
+            "source_ids": source_ids,
+        })
+        return {
+            "matched": True,
+            "brief": brief,
+            "fingerprint": fingerprint,
+            "similarity": round(similarity, 4),
+            "count": len(chosen),
+            "source_ids": source_ids,
+            "capability": capability,
+            "project": project,
+        }
 
     def _persistence_agent_id(self, scope: str, identifier: str) -> str:
         if scope == "agent":

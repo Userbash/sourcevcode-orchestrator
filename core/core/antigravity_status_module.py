@@ -71,10 +71,14 @@ class AntigravityStatusModule:
 
     def _make_status(self, health: dict[str, Any], *, retry: dict[str, Any] | None = None, session_control: dict[str, Any] | None = None) -> dict[str, Any]:
         ready = bool(health.get("ready"))
+        session_state = str((session_control or {}).get("session_state") or "")
+        overall_status = "ready" if ready else "degraded"
+        if not ready and session_state in {"login_pending", "waiting_code"}:
+            overall_status = session_state
         status = {
             "ok": ready,
             "ready": ready,
-            "status": "ready" if ready else "degraded",
+            "status": overall_status,
             "auth_mode": health.get("auth_mode", "agy_oauth"),
             "models": health.get("models", []),
             "models_probe": health.get("models_probe", {}),

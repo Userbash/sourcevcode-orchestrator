@@ -40,4 +40,12 @@ class LocalLLMAgent(BaseAgent):
         response = local_llm.query("\n".join(prompt_parts), model_name=getattr(local_llm, "model_name", self._model), system=system)
         if not response:
             return self.result(task, "Local LLM returned no output", TaskStatus.FAILED, errors=["empty_local_llm_response"])
-        return self.result(task, response, TaskStatus.DONE, provider="local", model_name=getattr(local_llm, "model_name", self._model))
+        local_usage = dict(getattr(local_llm, "last_query_metrics", {}) or {})
+        return self.result(
+            task,
+            response,
+            TaskStatus.DONE,
+            provider="local",
+            model_name=getattr(local_llm, "model_name", self._model),
+            output={"summary": response, "local_usage": local_usage},
+        )

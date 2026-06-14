@@ -55,9 +55,10 @@ def test_antigravity_manager_uses_absolute_login_helper_path(monkeypatch):
         assert cmd[1].endswith("core/scripts/antigravity_login.py")
 
 
-def test_antigravity_manager_confirmed_ready_after_login(monkeypatch):
+def test_antigravity_manager_confirmed_ready_after_login(monkeypatch, tmp_path):
     mock_bridge = MagicMock()
     manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
 
     calls = {"verify": 0, "login": 0, "models": 0, "probe": 0}
 
@@ -65,7 +66,7 @@ def test_antigravity_manager_confirmed_ready_after_login(monkeypatch):
         if "--verify" in args:
             calls["verify"] += 1
             return {"ok": False, "stderr": "not ready"}
-        if "--login" in args:
+        if "--managed-login-start" in args:
             calls["login"] += 1
             return {"ok": True, "stdout": "login complete", "stderr": ""}
         return {"ok": False}
@@ -239,7 +240,7 @@ def test_antigravity_manager_persists_session_state_after_confirmed_login(monkey
         if "--verify" in args:
             calls["verify"] += 1
             return {"ok": False, "stderr": "authentication required", "failure_kind": "auth_required", "auth_marker_present": False}
-        if "--login" in args:
+        if "--managed-login-start" in args:
             calls["login"] += 1
             return {"ok": True, "stdout": "login complete", "stderr": ""}
         return {"ok": False}
@@ -383,3 +384,153 @@ def test_antigravity_status_module_snapshot_includes_session_control_guidance(mo
     assert snap["session_control"]["user_action_required"] is True
     assert snap["session_control"]["responsibility"]["interactive_login"] == "user"
     assert snap["session_control"]["message_for_orchestrator"]
+
+
+def test_antigravity_manager_suppresses_reopening_interactive_login_recently_started(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.record_login_started()
+
+    monkeypatch.setattr(
+        manager,
+        "verify_auth",
+        lambda: {
+            "ok": False,
+            "ready": False,
+            "auth_marker_present": False,
+            "failure_kind": "auth_required",
+            "stderr": "authentication required",
+        },
+    )
+
+    login_calls = {"count": 0}
+
+    def fake_login(args, timeout=None):
+        login_calls["count"] += 1
+        return {"ok": False, "stderr": "should_not_run"}
+
+    monkeypatch.setattr(manager, "_run_login_helper", fake_login)
+
+    result = manager.ensure_authorized()
+
+    assert result["ok"] is False
+    assert result["login_suppressed"] is True
+    assert result["suppression_reason"] == "interactive_login_recently_started"
+    assert login_calls["count"] == 0
+
+
+def test_antigravity_session_control_reports_pending_login(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.record_login_started()
+
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda: {
+            "ready": False,
+            "models": [],
+            "auth_mode": "agy_oauth",
+            "models_probe": {"ok": False, "stderr": "authentication required"},
+            "generation_probe": {"ok": False, "stderr": "authentication required"},
+            "auth_probe": {
+                "ok": False,
+                "failure_kind": "auth_required",
+                "login_suppressed": True,
+                "suppression_reason": "interactive_login_recently_started",
+            },
+            "api_probe": {},
+        },
+    )
+
+    summary = manager.session_control_status()
+
+    assert summary["session_state"] == "login_pending"
+    assert summary["user_action_required"] is False
+    assert summary["last_login_started_at"]
+    assert "existing browser login" in summary["message_for_user"].lower()
+
+
+
+def test_antigravity_manager_starts_managed_login_session(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+
+    monkeypatch.setattr(manager, "verify_auth", lambda: {"ok": False, "failure_kind": "auth_required", "stderr": "authentication required", "auth_marker_present": False})
+
+    def fake_run_login(args, timeout=None):
+        assert "--managed-login-start" in args
+        session = manager.session_store.start_interactive_session("sess-1", owner="AntigravityManager", control_mode="bridge")
+        session = manager.session_store.update_interactive_session(
+            "sess-1",
+            state="waiting_code",
+            message="Waiting for authorization code",
+            user_input_required=True,
+            input_hint="Paste the code",
+        )
+        return {"ok": True, "ready": False, "session": session, "session_id": "sess-1"}
+
+    monkeypatch.setattr(manager, "_run_login_helper", fake_run_login)
+
+    result = manager.ensure_authorized()
+
+    assert result["ok"] is False
+    assert result["login_suppressed"] is True
+    assert result["suppression_reason"] == "interactive_session_active"
+    assert result["interactive_session"]["session_id"] == "sess-1"
+
+
+def test_antigravity_manager_accepts_bridge_input_for_active_session(tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.start_interactive_session("sess-2", owner="AntigravityManager", control_mode="bridge")
+    manager.session_store.update_interactive_session("sess-2", state="waiting_code", user_input_required=True)
+
+    result = manager.submit_interactive_input("ABC123", session_id="sess-2")
+
+    assert result["ok"] is True
+    assert "queued" in result["message"].lower()
+    input_file = manager.session_store.session_input_file("sess-2")
+    assert input_file.read_text(encoding="utf-8").strip() == "ABC123"
+
+
+def test_antigravity_session_control_exposes_active_bridge_metadata(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.start_interactive_session("sess-3", owner="AntigravityManager", control_mode="bridge")
+    manager.session_store.update_interactive_session(
+        "sess-3",
+        state="waiting_code",
+        message="Waiting for code",
+        browser_url="https://example.test/auth",
+        last_prompt="Paste the authorization code",
+        input_hint="Paste the code here",
+        user_input_required=True,
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda: {
+            "ready": False,
+            "models": [],
+            "auth_mode": "agy_oauth",
+            "models_probe": {"ok": False, "stderr": "authentication required"},
+            "generation_probe": {"ok": False, "stderr": "authentication required"},
+            "auth_probe": {"ok": False, "failure_kind": "auth_required", "login_suppressed": True, "suppression_reason": "interactive_session_active"},
+            "api_probe": {},
+        },
+    )
+
+    summary = manager.session_control_status()
+
+    assert summary["session_state"] == "waiting_code"
+    assert summary["user_action_required"] is True
+    assert summary["interactive_session"]["session_id"] == "sess-3"
+    assert summary["interactive_session"]["user_input_required"] is True
+    assert summary["interactive_session"]["browser_url"] == "https://example.test/auth"

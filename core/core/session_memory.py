@@ -179,6 +179,7 @@ class SessionMemory(MemoryProtocol):
         if isinstance(hot, dict):
             hot_keys = list(hot.keys())
 
+        hybrid_diag = self.hybrid.diagnostic_snapshot() if hasattr(self.hybrid, 'diagnostic_snapshot') else {}
         return {
             'memory_backend': type(self.backend).__name__,
             'hot_count': len(hot_keys),
@@ -189,6 +190,8 @@ class SessionMemory(MemoryProtocol):
             'backend_keys': backend_keys[:25],
             'sample_keys': scoped_keys[:25],
             'persistent_enabled': bool(getattr(getattr(self.hybrid, 'persistent', None), '_pg_enabled', False)),
+            'memory_efficiency_score': float(hybrid_diag.get('memory_efficiency_score', 1.0) or 1.0),
+            'hot_capacity': int(hybrid_diag.get('hot_capacity', 0) or 0),
         }
 
     def roundtrip_check(self, *, session_id: str, key: str, value: Any, scope: MemoryScope | str = MemoryScope.SESSION) -> dict[str, Any]:

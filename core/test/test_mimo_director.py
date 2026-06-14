@@ -526,3 +526,27 @@ def test_director_prefers_mistral_gateway_when_local_llm_needs_supervision():
     assert recommendation.provider == "mistral"
     assert recommendation.reason == "mistral_gateway_manager_plan"
     assert recommendation.model_name == "mistral-large-latest"
+
+
+
+def test_director_resolve_candidate_models_prefers_better_value_over_local_bias():
+    director = MimoOrchestrationDirector()
+    director.bridge.get_cached_models = lambda: [
+        type("Model", (), {"provider": "local", "id": "local-small", "full_id": "local/local-small", "context_window": 64000, "capability_tags": ["docs"], "cost_class": "medium", "blocked": False, "ready": True, "status": "ready"})(),
+        type("Model", (), {"provider": "openai", "id": "gpt-4o-mini", "full_id": "openai/gpt-4o-mini", "context_window": 128000, "capability_tags": ["docs"], "cost_class": "low", "blocked": False, "ready": True, "status": "ready"})(),
+    ]
+    director.set_budget_module(type("Budget", (), {"history": [
+        {"model": "local-small", "provider": "local", "estimated_cost_usd": 0.09},
+        {"model": "local-small", "provider": "local", "estimated_cost_usd": 0.08},
+        {"model": "gpt-4o-mini", "provider": "openai", "estimated_cost_usd": 0.002},
+        {"model": "gpt-4o-mini", "provider": "openai", "estimated_cost_usd": 0.003},
+    ]})())
+    task = type("T", (), {"type": DummyTaskType("docs"), "input": type("I", (), {"description": "write docs", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "normal"})()})()
+    director.register_execution_result("local-small", True, 2.4, task=task, quality_score=0.75, provider="local")
+    director.register_execution_result("gpt-4o-mini", True, 0.7, task=task, quality_score=0.92, provider="openai")
+
+    candidates = director.resolve_candidate_models(task, {"local_llm": {"ready": True}, "mimo": {"budget_pressure": "normal"}})
+
+    assert candidates[0]["model_name"] == "gpt-4o-mini"
+    assert candidates[0]["value_score"] >= candidates[1]["value_score"]
+    assert candidates[0]["value_diagnostics"]["observed_avg_cost_usd"] < candidates[1]["value_diagnostics"]["observed_avg_cost_usd"]

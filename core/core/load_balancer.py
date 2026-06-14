@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from .models import AgentRecord, AgentStatus, Priority, Task
+from .model_value import compute_model_value
 
 
 UNROUTABLE_AGENT_STATUSES = {
@@ -51,9 +52,20 @@ class LoadBalancer:
         test_pass_rate = max(0.0, min(1.0, agent.metrics.test_pass_rate))
         
         availability = self._availability(agent)
-        speed_score = self._speed_score(agent.metrics.avg_latency_ms)
-        cost_score = self._cost_score(agent.metrics.estimated_cost or agent.metrics.token_cost)
         specialization_score = 1.0 if capability in agent.capabilities else 0.0
+        memory_efficiency = float(getattr(agent.metrics, "memory_efficiency", getattr(agent.kpi, "reuse_score", 1.0)) or 1.0)
+        value = compute_model_value(
+            success_rate=success_rate,
+            quality_score=max(0.0, min(1.0, (quality_score + review_pass_rate + test_pass_rate) / 3.0)),
+            latency_ms=agent.metrics.avg_latency_ms,
+            cost_usd=float(agent.metrics.estimated_cost or agent.metrics.token_cost or 0.0),
+            memory_efficiency=memory_efficiency,
+            availability=availability,
+            specialization=specialization_score,
+            context_fit=0.5,
+        )
+        speed_score = float(value["components"]["latency_score"])
+        cost_score = float(value["components"]["cost_efficiency"])
         
         overload_penalty = self._overload_penalty(agent)
         secure_bonus = 0.0
@@ -62,7 +74,7 @@ class LoadBalancer:
             if any(token in secure_hint for token in ("secure", "senior")):
                 secure_bonus = 0.12
 
-        quality_component = (quality_score * 0.22) + (review_pass_rate * 0.12) + (test_pass_rate * 0.10)
+        quality_component = float(value["value_score"]) * 0.62
         kpi_component = getattr(agent.kpi, "agent_kpi", 1.0) * 0.14
         if task is not None:
             try:

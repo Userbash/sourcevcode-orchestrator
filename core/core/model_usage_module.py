@@ -134,12 +134,71 @@ class ModelUsageModule:
         return self.stats[model]
 
     @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name, str(default)).strip()
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return default
+
+    def _estimate_local_usage_cost(self, *, model: str, input_tokens: int, output_tokens: int, runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+        runtime = dict(runtime or {})
+        latency_sec = float(runtime.get("latency_sec") or runtime.get("wall_time_sec") or 0.0)
+        if latency_sec <= 0.0:
+            prompt_eval = int(runtime.get("prompt_eval_count") or 0)
+            eval_count = int(runtime.get("eval_count") or 0)
+            token_total = max(1, prompt_eval + eval_count, input_tokens + output_tokens)
+            throughput = self._env_float("AI_BRIDGE_LOCAL_LLM_TOKENS_PER_SEC", 35.0)
+            latency_sec = token_total / max(1.0, throughput)
+
+        gpu_time_sec = float(runtime.get("gpu_time_sec") or runtime.get("eval_duration_sec") or latency_sec)
+        cpu_time_sec = float(runtime.get("cpu_time_sec") or max(latency_sec, gpu_time_sec * self._env_float("AI_BRIDGE_LOCAL_LLM_CPU_TIME_MULTIPLIER", 0.35)))
+        ram_gb = float(runtime.get("ram_gb") or self._env_float("AI_BRIDGE_LOCAL_LLM_RAM_GB", 8.0))
+        gpu_watts = float(runtime.get("gpu_watts") or self._env_float("AI_BRIDGE_LOCAL_LLM_GPU_WATTS", 220.0))
+        cpu_watts = float(runtime.get("cpu_watts") or self._env_float("AI_BRIDGE_LOCAL_LLM_CPU_WATTS", 45.0))
+        ram_watts_per_gb = float(runtime.get("ram_watts_per_gb") or self._env_float("AI_BRIDGE_LOCAL_LLM_RAM_WATTS_PER_GB", 0.38))
+        electricity_usd_per_kwh = self._env_float("AI_BRIDGE_LOCAL_LLM_ELECTRICITY_USD_PER_KWH", 0.12)
+        amortized_hardware_usd_per_hour = self._env_float("AI_BRIDGE_LOCAL_LLM_AMORTIZED_USD_PER_HOUR", 0.55)
+        operations_overhead_usd_per_hour = self._env_float("AI_BRIDGE_LOCAL_LLM_OPERATIONS_USD_PER_HOUR", 0.08)
+        request_overhead_usd = self._env_float("AI_BRIDGE_LOCAL_LLM_REQUEST_OVERHEAD_USD", 0.0002)
+
+        energy_kwh = ((gpu_watts * gpu_time_sec) + (cpu_watts * cpu_time_sec) + (ram_gb * ram_watts_per_gb * latency_sec)) / 3_600_000.0
+        energy_cost = energy_kwh * electricity_usd_per_kwh
+        amortized_cost = (latency_sec / 3600.0) * amortized_hardware_usd_per_hour
+        operations_cost = (latency_sec / 3600.0) * operations_overhead_usd_per_hour
+        memory_pressure_cost = (ram_gb * latency_sec / 3600.0) * self._env_float("AI_BRIDGE_LOCAL_LLM_RAM_PRESSURE_USD_PER_GB_HOUR", 0.006)
+        estimated_cost = round(request_overhead_usd + energy_cost + amortized_cost + operations_cost + memory_pressure_cost, 6)
+
+        return {
+            "provider": "local",
+            "model": str(model or "local"),
+            "currency": "USD",
+            "input_tokens": max(0, int(input_tokens)),
+            "output_tokens": max(0, int(output_tokens)),
+            "estimated_cost_usd": estimated_cost,
+            "cost_components": {
+                "request_overhead_usd": round(request_overhead_usd, 6),
+                "energy_usd": round(energy_cost, 6),
+                "amortized_hardware_usd": round(amortized_cost, 6),
+                "operations_usd": round(operations_cost, 6),
+                "memory_pressure_usd": round(memory_pressure_cost, 6),
+                "energy_kwh": round(energy_kwh, 8),
+                "latency_sec": round(latency_sec, 6),
+                "gpu_time_sec": round(gpu_time_sec, 6),
+                "cpu_time_sec": round(cpu_time_sec, 6),
+                "ram_gb": round(ram_gb, 3),
+            },
+        }
+
+    @staticmethod
     def _normalize_provider(provider: str, model: str) -> str:
         raw_provider = str(provider or "").strip().lower()
         raw_model = str(model or "").strip().lower()
         if raw_provider:
             if raw_provider in {"google", "gemini", "agy", "antigravity-cli"}:
                 return "antigravity"
+            if raw_provider in {"local", "local_llm", "ollama"}:
+                return "local"
             return raw_provider
         if "mistral" in raw_model or "codestral" in raw_model or "devstral" in raw_model:
             return "mistral"
@@ -147,9 +206,11 @@ class ModelUsageModule:
             return "openai"
         return "unknown"
 
-    def estimate_usage_cost(self, model: str, *, input_tokens: int, output_tokens: int, provider: str = "") -> dict[str, Any]:
+    def estimate_usage_cost(self, model: str, *, input_tokens: int, output_tokens: int, provider: str = "", runtime: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized_model = str(model or "unknown").strip()
         normalized_provider = self._normalize_provider(provider, normalized_model)
+        if normalized_provider == "local":
+            return self._estimate_local_usage_cost(model=normalized_model, input_tokens=input_tokens, output_tokens=output_tokens, runtime=runtime)
         input_rate, output_rate = RATE_CARD_USD_PER_1K.get(normalized_model, (0.0, 0.0))
         estimated_cost = round(((max(0, int(input_tokens)) / 1000.0) * input_rate) + ((max(0, int(output_tokens)) / 1000.0) * output_rate), 6)
         return {
@@ -159,6 +220,7 @@ class ModelUsageModule:
             "input_tokens": max(0, int(input_tokens)),
             "output_tokens": max(0, int(output_tokens)),
             "estimated_cost_usd": estimated_cost,
+            "cost_components": {},
         }
 
     def before_task(self, task: Task, context: dict[str, Any]) -> None:
@@ -203,11 +265,15 @@ class ModelUsageModule:
             actual_output_tokens = estimated_output_tokens
             actual_tokens = estimated_tokens
 
+        runtime = context.get("usage_runtime")
+        if not isinstance(runtime, dict):
+            runtime = result.output.get("local_usage") if hasattr(result.output, "get") else None
         cost_estimate = self.estimate_usage_cost(
             str(model),
             input_tokens=actual_input_tokens,
             output_tokens=actual_output_tokens,
             provider=provider,
+            runtime=runtime if isinstance(runtime, dict) else None,
         )
 
         # Update Stats
@@ -225,6 +291,7 @@ class ModelUsageModule:
             "tokens_used": actual_tokens,
             "estimated_cost_usd": cost_estimate["estimated_cost_usd"],
             "currency": cost_estimate["currency"],
+            "cost_components": dict(cost_estimate.get("cost_components") or {}),
             "completed_at": datetime.now(UTC).isoformat(),
         }
         self.history.append(record)

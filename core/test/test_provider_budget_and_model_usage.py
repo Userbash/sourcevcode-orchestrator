@@ -131,3 +131,54 @@ def test_model_usage_after_task_records_estimated_cost_for_mistral():
 
     assert module.history[-1]["provider"] == "mistral"
     assert module.history[-1]["estimated_cost_usd"] > 0
+
+
+
+def test_model_usage_estimates_local_llm_costs_with_runtime_components(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_LOCAL_LLM_AMORTIZED_USD_PER_HOUR", "0.72")
+    monkeypatch.setenv("AI_BRIDGE_LOCAL_LLM_OPERATIONS_USD_PER_HOUR", "0.11")
+    module = ModelUsageModule()
+
+    estimate = module.estimate_usage_cost(
+        "qwen2.5:32b-instruct-q4_k_m",
+        input_tokens=1800,
+        output_tokens=600,
+        provider="local",
+        runtime={"latency_sec": 3.2, "gpu_time_sec": 2.7, "cpu_time_sec": 1.4, "ram_gb": 10.0},
+    )
+
+    assert estimate["provider"] == "local"
+    assert estimate["estimated_cost_usd"] > 0
+    assert estimate["cost_components"]["energy_usd"] > 0
+    assert estimate["cost_components"]["amortized_hardware_usd"] > 0
+    assert estimate["cost_components"]["memory_pressure_usd"] > 0
+
+
+def test_model_usage_after_task_records_local_cost_components(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_LOCAL_LLM_REQUEST_OVERHEAD_USD", "0.0003")
+    module = ModelUsageModule()
+    task = Task(
+        TaskType.DOCS,
+        TaskInput("summarize the release changes"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    context = {"model": "qwen2.5:32b-instruct-q4_k_m", "provider": "local", "usage_tokens": 700}
+    module.before_task(task, context)
+    result = AgentResult(
+        task.task_id,
+        "local-llm-1",
+        TaskStatus.DONE,
+        {"summary": "ok", "local_usage": {"latency_sec": 2.5, "gpu_time_sec": 2.0, "cpu_time_sec": 1.2, "ram_gb": 8.0}},
+        0.9,
+        [],
+        [],
+        provider="local",
+        model_name="qwen2.5:32b-instruct-q4_k_m",
+    )
+
+    module.after_task(task, result, context)
+
+    assert module.history[-1]["provider"] == "local"
+    assert module.history[-1]["estimated_cost_usd"] > 0
+    assert module.history[-1]["cost_components"]["latency_sec"] == 2.5

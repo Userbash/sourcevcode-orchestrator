@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .models import AgentKPI, AgentRecord, Task, TaskType
+from .model_value import compute_model_value
 
 
 class KPIEvaluator:
@@ -16,9 +17,21 @@ class KPIEvaluator:
         total = agent.metrics.completed_tasks + agent.metrics.failed_tasks
         stability = 1.0 - agent.metrics.error_rate
         reuse = min(1.0, total / 10) if total else 0.0
-        cost_efficiency = max(0.0, min(1.0, 1.0 / (1.0 + agent.metrics.estimated_cost)))
-        delivery = max(0.0, min(1.0, 1000.0 / (1000.0 + agent.metrics.avg_latency_ms)))
-        aggregate = (delivery + agent.metrics.quality_score + stability + cost_efficiency + reuse + agent.metrics.test_pass_rate + agent.metrics.review_score) / 7.0
+        memory_efficiency = float(getattr(agent.metrics, "memory_efficiency", reuse) or reuse)
+        quality_blend = max(0.0, min(1.0, (agent.metrics.quality_score + agent.metrics.review_score + agent.metrics.test_pass_rate) / 3.0))
+        value = compute_model_value(
+            success_rate=agent.metrics.success_rate,
+            quality_score=quality_blend,
+            latency_ms=agent.metrics.avg_latency_ms,
+            cost_usd=float(agent.metrics.estimated_cost or agent.metrics.token_cost or 0.0),
+            memory_efficiency=memory_efficiency,
+            availability=1.0 if str(agent.status.value if hasattr(agent.status, "value") else agent.status) in {"ready", "idle", "degraded"} else 0.3,
+            specialization=1.0,
+            context_fit=0.5,
+        )
+        cost_efficiency = float(value["components"]["cost_efficiency"])
+        delivery = float(value["components"]["latency_score"])
+        aggregate = float(value["value_score"])
         agent.kpi = AgentKPI(
             agent_id=agent.id,
             agent_kpi=aggregate,

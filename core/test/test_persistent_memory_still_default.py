@@ -165,8 +165,8 @@ def test_orchestrator_smoke_writes_task_lifecycle_kpi(tmp_path, monkeypatch):
         "model": "synthetic-smoke",
         "fallback_count": 0,
         "fallback_used": False,
-        "started_at": "2026-06-12T10:00:00+00:00",
-        "finished_at": "2026-06-12T10:00:01+00:00",
+        "started_at": "2026-06-14T10:00:00+00:00",
+        "finished_at": "2026-06-14T10:00:01+00:00",
         "latency_ms": 1000.0,
         "tokens_used": 1,
         "errors_count": 0,
@@ -185,7 +185,7 @@ def test_kpi_validation_detects_missing_task_telemetry(tmp_path):
     from core.core.kpi_validation import validate_kpi
 
     log = tmp_path / "kpi_events.jsonl"
-    log.write_text(json.dumps({"type": "postgres_watchdog", "logged_at": "2026-06-12T10:00:00+00:00"}) + "\n", encoding="utf-8")
+    log.write_text(json.dumps({"type": "postgres_watchdog", "logged_at": "2026-06-14T10:00:00+00:00"}) + "\n", encoding="utf-8")
     report = validate_kpi(kpi_log_path=log, fallback_path=tmp_path / "task_lifecycle_fallback.jsonl", days=2)
 
     assert report["task_lifecycle_events"] == 0
@@ -209,3 +209,35 @@ def test_file_backed_trained_memory_roundtrip(tmp_path, monkeypatch):
     assert listed and listed[0].memory_domain == "prompt:code"
     retrieved = manager.retrieve_trained_memories(session_id="s1", agent_id="a1", memory_domain="prompt:code", top_k=1)
     assert retrieved and retrieved[0].quality_score == 0.91
+
+
+
+def test_kpi_event_logger_preserves_cost_components(tmp_path):
+    import json
+    from core.core.kpi_event_logger import KPIEventLogger
+
+    logger = KPIEventLogger(file_path=tmp_path / "kpi_events.jsonl", summary_path=tmp_path / "kpi_summary.json")
+    payload = {
+        "event_type": "task_lifecycle",
+        "task_id": "cost-1",
+        "task_type": "docs",
+        "priority": "normal",
+        "status": "done",
+        "agent_id": "local-llm-1",
+        "provider": "local",
+        "model": "qwen2.5:32b-instruct-q4_k_m",
+        "fallback_count": 0,
+        "fallback_used": False,
+        "started_at": "2026-06-14T10:00:00+00:00",
+        "finished_at": "2026-06-14T10:00:02+00:00",
+        "latency_ms": 2000.0,
+        "tokens_used": 320,
+        "estimated_cost_usd": 0.0042,
+        "cost_components": {"energy_usd": 0.0004, "amortized_hardware_usd": 0.0021},
+        "errors_count": 0,
+    }
+    logger.write(payload)
+
+    row = json.loads((tmp_path / "kpi_events.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["estimated_cost_usd"] == 0.0042
+    assert row["cost_components"]["amortized_hardware_usd"] == 0.0021

@@ -122,3 +122,18 @@ def test_repo_ops_capability_routes_to_orchestrator_without_dedicated_agent():
 
     assert accepted.status.value == "accepted"
     assert accepted.assigned_agent == "orchestrator"
+
+
+def test_router_prefers_non_openai_agents_when_reusable_memory_is_strong():
+    registry = AgentRegistry()
+    registry.register("openai-code", "codex", "local://openai", ["code"], provider="openai")
+    registry.register("local-code", "codex", "local://local", ["code"], provider="local")
+    router = TaskRouter(registry, LoadBalancer())
+    task = Task(TaskType.CODE, TaskInput("Refactor login parser", files=["auth.py"]), TaskContext("p", ".", "main"))
+    task.required_capability = "code"
+    task.routing_hints = {"memory_reuse": {"matched": True, "similarity": 0.91}}
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "local-code"
