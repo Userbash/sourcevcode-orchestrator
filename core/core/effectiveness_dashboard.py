@@ -96,6 +96,26 @@ def _summarize_rejection(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _summarize_delivery(rows: list[dict[str, Any]], delivery_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    snapshot = dict(delivery_snapshot or {})
+    events = [r for r in rows if str(r.get("event_type") or "").startswith("delivery.")]
+    accepted = sum(1 for r in events if r.get("event_type") == "delivery.accepted")
+    failed = sum(1 for r in events if r.get("event_type") in {"delivery.failed", "delivery.dead_letter"})
+    total_terminal = accepted + failed
+    return {
+        "tracked": int(snapshot.get("tracked", 0) or 0),
+        "backlog": int(snapshot.get("pending", 0) or 0),
+        "accepted_live": int(snapshot.get("accepted", 0) or 0),
+        "failed_live": int(snapshot.get("failed", 0) or 0),
+        "max_lag_sec": float(snapshot.get("max_lag_sec", 0.0) or 0.0),
+        "queue_by_agent": snapshot.get("by_agent", {}),
+        "events_last_24h": len(events),
+        "retried_last_24h": sum(1 for r in events if r.get("event_type") == "delivery.retry"),
+        "dead_lettered_last_24h": sum(1 for r in events if r.get("event_type") == "delivery.dead_letter"),
+        "acceptance_rate": round(accepted / total_terminal, 4) if total_terminal else 0.0,
+    }
+
+
 def _summarize_models(store_path: Path) -> dict[str, Any]:
     if not store_path.exists():
         return {"models": []}
@@ -141,7 +161,7 @@ def _recovery_checklist() -> list[str]:
         "Verify Python environment and project root are available.",
         "Ensure memory_store is writable and KPI files can be created.",
         "Start the orchestrator with the local module registry loaded.",
-        "Load model_usage, ai_activity, orchestrator_control, api_bridge, prompt_optimizer, and smart_decomposer first.",
+        "Load model_usage, ai_activity, orchestrator_control, prompt_optimizer, and smart_decomposer first.",
         "Enable local_llm only after readiness checks pass.",
         "Confirm task_lifecycle and KPI dashboard files are being written.",
         "Run a smoke task in plan/review/test to validate routing and model availability.",
@@ -150,10 +170,9 @@ def _recovery_checklist() -> list[str]:
 
 def _module_inventory() -> dict[str, Any]:
     loadable = [
-        "ai_activity", "orchestrator_control", "model_usage", "model_availability", "antigravity_status", "api_bridge",
-        "smart_decomposer", "prompt_optimizer", "chat_bus", "trigger_dispatcher", "json_themes", "unified_vfs",
-        "cold_boot", "ui_design_system", "ui_anti_template", "frontend_engineering_bridge", "autodev_pipeline",
-        "tdd_policy", "qwen_code", "readability_policy", "dev_toolkit", "self_diagnostic", "local_llm",
+        "ai_activity", "orchestrator_control", "model_usage", "model_availability", "antigravity_status",
+        "smart_decomposer", "prompt_optimizer", "chat_bus", "trigger_dispatcher", "unified_vfs",
+        "cold_boot", "tdd_policy", "qwen_code", "readability_policy", "dev_toolkit", "self_diagnostic", "local_llm",
         "sourcecraft", "voice_listener", "reasoning", "risk_advisor", "orchestrator_advisor", "intelligence",
         "security_sentinel",
     ]
@@ -162,7 +181,7 @@ def _module_inventory() -> dict[str, Any]:
             "install dependencies",
             "configure memory_store and logs",
             "start orchestrator",
-            "load ai_activity / model_usage / api_bridge / prompt_optimizer",
+            "load ai_activity / model_usage / prompt_optimizer",
             "load local_llm only if available",
         ],
         "core_modules": loadable,
@@ -170,7 +189,7 @@ def _module_inventory() -> dict[str, Any]:
     return {"loadable_modules": loadable, "recovery_playbook": recovery}
 
 
-def build_kpi_dashboard(*, kpi_log_path: Path, rolling_kpi_path: Path, summary_path: Path | None = None) -> dict[str, Any]:
+def build_kpi_dashboard(*, kpi_log_path: Path, rolling_kpi_path: Path, summary_path: Path | None = None, delivery_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     now = datetime.now(UTC)
     cutoff_24h = now - timedelta(hours=24)
     rows = [r for r in _read_jsonl(kpi_log_path) if (ts := _parse_ts(r.get("started_at") or r.get("logged_at"))) and ts >= cutoff_24h]
@@ -182,6 +201,7 @@ def build_kpi_dashboard(*, kpi_log_path: Path, rolling_kpi_path: Path, summary_p
         "kpi_events": {"path": str(kpi_log_path), "total": len(rows), "types": event_types.most_common(20)},
         "task_lifecycle": _summarize_task_events(rows),
         "trained_memory_rejection": _summarize_rejection(rows),
+        "delivery": _summarize_delivery(rows, delivery_snapshot),
         "rolling_models": _summarize_models(rolling_kpi_path),
         "module_inventory": _module_inventory(),
         "recovery_checklist": _recovery_checklist(),

@@ -8,6 +8,7 @@ import base64
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -116,19 +117,6 @@ def ensure_storage_schema(database_url: str) -> bool:
         )
         """,
         f"""
-        CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.json_themes (
-            theme_event_id BIGSERIAL PRIMARY KEY,
-            task_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            agent_id TEXT,
-            provider TEXT,
-            color TEXT,
-            status TEXT,
-            event_payload JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-        f"""
         CREATE TABLE IF NOT EXISTS {AI_BRIDGE_SCHEMA}.users (
             user_id SERIAL PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
@@ -190,7 +178,6 @@ def ensure_storage_schema(database_url: str) -> bool:
         f"CREATE INDEX IF NOT EXISTS idx_core_memories_session_lookup ON {AI_BRIDGE_SCHEMA}.memories (session_id, agent_id, memory_type, memory_id DESC)",
         f"CREATE INDEX IF NOT EXISTS idx_core_memories_importance ON {AI_BRIDGE_SCHEMA}.memories (importance_score DESC)",
         f"CREATE INDEX IF NOT EXISTS idx_core_commands_session_agent ON {AI_BRIDGE_SCHEMA}.commands (session_id, agent_id, executed_at DESC)",
-        f"CREATE INDEX IF NOT EXISTS idx_core_themes_session_ts ON {AI_BRIDGE_SCHEMA}.json_themes (session_id, created_at DESC)",
         f"CREATE INDEX IF NOT EXISTS idx_vfs_path_lookup ON {AI_BRIDGE_SCHEMA}.vfs_files (file_path)",
         f"CREATE INDEX IF NOT EXISTS idx_users_username_idx ON {AI_BRIDGE_SCHEMA}.users (username)",
         f"CREATE INDEX IF NOT EXISTS idx_trained_memories_session_domain ON {AI_BRIDGE_SCHEMA}.trained_memories (session_id, agent_id, memory_domain, trained_memory_id DESC)",
@@ -256,8 +243,27 @@ class PersistentMemoryManager:
         for row in self._trained_records:
             self._max_trained_memory_id = max(self._max_trained_memory_id, int(row.get("trained_memory_id", 0)))
 
+        self._event_publisher: Callable[[str, dict[str, Any]], None] | None = None
         mode = "etcd" if self._etcd_enabled else ("PostgreSQL" if self._pg_enabled else "file")
         logger.info("[MEMORY] Operating in %s mode.", mode)
+
+    def set_event_publisher(self, publisher: Callable[[str, dict[str, Any]], None] | None) -> None:
+        self._event_publisher = publisher
+
+    def _storage_mode(self) -> str:
+        if self._etcd_enabled:
+            return "etcd"
+        if self._pg_enabled:
+            return "postgresql"
+        return "file"
+
+    def _emit_event(self, topic: str, payload: dict[str, Any]) -> None:
+        if self._event_publisher is None:
+            return
+        try:
+            self._event_publisher(topic, payload)
+        except Exception as exc:
+            logger.warning("[MEMORY] event publish failed for %s: %s", topic, exc)
 
     def _connect(self):
         import psycopg2  # type: ignore
@@ -354,6 +360,17 @@ class PersistentMemoryManager:
             key_val = str((metadata or {}).get("key", "")).strip()
             if key_val:
                 self._etcd_put_json(self._memory_key_lookup_key(normalized_session_id, agent_id, memory_type, key_val), record)
+            self._emit_event("memory.events", {
+                "event_type": "memory.stored",
+                "session_id": session_id,
+                "normalized_session_id": normalized_session_id,
+                "agent_id": agent_id,
+                "memory_id": memory_id,
+                "memory_type": memory_type,
+                "importance_score": importance_score,
+                "metadata": dict(metadata),
+                "storage_mode": self._storage_mode(),
+            })
             return memory_id
 
         if self._pg_enabled:
@@ -373,7 +390,19 @@ class PersistentMemoryManager:
                         (normalized_session_id, session_id, agent_id, memory_type, Json(content), Json(metadata), importance_score),
                     )
                     row = cur.fetchone()
-                    return int(row[0])
+                    memory_id = int(row[0])
+                    self._emit_event("memory.events", {
+                        "event_type": "memory.stored",
+                        "session_id": session_id,
+                        "normalized_session_id": normalized_session_id,
+                        "agent_id": agent_id,
+                        "memory_id": memory_id,
+                        "memory_type": memory_type,
+                        "importance_score": importance_score,
+                        "metadata": dict(metadata),
+                        "storage_mode": self._storage_mode(),
+                    })
+                    return memory_id
 
         now_iso = datetime.now(UTC).isoformat()
         memory_id = self._max_memory_id + 1
@@ -405,6 +434,17 @@ class PersistentMemoryManager:
                 "created_at": now_iso,
             },
         )
+        self._emit_event("memory.events", {
+            "event_type": "memory.stored",
+            "session_id": session_id,
+            "normalized_session_id": normalized_session_id,
+            "agent_id": agent_id,
+            "memory_id": memory_id,
+            "memory_type": memory_type,
+            "importance_score": importance_score,
+            "metadata": dict(metadata),
+            "storage_mode": self._storage_mode(),
+        })
         return memory_id
 
     def retrieve_memories(self, *, session_id: str, agent_id: str, memory_type: str, top_k: int = 8) -> list[MemoryRecord]:
@@ -503,6 +543,16 @@ class PersistentMemoryManager:
                         """,
                         (normalized_session_id, session_id, agent_id, command, Json(result), bool(success), kwargs.get("tokens_used")),
                     )
+            self._emit_event("memory.events", {
+                "event_type": "memory.command.remembered",
+                "session_id": session_id,
+                "normalized_session_id": normalized_session_id,
+                "agent_id": agent_id,
+                "command": command,
+                "success": bool(success),
+                "tokens_used": kwargs.get("tokens_used"),
+                "storage_mode": self._storage_mode(),
+            })
             return
 
         self._write_json(
@@ -518,6 +568,16 @@ class PersistentMemoryManager:
                 "executed_at": datetime.now(UTC).isoformat(),
             },
         )
+        self._emit_event("memory.events", {
+            "event_type": "memory.command.remembered",
+            "session_id": session_id,
+            "normalized_session_id": normalized_session_id,
+            "agent_id": agent_id,
+            "command": command,
+            "success": bool(success),
+            "tokens_used": kwargs.get("tokens_used"),
+            "storage_mode": self._storage_mode(),
+        })
 
     def list_recent_commands(self, *, session_id: str, agent_id: str, limit: int = 12) -> list[dict[str, Any]]:
         normalized_session_id = self.upsert_session(session_id, agent_id=agent_id)
@@ -611,7 +671,20 @@ class PersistentMemoryManager:
                         ),
                     )
                     row = cur.fetchone()
-                    return int(row[0])
+                    trained_memory_id = int(row[0])
+                    self._emit_event("memory.trained.events", {
+                        "event_type": "memory.trained.stored",
+                        "session_id": session_id,
+                        "normalized_session_id": normalized_session_id,
+                        "agent_id": agent_id,
+                        "trained_memory_id": trained_memory_id,
+                        "memory_domain": memory_domain,
+                        "source_memory_ids": list(source_memory_ids or []),
+                        "quality_score": quality_score,
+                        "metadata": dict(metadata),
+                        "storage_mode": self._storage_mode(),
+                    })
+                    return trained_memory_id
 
         self._max_trained_memory_id += 1
         now_iso = datetime.now(UTC).isoformat()
@@ -630,6 +703,18 @@ class PersistentMemoryManager:
         }
         self._trained_records.append(record)
         self._write_json(self.trained_index_file, self._trained_records)
+        self._emit_event("memory.trained.events", {
+            "event_type": "memory.trained.stored",
+            "session_id": session_id,
+            "normalized_session_id": normalized_session_id,
+            "agent_id": agent_id,
+            "trained_memory_id": self._max_trained_memory_id,
+            "memory_domain": memory_domain,
+            "source_memory_ids": list(source_memory_ids or []),
+            "quality_score": quality_score,
+            "metadata": dict(metadata),
+            "storage_mode": self._storage_mode(),
+        })
         return self._max_trained_memory_id
 
     def retrieve_trained_memories(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int = 8) -> list[TrainedMemoryRecord]:

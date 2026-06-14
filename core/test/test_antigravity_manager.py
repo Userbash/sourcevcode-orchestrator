@@ -154,3 +154,232 @@ def test_antigravity_status_module_finalize_exposes_state(monkeypatch):
     state = module.finalize()
     assert state["snapshot"]["ready"] is True
     assert state["snapshot"]["models"] == ["model-a"]
+
+
+
+def test_antigravity_manager_skips_relogin_for_recent_cached_session_on_transient_failure(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.record_success(models=["model-a"], auth_mode="agy_oauth")
+
+    monkeypatch.setattr(
+        manager,
+        "verify_auth",
+        lambda: {
+            "ok": False,
+            "ready": False,
+            "auth_marker_present": True,
+            "failure_kind": "transient",
+            "stderr": "connection timed out",
+        },
+    )
+
+    login_calls = {"count": 0}
+
+    def fake_login(args, timeout=None):
+        login_calls["count"] += 1
+        return {"ok": False, "stderr": "should_not_run"}
+
+    monkeypatch.setattr(manager, "_run_login_helper", fake_login)
+
+    result = manager.ensure_authorized()
+
+    assert result["ok"] is False
+    assert result["login_suppressed"] is True
+    assert result["suppression_reason"] == "cached_session_recently_verified"
+    assert login_calls["count"] == 0
+
+
+
+def test_antigravity_manager_status_avoids_login_loop_when_transient_failure_and_session_present(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.record_success(models=["model-a"], auth_mode="agy_oauth")
+
+    monkeypatch.setattr(manager, "probe_api_key_models", lambda: {"ok": False, "models": [], "error": "missing_api_key", "auth_mode": "api_key"})
+
+    def fake_run_agy(args, timeout=None):
+        if args == ["models"]:
+            return {"ok": False, "stdout": "", "stderr": "connection timed out"}
+        return {"ok": False, "stdout": "", "stderr": "connection timed out"}
+
+    monkeypatch.setattr(manager, "_run_agy", fake_run_agy)
+    monkeypatch.setattr(
+        manager,
+        "verify_auth",
+        lambda: {
+            "ok": False,
+            "ready": False,
+            "auth_marker_present": True,
+            "failure_kind": "transient",
+            "stderr": "connection timed out",
+        },
+    )
+    monkeypatch.setattr(manager, "ensure_authorized", lambda: {"ok": False, "unexpected": True})
+
+    result = manager.status()
+
+    assert result["ready"] is False
+    assert result["auth_probe"]["failure_kind"] == "transient"
+    assert result["auth_probe"]["login_suppressed"] is True
+    assert result["auth_probe"]["suppression_reason"] == "cached_session_recently_verified"
+
+
+
+def test_antigravity_manager_persists_session_state_after_confirmed_login(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+
+    calls = {"verify": 0, "login": 0, "models": 0, "probe": 0}
+
+    def fake_run_login(args, timeout=None):
+        if "--verify" in args:
+            calls["verify"] += 1
+            return {"ok": False, "stderr": "authentication required", "failure_kind": "auth_required", "auth_marker_present": False}
+        if "--login" in args:
+            calls["login"] += 1
+            return {"ok": True, "stdout": "login complete", "stderr": ""}
+        return {"ok": False}
+
+    def fake_run_agy(args, timeout=None):
+        if args == ["models"]:
+            calls["models"] += 1
+            if calls["models"] == 1:
+                return {"ok": False, "stdout": "", "stderr": "authentication required"}
+            return {"ok": True, "stdout": "model-a\nmodel-b\n", "stderr": ""}
+        if args and args[0] == "-p":
+            calls["probe"] += 1
+            return {"ok": True, "stdout": "ok", "stderr": ""}
+        return {"ok": False}
+
+    monkeypatch.setattr(manager, "verify_auth", lambda: {"ok": False, "stderr": "authentication required", "failure_kind": "auth_required", "auth_marker_present": False})
+    monkeypatch.setattr(manager, "_run_login_helper", fake_run_login)
+    monkeypatch.setattr(manager, "_run_agy", fake_run_agy)
+
+    result = manager.ensure_authorized()
+    stored = manager.session_store.load()
+
+    assert result["ok"] is True
+    assert stored["last_success_at"]
+    assert stored["auth_mode"] == "agy_oauth"
+    assert stored["models"] == ["model-a", "model-b"]
+    assert stored["login_failures"] == 0
+
+
+
+def test_antigravity_manager_respects_login_failure_cooldown(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.record_login_failure("authentication required")
+
+    monkeypatch.setattr(
+        manager,
+        "verify_auth",
+        lambda: {
+            "ok": False,
+            "ready": False,
+            "auth_marker_present": False,
+            "failure_kind": "auth_required",
+            "stderr": "authentication required",
+        },
+    )
+
+    login_calls = {"count": 0}
+
+    def fake_login(args, timeout=None):
+        login_calls["count"] += 1
+        return {"ok": False, "stderr": "should_not_run"}
+
+    monkeypatch.setattr(manager, "_run_login_helper", fake_login)
+
+    result = manager.ensure_authorized()
+
+    assert result["ok"] is False
+    assert result["login_suppressed"] is True
+    assert result["suppression_reason"] == "login_failure_cooldown"
+    assert login_calls["count"] == 0
+
+
+
+def test_antigravity_manager_exposes_clear_session_control_summary(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+    manager.session_store.record_success(models=["model-a"], auth_mode="agy_oauth")
+
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda: {
+            "ready": False,
+            "models": ["model-a"],
+            "auth_mode": "agy_oauth",
+            "models_probe": {"ok": False, "stderr": "connection timed out"},
+            "generation_probe": {"ok": False, "stderr": "connection timed out"},
+            "auth_probe": {
+                "ok": False,
+                "failure_kind": "transient",
+                "login_suppressed": True,
+                "suppression_reason": "cached_session_recently_verified",
+            },
+            "api_probe": {},
+        },
+    )
+
+    summary = manager.session_control_status()
+
+    assert summary["controller"] == "AntigravityManager"
+    assert summary["user_action_required"] is False
+    assert summary["session_state"] == "degraded_transient"
+    assert summary["responsibility"]["runtime_watchdog"] == "AntigravityStatusModule"
+    assert summary["message_for_user"]
+    assert summary["message_for_orchestrator"]
+
+
+
+def test_antigravity_status_module_snapshot_includes_session_control_guidance(monkeypatch):
+    from core.core.antigravity_status_module import AntigravityStatusModule
+
+    class _Manager:
+        def status(self):
+            return {
+                "ready": False,
+                "models": ["model-a"],
+                "models_probe": {"ok": False, "stderr": "authentication required"},
+                "generation_probe": {"ok": False, "stderr": "authentication required"},
+                "auth_probe": {"ok": False, "failure_kind": "auth_required"},
+                "api_probe": {},
+                "auth_mode": "agy_oauth",
+            }
+
+        def ensure_authorized(self):
+            return {"ok": False, "failure_kind": "auth_required"}
+
+        def session_control_status(self):
+            return {
+                "controller": "AntigravityManager",
+                "runtime_owner": "orchestrator",
+                "user_action_required": True,
+                "session_state": "auth_required",
+                "message_for_user": "Need one interactive login.",
+                "message_for_orchestrator": "Pause auto relogin spam and request single user login.",
+                "responsibility": {
+                    "interactive_login": "user",
+                    "session_validation": "AntigravityManager",
+                    "runtime_watchdog": "AntigravityStatusModule",
+                    "relogin_policy": "AntigravityManager",
+                },
+            }
+
+    module = AntigravityStatusModule()
+    monkeypatch.setattr(AntigravityStatusModule, "_manager", lambda self: _Manager())
+    snap = module.refresh(force=False)
+
+    assert snap["session_control"]["controller"] == "AntigravityManager"
+    assert snap["session_control"]["user_action_required"] is True
+    assert snap["session_control"]["responsibility"]["interactive_login"] == "user"
+    assert snap["session_control"]["message_for_orchestrator"]

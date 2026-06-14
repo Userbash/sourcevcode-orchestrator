@@ -30,7 +30,6 @@ class DependencyAuditCheck:
         issues: list[SecurityIssue] = []
         targets = [
             self.repo_root / "backend",
-            self.repo_root / "frontend-react",
         ]
 
         for target in targets:

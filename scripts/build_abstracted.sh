@@ -5,10 +5,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRIDGE_CMD="$PROJECT_ROOT/core/scripts/bridge/exec.sh"
 
 BACKEND_DIR="$PROJECT_ROOT/backend"
-FRONTEND_DIR="$PROJECT_ROOT/frontend-react"
 ORCHESTRATOR_DIR="$PROJECT_ROOT/core"
 BACKEND_IMAGE="localhost/hebrew-backend:latest"
-FRONTEND_IMAGE="localhost/hebrew-frontend:latest"
 ORCHESTRATOR_IMAGE="localhost/hebrew-orchestrator:latest"
 
 echo "Attempting to build project using BridgeOS..."
@@ -29,11 +27,6 @@ if [[ ! -f "$BACKEND_DIR/server.ts" || ! -f "$BACKEND_DIR/package.json" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$FRONTEND_DIR/Dockerfile" ]]; then
-  echo "[ERROR] Frontend Dockerfile not found: $FRONTEND_DIR/Dockerfile"
-  exit 1
-fi
-
 if [[ ! -f "$ORCHESTRATOR_DIR/Dockerfile" ]]; then
   echo "[ERROR] Orchestrator Dockerfile not found: $ORCHESTRATOR_DIR/Dockerfile"
   exit 1
@@ -46,9 +39,6 @@ fi
 
 echo "Building Backend image: $BACKEND_IMAGE"
 "$BRIDGE_CMD" podman build --no-cache --format docker -t "$BACKEND_IMAGE" -f "$BACKEND_DIR/Dockerfile" "$PROJECT_ROOT"
-
-echo "Building Frontend image: $FRONTEND_IMAGE"
-"$BRIDGE_CMD" podman build --no-cache --format docker -t "$FRONTEND_IMAGE" -f "$FRONTEND_DIR/Dockerfile" "$FRONTEND_DIR"
 
 echo "Building Orchestrator image: $ORCHESTRATOR_IMAGE"
 "$BRIDGE_CMD" podman build --no-cache --format docker -t "$ORCHESTRATOR_IMAGE" -f "$ORCHESTRATOR_DIR/Dockerfile" "$PROJECT_ROOT"

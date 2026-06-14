@@ -24,8 +24,6 @@ from core.agents.antigravity_cli_agent import AntigravityCLIAgent
 from core.agents.mistral_agent import MistralAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.agents.frontend_dev_agent import FrontendDevAgent
-from core.agents.frontend_design_agent import FrontendDesignAgent
 from core.agents.local_llm_agent import LocalLLMAgent
 from core.core.orchestration_config import OrchestrationConfig
 from core.core.security import SecurityManager, SecurityPolicy
@@ -68,8 +66,6 @@ async def main():
     orchestrator.attach_local_agent("mistral-1", MistralAgent("mistral-1", security_manager), agent_type="custom", critical=False, model_name="mistral-large-latest", provider="mistral")
     orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="custom", model_name="gpt-test-standard", provider="openai")
     orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="custom", model_name="gpt-review-large", provider="openai")
-    orchestrator.attach_local_agent("frontend-dev-1", FrontendDevAgent("frontend-dev-1"), agent_type="custom", model_name=codex_model, provider=codex_provider)
-    orchestrator.attach_local_agent("frontend-design-1", FrontendDesignAgent("frontend-design-1"), agent_type="custom", model_name="design-spec", provider="local")
     orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")), agent_type="custom", critical=False, model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"), provider="local")
 
     logger.info(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")

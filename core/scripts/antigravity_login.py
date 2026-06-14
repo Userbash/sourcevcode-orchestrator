@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pty
 import re
@@ -10,12 +11,15 @@ import subprocess
 import sys
 import time
 import webbrowser
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from core.core.integrations.antigravity_session_store import AntigravitySessionStore
 
 AGY_STATE_DIR = Path.home() / ".gemini" / "antigravity-cli"
 LEGACY_STATE_DIR = Path.home() / ".antigravity" / "antigravity-cli"
@@ -24,25 +28,59 @@ CODE_RE = re.compile(r"\b[A-Z0-9]{6,}\b")
 AUTH_PROMPT = "Start Antigravity account authorization. If OAuth is required, show the browser verification URL and wait for the console code."
 
 
+def _store() -> AntigravitySessionStore:
+    return AntigravitySessionStore(state_dir=AGY_STATE_DIR, legacy_state_dir=LEGACY_STATE_DIR)
+
+
 def _state_markers() -> list[Path]:
-    return [
-        AGY_STATE_DIR / "installation_id",
-        AGY_STATE_DIR / "conversations",
-        AGY_STATE_DIR / "cache",
-        LEGACY_STATE_DIR / "settings.json",
-    ]
+    return _store().auth_marker_paths()
 
 
 def has_auth_marker() -> bool:
-    return any(path.exists() for path in _state_markers())
-
-
-def _model_probe_ready() -> bool:
-    return _run_capture(["agy", "models"], timeout=60).returncode == 0
+    return _store().auth_marker_present()
 
 
 def _run_capture(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
+
+
+def _classify_failure_text(raw: str) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return "unknown"
+    if "not found" in text or "no such file" in text:
+        return "cli_missing"
+    if any(marker in text for marker in ["authentication required", "please sign in", "authorization code", "paste the authorization code", "unauthorized", "forbidden", "error: authentication", "error: please sign in"]):
+        return "auth_required"
+    if any(marker in text for marker in ["timed out", "timeout", "connection reset", "temporarily unavailable", "network", "dns", "econn", "refused", "unreachable"]):
+        return "transient"
+    return "unknown"
+
+
+def _probe_models(timeout: int = 60) -> dict[str, Any]:
+    proc = _run_capture(["agy", "models"], timeout=timeout)
+    models = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    error_text = str(proc.stderr or proc.stdout or "")
+    return {
+        "ok": proc.returncode == 0,
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+        "exit_code": proc.returncode,
+        "models": models,
+        "failure_kind": "" if proc.returncode == 0 else _classify_failure_text(error_text),
+    }
+
+
+def _probe_generation(timeout: int = 90) -> dict[str, Any]:
+    proc = _run_capture(["agy", "-p", "healthcheck: reply with ok", "--print-timeout", "60s"], timeout=timeout)
+    error_text = str(proc.stderr or proc.stdout or "")
+    return {
+        "ok": proc.returncode == 0,
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+        "exit_code": proc.returncode,
+        "failure_kind": "" if proc.returncode == 0 else _classify_failure_text(error_text),
+    }
 
 
 def _print_models() -> int:
@@ -63,8 +101,42 @@ def _verify_generation() -> bool:
     return proc.returncode == 0
 
 
+def _build_report() -> dict[str, Any]:
+    models = _probe_models()
+    generation = _probe_generation() if models.get("ok") else {"ok": False, "skipped": True, "stdout": "", "stderr": "models_probe_failed", "exit_code": 1, "failure_kind": models.get("failure_kind", "unknown")}
+    ready = bool(models.get("ok") and generation.get("ok"))
+    failure_kind = ""
+    if not ready:
+        failure_kind = str(generation.get("failure_kind") or models.get("failure_kind") or "unknown")
+    report = {
+        "ok": ready,
+        "ready": ready,
+        "auth_mode": "agy_oauth",
+        "state_dir": str(AGY_STATE_DIR),
+        "legacy_state_dir": str(LEGACY_STATE_DIR),
+        "auth_marker_present": has_auth_marker(),
+        "marker_paths": [str(path) for path in _state_markers()],
+        "models": models.get("models", []),
+        "models_probe": models,
+        "generation_probe": generation,
+        "failure_kind": failure_kind,
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "session_store": _store().snapshot(),
+    }
+    if ready:
+        _store().record_success(models=list(report["models"]), auth_mode="agy_oauth")
+    else:
+        _store().record_failure(
+            str(generation.get("stderr") or models.get("stderr") or generation.get("stdout") or models.get("stdout") or "antigravity_not_ready"),
+            failure_kind=failure_kind or "unknown",
+        )
+    report["session_store"] = _store().snapshot()
+    return report
+
+
 def is_ready() -> bool:
-    return _model_probe_ready() and _verify_generation()
+    report = _build_report()
+    return bool(report.get("ready"))
 
 
 def _open_browser(url: str) -> bool:
@@ -126,7 +198,8 @@ def _interactive_pty(cmd: list[str], timeout_sec: int) -> int:
         now = time.time()
         if now - ready_checked_at > 10:
             ready_checked_at = now
-            if (_model_probe_ready() or has_auth_marker()) and _verify_generation():
+            report = _build_report()
+            if report.get("ready"):
                 print()
                 print(f"[antigravity-login] Antigravity state detected: {AGY_STATE_DIR}")
                 return 0
@@ -177,10 +250,12 @@ def login_interactive(wait_timeout_sec: int = 600, force: bool = False) -> int:
     print("If Antigravity asks for a code, paste it in this console and press Enter.")
     print(f"State directory: {AGY_STATE_DIR}")
 
-    if not force and is_ready():
-        print("Antigravity is already authorized and ready; browser login is not required.")
-        _print_models()
-        return 0
+    if not force:
+        report = _build_report()
+        if report.get("ready"):
+            print("Antigravity is already authorized and ready; browser login is not required.")
+            _print_models()
+            return 0
 
     log_file = _login_log_path()
     print(f"Log file: {log_file}")
@@ -189,15 +264,12 @@ def login_interactive(wait_timeout_sec: int = 600, force: bool = False) -> int:
 
     print()
     print("Checking Antigravity readiness...")
-    models_status = _print_models()
-    generation_ok = _verify_generation()
-    if models_status == 0 and generation_ok:
+    report = _build_report()
+    if report.get("ready"):
+        _store().record_success(models=list(report.get("models") or []), auth_mode="agy_oauth")
         print("Antigravity is authorized and ready.")
         return 0
-
-    if has_auth_marker() and _model_probe_ready() and generation_ok:
-        print("Antigravity is authorized and ready.")
-        return 0
+    _store().record_login_failure(str(report.get("generation_probe", {}).get("stderr") or report.get("models_probe", {}).get("stderr") or "authorization_not_confirmed"), failure_kind=str(report.get("failure_kind") or "unknown"))
     print(f"Antigravity authorization was not confirmed. Check log: {log_file}", file=sys.stderr)
     return status or 1
 
@@ -209,6 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-login", action="store_true", help="Start authorization flow even if agy already works")
     parser.add_argument("--models", action="store_true", help="Print available models")
     parser.add_argument("--verify", action="store_true", help="Run a small agy generation probe")
+    parser.add_argument("--json", action="store_true", help="Emit structured JSON output for automation")
     parser.add_argument("--timeout", type=int, default=600, help="Seconds to wait for auth during --login")
     return parser
 
@@ -221,17 +294,39 @@ def main(argv: list[str] | None = None) -> int:
         return login_interactive(wait_timeout_sec=max(30, args.timeout), force=args.force_login)
 
     if args.models:
+        if args.json:
+            report = _build_report()
+            print(json.dumps({"ok": report.get("models_probe", {}).get("ok", False), "models": report.get("models", []), "models_probe": report.get("models_probe", {}), "session_store": report.get("session_store", {})}, ensure_ascii=True))
+            return 0 if report.get("models_probe", {}).get("ok") else 1
         return _print_models()
 
     if args.verify:
-        return 0 if _verify_generation() else 1
+        report = _build_report()
+        if args.json:
+            print(json.dumps(report, ensure_ascii=True))
+        else:
+            models_probe = report.get("models_probe", {})
+            generation_probe = report.get("generation_probe", {})
+            if models_probe.get("stdout"):
+                print(str(models_probe.get("stdout")).rstrip())
+            if models_probe.get("stderr"):
+                print(str(models_probe.get("stderr")).rstrip(), file=sys.stderr)
+            if generation_probe.get("stdout"):
+                print(str(generation_probe.get("stdout")).rstrip())
+            if generation_probe.get("stderr"):
+                print(str(generation_probe.get("stderr")).rstrip(), file=sys.stderr)
+        return 0 if report.get("ready") else 1
 
     if args.check:
-        print(f"auth_marker_present={has_auth_marker()}")
-        print(f"state_dir={AGY_STATE_DIR}")
-        models_status = _print_models()
-        generation_ok = _verify_generation()
-        return 0 if models_status == 0 and generation_ok else 1
+        report = _build_report()
+        if args.json:
+            print(json.dumps(report, ensure_ascii=True))
+        else:
+            print(f"auth_marker_present={report.get('auth_marker_present')}")
+            print(f"state_dir={AGY_STATE_DIR}")
+            print(f"failure_kind={report.get('failure_kind')}")
+            print(f"models={len(report.get('models', []))}")
+        return 0 if report.get("ready") else 1
 
     parser.print_help()
     return 0

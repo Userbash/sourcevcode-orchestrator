@@ -7,6 +7,19 @@ The format follows Keep a Changelog principles and Semantic Versioning (`MAJOR.M
 ## [Unreleased]
 
 ### Added
+- Delivery supervision for local agent execution:
+  - tracked delivery records and handshake states
+  - payload checksum validation before execution
+  - retry and dead-letter handling on ACK timeout
+  - delivery telemetry in KPI snapshots and mailbox health views
+- Antigravity session persistence and recovery controls:
+  - local session state store with last-success and last-failure metadata
+  - login cooldown and recent-session grace windows
+  - explicit session-control status for user-facing and orchestrator-facing flows
+- Memory event publishing:
+  - `memory.events` for stored memories and remembered commands
+  - `memory.trained.events` for trained memory storage, outcomes, and rejections
+- Targeted regression coverage for delivery supervision, memory event emission, and Antigravity session handling
 - Documentation governance baseline:
   - architecture map (`docs/ARCHITECTURE.md`)
   - API documentation structure (`docs/API/*`)
@@ -23,9 +36,23 @@ The format follows Keep a Changelog principles and Semantic Versioning (`MAJOR.M
   - API route documentation coverage validation
 
 ### Changed
+- Simplified the orchestrator module set by removing legacy frontend, UI-theme, websocket, API bridge, and auto-dev pipeline paths from the active runtime.
+- Routed local agent execution through delivery envelopes and mailbox handshakes instead of direct `agent.run(...)` calls.
+- Wired session memory and persistent memory to the message bus so memory activity can be observed externally.
+- Switched `docker-compose.ai.yml` to an explicit RabbitMQ-backed message bus configuration and added a RabbitMQ healthcheck dependency.
+- Trimmed repository documentation to the backend, orchestrator, and infrastructure layers that still exist in this repository.
 - Expanded root `README.md` with a documentation index and governance workflow.
 - Added root npm scripts for docs verification and route-doc synchronization checks.
 - Added pull request template with mandatory risk, migration, rollback, and traceability sections.
+
+### Removed
+- Legacy frontend-specific agents and worker scaffolding that are no longer part of the supported release path.
+- Deprecated modules and tests for frontend generation, websocket protocol variants, JSON theme storage, API bridge, image orchestration, and related one-shot task normalization.
+
+### Fixed
+- Antigravity authorization recovery now distinguishes auth failures from transient runtime faults and avoids repeated relogin loops.
+- KPI summaries now include delivery backlog, retries, dead letters, and live queue health by agent.
+- Data-plane and storage schema handling no longer reference removed `json_themes` structures.
 
 ## [2.0.0] - 2026-05-24
 

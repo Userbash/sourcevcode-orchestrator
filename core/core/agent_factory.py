@@ -3,9 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from ..agents.frontend_subagents import DesignAgent, FrontendComponentAgent, UXValidatorAgent
-from ..agents.qt_dev_box_agent import QtDevBoxAgent
-
 from .agent_autoscaler import AgentAutoscaler
 from .agent_lifecycle import AgentLifecycleManager
 from .agent_registry import AgentRegistry
@@ -66,16 +63,14 @@ class AgentFactory:
     @staticmethod
     def build(*, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900) -> OrchestratorComponents:
         reg = registry or AgentRegistry()
-        reg.register("design_agent", "custom", "internal", ["design_conceptualization", "style_guide_generation", "ux_strategy"])
-        reg.register("frontend_component_agent", "custom", "internal", ["react_component_development", "tailwind_styling", "semantic_html"])
-        reg.register("ux_validator_agent", "custom", "internal", ["ux_heuristics_audit", "accessibility_audit", "usability_testing"])
-        reg.register("qt_dev_box_worker", "custom", "internal", ["qt_build", "cpp_compile", "container_exec", "code", "test"])
         
         lifecycle = AgentLifecycleManager(idle_shutdown_sec=idle_shutdown_sec)
 
         load_balancer = LoadBalancer()
         model_selector = ModelSelector()
+        message_bus = AgentFactory._build_message_bus()
         session_memory = SessionMemory()
+        session_memory.attach_event_bus(message_bus)
 
         return OrchestratorComponents(
             registry=reg,
@@ -87,7 +82,7 @@ class AgentFactory:
             router=TaskRouter(reg, load_balancer),
             orchestration_config=OrchestrationConfig.from_env(),
             scheduler=SmartScheduler(reg),
-            message_bus=AgentFactory._build_message_bus(),
+            message_bus=message_bus,
             healthcheck=HealthChecker(reg),
             feedback=FeedbackLoop(retry_limit=retry_limit),
             metrics=MetricsCollector(),

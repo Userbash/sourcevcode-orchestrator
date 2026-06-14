@@ -200,7 +200,7 @@ def test_decomposer_preserves_parallel_subagent_specialization(coding_payload):
                 "capability": "frontend",
                 "task_type": "code",
                 "dependencies": [],
-                "sub_agents": ["design_agent", "frontend_component_agent"],
+                "sub_agents": ["ux_planner", "frontend_builder"],
                 "parallel_group": True,
             },
         ],

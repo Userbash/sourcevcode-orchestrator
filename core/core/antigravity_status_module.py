@@ -69,7 +69,7 @@ class AntigravityStatusModule:
             self._last_error = str(exc)
             return None
 
-    def _make_status(self, health: dict[str, Any], *, retry: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _make_status(self, health: dict[str, Any], *, retry: dict[str, Any] | None = None, session_control: dict[str, Any] | None = None) -> dict[str, Any]:
         ready = bool(health.get("ready"))
         status = {
             "ok": ready,
@@ -81,6 +81,7 @@ class AntigravityStatusModule:
             "generation_probe": health.get("generation_probe", {}),
             "auth_probe": health.get("auth_probe", {}),
             "api_probe": health.get("api_probe", {}),
+            "session_control": session_control or {},
             "error": None if ready else (health.get("models_probe", {}) or {}).get("stderr") or (health.get("generation_probe", {}) or {}).get("stderr") or (health.get("auth_probe", {}) or {}).get("stderr"),
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -112,7 +113,8 @@ class AntigravityStatusModule:
                 retry = manager.ensure_authorized()
                 if retry.get("ok"):
                     health = manager.status()
-            status = self._make_status(health, retry=retry)
+            session_control = manager.session_control_status() if hasattr(manager, "session_control_status") else {}
+            status = self._make_status(health, retry=retry, session_control=session_control)
         except Exception as exc:
             self._last_error = str(exc)
             status = {

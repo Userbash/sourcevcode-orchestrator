@@ -31,7 +31,7 @@ def main() -> int:
     print("\n--- POSTGRES ROUNDTRIP PROBE ---")
     print(json.dumps(probe, ensure_ascii=True, default=str, indent=2))
 
-    for table in ["memories", "vfs_files", "json_themes", "commands", "sessions", "users", "user_roles"]:
+    for table in ["memories", "vfs_files", "commands", "sessions", "users", "user_roles"]:
         rows = fetch_recent_rows(database_url, table, limit=5)
         _print_table(table, rows)
 

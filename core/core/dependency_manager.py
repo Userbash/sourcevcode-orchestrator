@@ -23,6 +23,7 @@ class DependencyManager:
         DependencySpec("pydantic", "pydantic", required=True),
         DependencySpec("redis", "redis", required=False),
         DependencySpec("pika", "pika", required=False),
+        DependencySpec("aio_pika", "aio-pika", required=False),
     )
 
     AI_DEPENDENCIES: tuple[DependencySpec, ...] = (

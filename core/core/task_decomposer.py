@@ -76,8 +76,6 @@ class TaskDecomposer:
         text = f"{layer_name} {objective}".lower()
         if any(keyword in text for keyword in SOURCECRAFT_KEYWORDS):
             return "sourcecraft"
-        if any(keyword in text for keyword in ("frontend", "ui", "ux", "screen", "page", "button")):
-            return "docs"
         if any(keyword in text for keyword in ("test", "verify", "qa", "check")):
             return "test"
         if any(keyword in text for keyword in ("review", "audit", "security")):
@@ -98,8 +96,6 @@ class TaskDecomposer:
         for marker, capability in (
             ("design", "ux"),
             ("ux", "ux"),
-            ("frontend", "frontend"),
-            ("component", "frontend"),
             ("validator", "review"),
             ("review", "review"),
             ("tester", "test"),
@@ -319,7 +315,7 @@ class TaskDecomposer:
                     "capability": "ux",
                     "task_type": "plan",
                     "dependencies": [],
-                    "sub_agents": ["design_agent"]
+                    "sub_agents": ["ux_planner"]
                 },
                 {
                     "name": "frontend_implementation",
@@ -327,7 +323,7 @@ class TaskDecomposer:
                     "capability": "frontend",
                     "task_type": "code",
                     "dependencies": ["ux_design"],
-                    "sub_agents": ["frontend_component_agent"]
+                    "sub_agents": ["frontend_builder"]
                 },
                 {
                     "name": "automated_tests",

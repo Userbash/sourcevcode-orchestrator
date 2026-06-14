@@ -79,62 +79,6 @@ def _is_meaningful_text(text: str) -> bool:
     return True
 
 
-def _is_frontend_oneshot_request(data: dict[str, Any]) -> bool:
-    text = " ".join(str(data.get(k, "")) for k in ("description", "message", "prompt", "objective")).lower()
-    return any(k in text for k in ["frontend", "ui", "ux", "landing", "catalog", "page", "website", "site", "веб", "страниц", "дизайн"])
-
-
-def _is_visual_generation_request(data: dict[str, Any]) -> bool:
-    text = " ".join(str(data.get(k, "")) for k in ("description", "message", "prompt", "objective")).lower()
-    if any(key in data for key in ("design_spec", "image_output_path", "render_to_image")):
-        return True
-    return any(
-        token in text
-        for token in (
-            "generate image",
-            "image mockup",
-            "design concept",
-            "illustration",
-            "poster",
-            "concept art",
-            "render image",
-            "изображен",
-            "картин",
-            "рендер",
-            "макет",
-        )
-    )
-
-
-def _inject_frontend_standardization(data: dict[str, Any]) -> dict[str, Any]:
-    if not _is_frontend_oneshot_request(data):
-        return data
-    out = dict(data)
-    out.setdefault("type", "code")
-    out.setdefault("framework", "react")
-    out.setdefault("frontend_output_root", "frontend-react")
-    out.setdefault("frontend_app_name", "frontend-app")
-    out.setdefault("acceptance_criteria", [
-        "responsive ui",
-        "design tokens applied",
-        "semantic sections generated",
-        "content seeded",
-    ])
-    out.setdefault("frontend_schema", {
-        "components": [
-            {"name": "SiteHeader"},
-            {"name": "HeroSection"},
-            {"name": "CatalogGrid"},
-            {"name": "CourseCard"},
-            {"name": "CartSummary"},
-            {"name": "AccountPanel"},
-            {"name": "SiteFooter"},
-        ],
-        "pages": ["/", "/catalog", "/course/:id", "/cart", "/checkout", "/account", "/account/lessons"],
-    })
-    return out
-
-
 def _extract_description(data: dict[str, Any]) -> str:
     for key in ("description", "message", "text", "prompt", "objective"):
         value = data.get(key)
@@ -145,7 +89,7 @@ def _extract_description(data: dict[str, Any]) -> str:
 
 def normalize_user_payload(payload: Any) -> dict[str, Any]:
     if isinstance(payload, dict):
-        return _inject_frontend_standardization(payload)
+        return payload
     if isinstance(payload, str):
         stripped = payload.strip()
         if not stripped:
@@ -153,10 +97,10 @@ def normalize_user_payload(payload: Any) -> dict[str, Any]:
         try:
             parsed = json.loads(stripped)
             if isinstance(parsed, dict):
-                return _inject_frontend_standardization(parsed)
+                return parsed
         except json.JSONDecodeError:
             pass
-        return _inject_frontend_standardization({"description": stripped})
+        return {"description": stripped}
     return {}
 
 
@@ -220,16 +164,6 @@ def create_standard_task(data: dict[str, Any]) -> Task:
         if not task.routing_hints:
             task.routing_hints = {}
         task.routing_hints.setdefault("input_validation", {"status": "ok", "issues": []})
-        if _is_visual_generation_request(normalized):
-            task.required_capability = "design_generation"
-            task.routing_hints.setdefault(
-                "design_generation",
-                {
-                    "enabled": True,
-                    "source": "task_submission_api",
-                    "design_spec": normalized.get("design_spec", {}),
-                },
-            )
         return task
     except Exception as e:
         raise ValueError(f"Invalid task data format: {e}") from e

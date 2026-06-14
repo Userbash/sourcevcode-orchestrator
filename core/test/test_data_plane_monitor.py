@@ -44,7 +44,6 @@ def test_snapshot_postgres_data_plane(monkeypatch):
         ("user_roles", 1, None, None),
         ("users", 1, "2026-06-12T09:57:00Z", "2026-06-12T09:57:00Z"),
         ("vfs_files", 5, "2026-06-12T10:01:00Z", "2026-06-12T10:01:00Z"),
-        ("json_themes", 4, "2026-06-12T10:02:00Z", "2026-06-12T10:02:00Z"),
     ]
 
     monkeypatch.setattr(dpm, "_connect_postgres", lambda dsn: _FakeConn(rows))

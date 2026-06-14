@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
+
 from .hybrid_memory import HybridMemory
 from .memory_backend import InMemoryBackend, MemoryBackend
 from .memory_policy import MemoryPolicy
@@ -42,6 +43,10 @@ class SessionMemory(MemoryProtocol):
     @staticmethod
     def make_key(scope: MemoryScope, identifier: str, key: str) -> str:
         return f"{scope.value}:{identifier}:{key}"
+
+    def attach_event_bus(self, message_bus: Any | None) -> None:
+        if hasattr(self.hybrid, "attach_event_bus"):
+            self.hybrid.attach_event_bus(message_bus)
 
     @staticmethod
     def _parse_scope_args(args: tuple[Any, ...]) -> tuple[MemoryScope, str, str]:

@@ -9,6 +9,7 @@ import httpx
 
 from core.core.env_loader import load_env_file
 from core.core.host_bridge import HostBridge
+from .antigravity_session_store import AntigravitySessionStore
 
 logger = logging.getLogger("AntigravityManager")
 
@@ -24,6 +25,7 @@ class AntigravityManager:
         self.api_key = (os.getenv("ANTIGRAVITY_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
         self.api_base_url = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
         self.proxy_url = os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip().rstrip("/")
+        self.session_store = AntigravitySessionStore()
 
     @staticmethod
     def _read_int(key: str, default: int) -> int:
@@ -36,6 +38,54 @@ class AntigravityManager:
     @staticmethod
     def auto_login_enabled() -> bool:
         return os.getenv("AI_BRIDGE_ANTIGRAVITY_AUTO_LOGIN", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _login_failure_cooldown_sec() -> int:
+        raw = os.getenv("AI_BRIDGE_ANTIGRAVITY_LOGIN_FAILURE_COOLDOWN_SEC", "900").strip()
+        try:
+            return max(60, int(raw))
+        except ValueError:
+            return 900
+
+    @staticmethod
+    def _recent_session_grace_sec() -> int:
+        raw = os.getenv("AI_BRIDGE_ANTIGRAVITY_SESSION_GRACE_SEC", "43200").strip()
+        try:
+            return max(300, int(raw))
+        except ValueError:
+            return 43200
+
+    @staticmethod
+    def _classify_failure_text(raw: str) -> str:
+        text = str(raw or "").strip().lower()
+        if not text:
+            return "unknown"
+        if "not found" in text or "no such file" in text:
+            return "cli_missing"
+        if any(marker in text for marker in ["authentication required", "please sign in", "authorization code", "paste the authorization code", "unauthorized", "forbidden", "error: authentication", "error: please sign in"]):
+            return "auth_required"
+        if any(marker in text for marker in ["timed out", "timeout", "connection reset", "temporarily unavailable", "network", "dns", "econn", "refused", "unreachable"]):
+            return "transient"
+        return "unknown"
+
+    def _annotate_verify_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(result or {})
+        stderr = str(payload.get("stderr") or payload.get("error") or payload.get("stdout") or "")
+        payload.setdefault("failure_kind", self._classify_failure_text(stderr))
+        payload.setdefault("auth_marker_present", self.session_store.auth_marker_present())
+        return payload
+
+    def _maybe_suppress_login(self, verify: dict[str, Any]) -> dict[str, Any] | None:
+        failure_kind = str(verify.get("failure_kind") or "unknown")
+        if self.session_store.login_failure_cooldown_active(cooldown_sec=self._login_failure_cooldown_sec()):
+            verify["login_suppressed"] = True
+            verify["suppression_reason"] = "login_failure_cooldown"
+            return verify
+        if failure_kind in {"transient", "unknown"} and bool(verify.get("auth_marker_present")) and self.session_store.recently_verified(within_sec=self._recent_session_grace_sec()):
+            verify["login_suppressed"] = True
+            verify["suppression_reason"] = "cached_session_recently_verified"
+            return verify
+        return None
 
     def _run_host(self, cmd: list[str], *, timeout: int | None = None) -> dict[str, Any]:
         try:
@@ -89,14 +139,33 @@ class AntigravityManager:
 
     def _run_login_helper(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
         helper = Path(__file__).resolve().parents[2] / "scripts" / "antigravity_login.py"
-        return self._run_host(["python3", str(helper), *args], timeout=timeout)
+        result = self._run_host(["python3", str(helper), *args], timeout=timeout)
+        if "--json" not in args:
+            return result
+        stdout = str(result.get("stdout") or "").strip()
+        if not stdout:
+            return result
+        try:
+            import json
+            payload = json.loads(stdout)
+        except Exception:
+            return result
+        if not isinstance(payload, dict):
+            return result
+        merged = dict(result)
+        merged.update(payload)
+        if "ok" not in payload:
+            merged["ok"] = result.get("ok", False)
+        return merged
 
     def verify_auth(self) -> dict[str, Any]:
-        return self._run_login_helper(["--verify"], timeout=max(self.probe_timeout, 45))
+        return self._annotate_verify_result(self._run_login_helper(["--verify", "--json"], timeout=max(self.probe_timeout, 45)))
 
     def _confirmed_ready(self) -> dict[str, Any]:
         verify = self.verify_auth()
         if verify.get("ok"):
+            models = list(verify.get("models") or [])
+            self.session_store.record_success(models=models, auth_mode=str(verify.get("auth_mode") or "agy_oauth"))
             verify["action"] = "verify"
             return verify
 
@@ -104,10 +173,12 @@ class AntigravityManager:
         if models.get("ok"):
             probe = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"], timeout=max(self.probe_timeout, 45))
             if probe.get("ok"):
+                model_list = [line.strip() for line in models.get("stdout", "").splitlines() if line.strip()]
+                self.session_store.record_success(models=model_list, auth_mode="agy_oauth")
                 return {
                     "ok": True,
                     "action": "verify_after_login",
-                    "models": [line.strip() for line in models.get("stdout", "").splitlines() if line.strip()],
+                    "models": model_list,
                     "models_probe": models,
                     "generation_probe": probe,
                     "auth_probe": verify,
@@ -115,12 +186,18 @@ class AntigravityManager:
                     "auth_mode": "agy_oauth",
                 }
 
+        self.session_store.record_failure(verify.get("stderr") or verify.get("error") or "antigravity_not_ready", failure_kind=str(verify.get("failure_kind") or "unknown"))
         return verify
 
     def ensure_authorized(self) -> dict[str, Any]:
         verify = self._confirmed_ready()
         if verify.get("ok"):
             return verify
+
+        suppressed = self._maybe_suppress_login(verify)
+        if suppressed is not None:
+            suppressed["action"] = "verify"
+            return suppressed
 
         if not self.auto_login_enabled():
             verify["action"] = "verify"
@@ -135,13 +212,16 @@ class AntigravityManager:
             if login.get("ok"):
                 confirmation = self._confirmed_ready()
                 if confirmation.get("ok"):
+                    self.session_store.record_success(models=list(confirmation.get("models") or []), auth_mode=str(confirmation.get("auth_mode") or "agy_oauth"))
                     confirmation["action"] = "login_confirmed"
                     confirmation["attempt"] = attempt
                     return confirmation
                 login["verify_error"] = confirmation.get("stderr") or confirmation.get("error") or "login did not produce a ready auth state"
                 login["post_login_verify"] = confirmation
+                self.session_store.record_login_failure(str(login.get("verify_error") or "login_not_confirmed"), failure_kind=str(confirmation.get("failure_kind") or "unknown"))
                 last = login
             else:
+                self.session_store.record_login_failure(str(login.get("stderr") or login.get("error") or "login_failed"), failure_kind="auth_required")
                 last = login
             if attempt < 3:
                 import time
@@ -180,6 +260,68 @@ class AntigravityManager:
     def is_ready(self) -> bool:
         return self.status().get("ready") is True
 
+    def session_control_status(self) -> dict[str, Any]:
+        status = self.status()
+        auth_probe = dict(status.get("auth_probe") or {})
+        store = self.session_store.snapshot()
+        failure_kind = str(auth_probe.get("failure_kind") or "")
+        ready = bool(status.get("ready"))
+        login_suppressed = bool(auth_probe.get("login_suppressed"))
+        suppression_reason = str(auth_probe.get("suppression_reason") or "")
+
+        if ready:
+            session_state = "ready"
+            user_action_required = False
+            message_for_user = "Antigravity session is active. No login action is required."
+            message_for_orchestrator = "Continue using Antigravity normally and refresh status on schedule."
+        elif failure_kind == "auth_required":
+            session_state = "auth_required"
+            user_action_required = True
+            message_for_user = "Antigravity login is required once to restore the session."
+            message_for_orchestrator = "Request one interactive user login and avoid repeated auto-login loops."
+        elif failure_kind == "cli_missing":
+            session_state = "cli_missing"
+            user_action_required = True
+            message_for_user = "Antigravity CLI is missing or not executable on this machine."
+            message_for_orchestrator = "Do not retry login. Report a runtime dependency problem instead."
+        elif login_suppressed and suppression_reason == "cached_session_recently_verified":
+            session_state = "degraded_transient"
+            user_action_required = False
+            message_for_user = "Antigravity session was recently valid. Temporary network or probe failure detected; no relogin needed now."
+            message_for_orchestrator = "Keep the session, suppress relogin spam, and retry health checks later."
+        elif login_suppressed and suppression_reason == "login_failure_cooldown":
+            session_state = "cooldown"
+            user_action_required = False
+            message_for_user = "Recent login attempt already failed. The system is waiting before asking again."
+            message_for_orchestrator = "Honor cooldown and avoid repeated login prompts until the cooldown expires."
+        else:
+            session_state = "degraded_unknown"
+            user_action_required = False
+            message_for_user = "Antigravity is not ready, but the failure is not clearly an auth problem yet."
+            message_for_orchestrator = "Recheck health and classify the failure before requesting another login."
+
+        return {
+            "controller": "AntigravityManager",
+            "runtime_owner": "orchestrator",
+            "user_action_required": user_action_required,
+            "session_state": session_state,
+            "auth_mode": str(status.get("auth_mode") or store.get("auth_mode") or "agy_oauth"),
+            "last_success_at": store.get("last_success_at", ""),
+            "last_login_failure_at": store.get("last_login_failure_at", ""),
+            "session_age_sec": self.session_store.success_age_sec(),
+            "login_failure_age_sec": self.session_store.login_failure_age_sec(),
+            "login_suppressed": login_suppressed,
+            "suppression_reason": suppression_reason,
+            "message_for_user": message_for_user,
+            "message_for_orchestrator": message_for_orchestrator,
+            "responsibility": {
+                "interactive_login": "user" if session_state == "auth_required" else "AntigravityManager",
+                "session_validation": "AntigravityManager",
+                "runtime_watchdog": "AntigravityStatusModule",
+                "relogin_policy": "AntigravityManager",
+            },
+        }
+
     def list_models(self) -> list[str]:
         res = self._run_agy(["models"])
         if res.get("ok"):
@@ -204,7 +346,9 @@ class AntigravityManager:
             elif self._cli_missing(models_res):
                 auth_res = {"ok": False, "skipped": True, "reason": "agy_cli_missing"}
             else:
-                auth_res = self.ensure_authorized()
+                verify = self.verify_auth()
+                suppressed = self._maybe_suppress_login(verify)
+                auth_res = suppressed if suppressed is not None else self.ensure_authorized()
                 if auth_res.get("ok"):
                     models_res = self._run_agy(["models"])
                     models = [line.strip() for line in models_res.get("stdout", "").splitlines() if line.strip()] if models_res.get("ok") else []

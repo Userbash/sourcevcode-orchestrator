@@ -50,6 +50,8 @@ services:
       AI_BRIDGE_EASY_DIFFUSION_DEFAULT_MODEL: ${AI_BRIDGE_EASY_DIFFUSION_DEFAULT_MODEL:-}
       AI_BRIDGE_MEMORY_ENABLED: "true"
       AI_BRIDGE_MEMORY_DATABASE_URL: postgresql+psycopg2://ai_bridge:ai_bridge_password@db:5432/ai_bridge
+      AI_BRIDGE_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      AI_BRIDGE_MESSAGE_BUS_BACKEND: rabbitmq
       AI_BRIDGE_MEMORY_STORE_DIR: /app/memory_store
       AI_BRIDGE_LIVE_MODEL_PROBE: ${AI_BRIDGE_LIVE_MODEL_PROBE:-false}
       AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS: ${AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS:-false}
@@ -68,6 +70,8 @@ services:
         export PYTHONPATH=/app
         export AI_BRIDGE_MEMORY_ENABLED=true
         export AI_BRIDGE_MEMORY_DATABASE_URL=postgresql+psycopg2://ai_bridge:ai_bridge_password@db:5432/ai_bridge
+        export AI_BRIDGE_RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+        export AI_BRIDGE_MESSAGE_BUS_BACKEND=rabbitmq
 
         if command -v mimo >/dev/null 2>&1; then
           echo "[MIMO] CLI detected: $$(command -v mimo)"
@@ -91,8 +95,10 @@ services:
       - ./.env.bridge:/app/.env.bridge:ro,z
       - ./scripts:/app/scripts:ro
     depends_on:
-      - db
-      - rabbitmq
+      db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
       interval: 15s
@@ -114,6 +120,11 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
     logging: *default-logging
 

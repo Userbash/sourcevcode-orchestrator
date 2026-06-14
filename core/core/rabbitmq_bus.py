@@ -31,6 +31,10 @@ class RabbitMQBus(MessageBus):
         self._topic_callbacks: dict[str, list[Callable[[Any], None]]] = defaultdict(list)
         self._consumer_tasks: list[asyncio.Task[Any]] = []
         self._enabled = aio_pika is not None
+        if not self._enabled:
+            logger.warning("RabbitMQBus falling back to in-memory transport because aio-pika is unavailable.")
+        if not self._enabled:
+            logger.warning("RabbitMQBus falling back to in-memory transport because aio-pika is unavailable.")
 
     def publish(self, topic: str, message: Any) -> None:
         if not self._enabled:

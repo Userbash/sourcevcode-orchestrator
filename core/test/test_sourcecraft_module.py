@@ -96,45 +96,6 @@ def test_task_decomposer_auto_marks_sourcecraft_repo_tasks():
     assert plan.atomic_tasks[1].required_capability == "code"
 
 
-def test_api_bridge_sourcecraft_delegate_preview():
-    from core.core.api_bridge_module import APIBridgeModule, SourceCraftDelegateRequest
-    from core.core.models import TaskAcceptance, TaskStatus
-
-    class _Router:
-        def route(self, task):
-            return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", "high", "preview")
-
-    class _Scheduler:
-        def schedule(self, task):
-            from core.core.models import SchedulerDecision
-            return SchedulerDecision(task.task_id, "orchestrator", None, True, "preview", 9.0)
-
-    class _FakeAPI2:
-        def __init__(self):
-            self.router = _Router()
-            self.scheduler = _Scheduler()
-            self.sourcecraft = SourceCraftModule()
-            self.sourcecraft.on_load(_FakeAPI())
-
-        def get_module(self, name):
-            if name == "sourcecraft":
-                return self.sourcecraft
-            return None
-
-        def get_context(self, key):
-            return getattr(self, key, None)
-
-    module = APIBridgeModule()
-    module._api = _FakeAPI2()
-    response = module._sourcecraft_delegate(SourceCraftDelegateRequest(description="Prepare SourceCraft release notes for repo status", task_type="plan", repo_path=".", branch="main"))
-
-    assert response["status"] == "ok"
-    assert response["sourcecraft"]["role"]["name"] == "sourcecraft"
-    assert response["delegation"]["recommended_owner"] == "sourcecraft"
-    assert response["delegation"]["should_delegate"] is True
-    assert response["route"]["assigned_agent"] == "orchestrator"
-    assert response["schedule"]["route_mode"] == "orchestrator"
-
 
 def test_task_decomposer_marks_sourcecraft_dag_nodes_in_context():
     from core.core.models import Priority, SecurityPolicy, TaskPayload, encapsulate
@@ -212,63 +173,6 @@ def test_orchestrator_create_execution_plan_uses_local_llm_advisory(monkeypatch)
 
 
 
-def test_api_bridge_full_health_snapshot_contains_providers_and_agents():
-    from core.core.api_bridge_module import APIBridgeModule
-
-    class _Health:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def as_dict(self):
-            return self._payload
-
-    class _Healthcheck:
-        def check_providers(self):
-            return {
-                "gemini": _Health({"provider": "gemini", "status": "healthy"}),
-                "mistral": _Health({"provider": "mistral", "status": "healthy"}),
-            }
-
-        def check_all(self):
-            return [
-                _Health({"agent_id": "codex-main", "status": "ready"}),
-                _Health({"agent_id": "tester-1", "status": "ready"}),
-            ]
-
-    class _ModuleManager:
-        def finalize(self):
-            return {"sourcecraft": {"status": "ready"}}
-
-    class _Registry:
-        def list_agents(self):
-            return [1, 2]
-
-    class _API:
-        def __init__(self):
-            self.healthcheck = _Healthcheck()
-            self.registry = _Registry()
-            self.module_manager = _ModuleManager()
-            self.sourcecraft = SourceCraftModule()
-            self.sourcecraft.on_load(_FakeAPI())
-
-        def get_context(self, key):
-            return getattr(self, key, None)
-
-        def get_module(self, name):
-            return self.sourcecraft if name == "sourcecraft" else None
-
-    module = APIBridgeModule()
-    module._api = _API()
-    snapshot = module._health_full_snapshot()
-
-    assert snapshot["status"] == "ok"
-    assert snapshot["overall_ok"] is True
-    assert snapshot["summary"]["provider_count"] == 2
-    assert snapshot["summary"]["agent_count"] == 2
-    assert snapshot["sourcecraft"]["role"]["name"] == "sourcecraft"
-    assert snapshot["modules"]["sourcecraft"]["status"] == "ready"
-
-
 
 def test_sourcecraft_repo_action_requires_mutation_opt_in(tmp_path, monkeypatch):
     src = tmp_path / "src"
@@ -304,30 +208,6 @@ def test_sourcecraft_repo_action_dry_run_exposes_git_command(tmp_path, monkeypat
     assert result["status"] == "dry_run"
     assert result["command"] == ["git", "merge", "--no-ff", "feature/mimo"]
     assert result["target_branch"] == "main"
-
-
-def test_api_bridge_sourcecraft_repo_operation_preview(tmp_path, monkeypatch):
-    from core.core.api_bridge_module import APIBridgeModule, SourceCraftRepoRequest
-
-    src = tmp_path / "src"
-    _make_src_script(src, 'echo "Version: 0.1.2"')
-    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
-
-    class _API:
-        def __init__(self):
-            self.sourcecraft = SourceCraftModule()
-            self.sourcecraft.on_load(_FakeAPI())
-
-        def get_module(self, name):
-            return self.sourcecraft if name == "sourcecraft" else None
-
-    module = APIBridgeModule()
-    module._api = _API()
-    response = module._sourcecraft_repo(SourceCraftRepoRequest(action="create_branch", repo_path=".", branch="feature/sourcecraft", allow_mutation=True, dry_run=True))
-
-    assert response["status"] == "dry_run"
-    assert response["operation"]["command"] == ["git", "checkout", "-b", "feature/sourcecraft"]
-    assert response["sourcecraft"]["execution"]["tools"]["src"] is True
 
 
 

@@ -1,25 +1,22 @@
-> **LEGACY/ECOSYSTEM REFERENCE:** This document describes the broader Hebrew AI Platform ecosystem, which includes components (frontend-react, backend) not present in this specific 'SourceVCode Orchestrator' repository. 
+> **REPOSITORY NOTE:** This document is trimmed to the backend, orchestrator, and infrastructure layers that remain in this repository.
 
 # Full Project Documentation: Hebrew AI Platform
 
 ## 1. Project Purpose
-Hebrew AI Platform is a web platform for learning and practicing Hebrew with an administrative panel, role and permission management (RBAC), action auditing, telemetry, and a separate AI task orchestration layer (`core`).
+The repository contains backend services, infrastructure, and a Python task orchestration layer (`core`) with role/permission management, auditing, telemetry, and multi-agent execution.
 
-The project is divided into 4 independent layers:
-- `frontend-react` — client application (React + TypeScript + Vite).
+The project is divided into 3 independent layers:
 - `backend` — API and business logic (Node.js + Express + PostgreSQL + Redis).
 - `core` — Python orchestrator for multi-agent workflows.
 - `infra` + `docker-compose.yml` — container infrastructure, routing, and observability.
 
 ## 2. Technology Stack
-- Frontend: React, TypeScript, React Router, Bootstrap, Lucide Icons.
 - Backend: Express, TypeScript, PostgreSQL, Redis, JWT, bcrypt, helmet, cors, rate limiting.
 - AI Bridge: Python 3, pytest, custom protocols and agent routing.
 - Infra: Docker/Podman, Traefik, Nginx, Loki, Promtail, Grafana.
 
 ## 3. Repository Structure
 - `backend/` — server, API routes, middleware, RBAC, DB migrations.
-- `frontend-react/` — pages, auth/language/theme contexts, admin panel.
 - `core/` — task orchestrator, agents, model selector, tests, schemas.
 - `infra/` — Loki/Promtail/Grafana configs and edge configs.
 - `scripts/` — startup, deployment, bridge integration, and environment automation.
@@ -27,9 +24,9 @@ The project is divided into 4 independent layers:
 
 ## 4. Architecture and Flows
 ### 4.1 User flow
-1. A user signs up/logs in on the frontend.
+1. A user or integration reaches the backend/API surface.
 2. The backend validates data, creates a session, and sets access/refresh cookies.
-3. The frontend works through the API client with role/permission checks.
+3. The orchestrator and service clients work through authenticated API and task interfaces.
 
 ### 4.2 Administrative flow
 1. Access to `/api/admin/*` is allowed only after `verifyToken` + `adminApiLimiter` + `requireRole(['root','platform_admin'])`.
@@ -102,34 +99,7 @@ Directory: `backend/database/migrations/`
 - `010_user_telemetry_enhanced_context.sql` — extended telemetry.
 - `011_user_ui_preferences.sql` — user UI preferences.
 
-## 6. Frontend: Implemented Features and Behavior
-### 6.1 Core logic
-- Entry point: `frontend-react/src/main.tsx`.
-- Auth/theme/language state via contexts:
-  - `context/AuthContext.tsx`
-  - `context/ThemeContext.tsx`
-  - `context/LanguageContext.tsx`
-- API layer:
-  - `src/api/client.ts` — base HTTP client.
-  - `src/api/admin*.ts`, `src/api/access.ts`, `src/api/publications.ts`.
-
-### 6.2 User interface
-- `src/App.tsx` — main dashboard, navigation, status cards, activity blocks.
-- `src/components/Layout/*` — sidebar, header, UI preference controls.
-- `src/pages/*` — public and user-facing pages.
-
-### 6.3 Admin panel
-File: `src/components/Admin/AdminPanel.tsx`
-- Main functional sections:
-  - Overview/Health
-  - User Directory/Create User
-  - Groups Catalog/Assignments
-  - Publications Moderation
-  - Audit Trail/API Logs
-- Includes filtering, sorting, CRUD operations, and permission controls.
-- Sensitive actions require explicit RBAC checks (`hasPermission`, `canEditUserPermissions`).
-
-## 7. AI Bridge: Implemented Features and Behavior
+## 6. AI Bridge: Implemented Features and Behavior
 ### 7.1 Core
 File: `core/core/orchestrator.py`
 - Full pipeline wiring: registry, lifecycle, autoscaler, scheduler, router, healthcheck, feedback, KPI, quality, merger.
@@ -155,28 +125,28 @@ when OpenAI is not available.
 - `core/result_merger.py` — merges outputs from multiple results.
 - `tests/test_protocol.py`, `test_message_bus_envelope.py`, `test_reassemble.py` — framing and reassembly validation.
 
-## 8. Infrastructure and Deployment
+## 7. Infrastructure and Deployment
 ### 8.1 Containers
 File: `docker-compose.yml`
 Services:
 - `traefik` — edge/router.
 - `postgres`, `redis` — data services.
-- `backend`, `frontend` — application services.
+- `backend`, `orchestrator` — application services.
 - `loki`, `promtail`, `grafana` — observability stack.
 
 ### 8.2 Hardening and improvements
-- Health checks for backend/frontend/infra services.
+- Health checks for backend/orchestrator/infra services.
 - Log rotation (`json-file`, max-size/max-file).
 - Service labels for centralized Loki log routing.
 - Podman/Docker socket-path support via environment variables.
 
-## 9. Testing
+## 8. Testing
 - Backend smoke/API tests: `backend/tests/*`.
 - AI bridge unit/integration tests: `core/tests/*`.
 - System checks: `tests/system/*`.
 - Unified runner: `tests/run-all-tests.js`.
 
-## 10. Detailed Change and Fix Log
+## 9. Detailed Change and Fix Log
 
 ### 2026-05-24 — `5a75831`
 **Topic:** Core backend API implementation and deployment hardening.

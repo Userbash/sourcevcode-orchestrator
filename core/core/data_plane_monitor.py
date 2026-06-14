@@ -51,7 +51,6 @@ def fetch_recent_rows(database_url: str, table: str, *, limit: int = 5) -> list[
     queries = {
         'memories': f"SELECT memory_id, session_id, source_session_id, agent_id, memory_type, content, metadata, importance_score, created_at, updated_at FROM {AI_BRIDGE_SCHEMA}.memories ORDER BY updated_at DESC, memory_id DESC LIMIT %s",
         'vfs_files': f"SELECT file_path, checksum, last_updated, owner_agent, integrity, metadata, updated_at, content FROM {AI_BRIDGE_SCHEMA}.vfs_files ORDER BY updated_at DESC, last_updated DESC LIMIT %s",
-        'json_themes': f"SELECT theme_event_id, task_id, session_id, agent_id, provider, color, status, created_at, event_payload FROM {AI_BRIDGE_SCHEMA}.json_themes ORDER BY created_at DESC, theme_event_id DESC LIMIT %s",
         'commands': f"SELECT command_id, session_id, source_session_id, agent_id, command, success, tokens_used, executed_at, result FROM {AI_BRIDGE_SCHEMA}.commands ORDER BY executed_at DESC, command_id DESC LIMIT %s",
         'sessions': f"SELECT source_session_id, normalized_session_id, created_at, updated_at FROM {AI_BRIDGE_SCHEMA}.sessions ORDER BY updated_at DESC, created_at DESC LIMIT %s",
         'users': f"SELECT user_id, username, email, created_at FROM {AI_BRIDGE_SCHEMA}.users ORDER BY created_at DESC, user_id DESC LIMIT %s",
@@ -79,11 +78,6 @@ def fetch_recent_rows(database_url: str, table: str, *, limit: int = 5) -> list[
             out.append({
                 'file_path': row[0], 'checksum': row[1], 'last_updated': row[2], 'owner_agent': row[3],
                 'integrity': row[4], 'metadata': row[5], 'updated_at': row[6], 'content': row[7],
-            })
-        elif table == 'json_themes':
-            out.append({
-                'theme_event_id': row[0], 'task_id': row[1], 'session_id': row[2], 'agent_id': row[3],
-                'provider': row[4], 'color': row[5], 'status': row[6], 'created_at': row[7], 'event_payload': row[8],
             })
         elif table == 'commands':
             out.append({
@@ -158,13 +152,6 @@ def snapshot_postgres_data_plane(database_url: str) -> DataPlaneSnapshot:
                         MAX(updated_at)::text AS last_updated,
                         MAX(last_updated)::text AS latest_marker
                     FROM {AI_BRIDGE_SCHEMA}.vfs_files
-                    UNION ALL
-                    SELECT
-                        'json_themes' AS table_name,
-                        COUNT(*)::bigint AS row_count,
-                        MAX(created_at)::text AS last_updated,
-                        MAX(created_at)::text AS latest_marker
-                    FROM {AI_BRIDGE_SCHEMA}.json_themes
                     UNION ALL
                     SELECT
                         'commands' AS table_name,

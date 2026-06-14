@@ -20,7 +20,6 @@ def test_authz_denies_unknown_user(tmp_path: Path, monkeypatch):
 
 def test_dependency_audit_detects_high(monkeypatch, tmp_path: Path):
     (tmp_path / 'backend').mkdir(parents=True, exist_ok=True)
-    (tmp_path / 'frontend-react').mkdir(parents=True, exist_ok=True)
 
     payload = '{"metadata":{"vulnerabilities":{"total":1,"high":1,"critical":0}},"vulnerabilities":{"x":{"severity":"high","via":[{"title":"demo cve"}]}}}'
 

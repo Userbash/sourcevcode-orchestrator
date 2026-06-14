@@ -23,7 +23,7 @@ from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
 from .model_selector import ModelChoice, ModelSelector
-from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
+from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskPayload, TaskStatus, TaskType, encapsulate
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
@@ -34,12 +34,10 @@ from .availability import ModelAvailability, ModelAvailabilityModule, ProviderSt
 from .ai_activity_module import AIActivityModule
 from .data_plane_monitor import build_data_plane_snapshot
 from .antigravity_status_module import AntigravityStatusModule
-from .api_bridge_module import APIBridgeModule
 from .smart_decomposer_module import SmartDecomposerModule
 from .prompt_optimizer_module import PromptOptimizerModule
 from .chat_bus import ChatBusModule
 from .trigger_dispatcher import TriggerDispatcherModule
-from .json_themes_module import JSONThemesModule
 from .unified_vfs import UnifiedVFSModule
 from .kernel_module_manager import KernelModuleManager
 from .orchestrator_control_module import OrchestratorControlModule
@@ -50,14 +48,11 @@ from .cold_boot_module import ColdBootModule
 from .voice_listener_module import VoiceListenerModule
 from .kpi_event_logger import KPIEventLogger
 from .effectiveness_dashboard import build_kpi_dashboard
-from .ui_design_system_module import UIDesignSystemModule
-from .ui_anti_template_module import UIAntiTemplateModule
-from .frontend_engineering_bridge_module import FrontendEngineeringBridgeModule
-from .autodev_pipeline_module import AutodevPipelineModule
 from .tdd_policy_module import StrictTDDModule
 from .qwen_code_module import QwenCodeModule
 from .code_readability_module import CodeReadabilityModule
 from .dev_toolkit_module import DevToolkitModule
+from .delivery_supervisor import DeliverySupervisor
 from .dependency_manager import DependencyManager
 from .self_diagnostic_module import SelfDiagnosticModule
 from ..mimo.proxy import MimoOrchestrationDirector
@@ -99,6 +94,81 @@ class Orchestrator:
 
     def get_memory(self) -> SessionMemory:
         return self.session_memory
+
+    def dispatch_envelope(self, envelope):
+        return self.delivery_supervisor.dispatch(envelope)
+
+    def refresh_delivery(self, task_id: str) -> dict[str, Any]:
+        return self.delivery_supervisor.refresh(task_id)
+
+    def inspect_delivery_timeouts(self) -> dict[str, int]:
+        return self.delivery_supervisor.inspect_timeouts()
+
+    def delivery_health_snapshot(self) -> dict[str, Any]:
+        return self.delivery_supervisor.delivery_health_snapshot()
+
+    def ack_delivery(self, task_id: str, status: Any, received_by: str, reason: str | None = None):
+        ack = self.message_bus.ack(task_id, status=status, received_by=received_by, reason=reason)
+        try:
+            self.delivery_supervisor.refresh(task_id)
+        except KeyError:
+            pass
+        return ack
+
+    def fetch_agent_mailbox(self, agent_id: str, *, limit: int = 1):
+        return self.delivery_supervisor.fetch_agent_mailbox(agent_id, limit=limit)
+
+    def confirm_delivery_payload(self, task_id: str, agent_id: str, envelope) -> bool:
+        return self.delivery_supervisor.confirm_payload(task_id, agent_id, envelope)
+
+    def establish_delivery_handshake(self, task_id: str, agent_id: str):
+        return self.delivery_supervisor.establish_delivery(task_id, agent_id)
+
+    def mailbox_snapshot(self, agent_id: str) -> dict[str, Any]:
+        return self.delivery_supervisor.mailbox_snapshot(agent_id)
+
+    def _delivery_envelope_for_task(self, task: Task, agent_id: str, capability: str):
+        payload = TaskPayload(
+            objective=task.input.description,
+            input_data={"files": list(task.input.files), "constraints": list(task.input.constraints)},
+            context={
+                "project": task.context.project,
+                "repo_path": task.context.repo_path,
+                "branch": task.context.branch,
+                "task_id": task.task_id,
+                "task_type": task.type.value,
+            },
+            acceptance_criteria=list(task.input.acceptance_criteria),
+            expected_output_format=task.expected_output or "agent_result",
+            artifacts=list(task.input.files),
+        )
+        return encapsulate(
+            payload,
+            {
+                "task_id": task.task_id,
+                "trace_id": task.task_id,
+                "source_agent": "orchestrator",
+                "target_agent": agent_id,
+                "target_capability": capability,
+                "priority": task.priority.value,
+                "max_hops": 5,
+                "max_retries": max(1, int(task.retry_count) + 1),
+            },
+        )
+
+    def _run_local_agent_via_delivery(self, task: Task, agent_id: str, capability: str, agent: BaseAgent, memory_context: dict[str, object]) -> AgentResult:
+        envelope = self._delivery_envelope_for_task(task, agent_id, capability)
+        self.dispatch_envelope(envelope)
+        mailbox = self.fetch_agent_mailbox(agent_id, limit=1)
+        if not mailbox:
+            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Agent mailbox fetch returned no envelope", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_mailbox_empty"], [])
+        fetched = mailbox[0]
+        if not self.confirm_delivery_payload(task.task_id, agent_id, fetched):
+            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery payload validation failed", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_payload_invalid"], [])
+        ack = self.establish_delivery_handshake(task.task_id, agent_id)
+        if ack.ack_status.value != "accepted":
+            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery handshake was not accepted", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_handshake_failed"], [])
+        return agent.run(task, memory_context=memory_context)
 
     def log(self, level: str, message: str) -> None:
         getattr(self.console, level, self.console.emit)(f"KERNEL:{level.upper()}", message)
@@ -282,6 +352,12 @@ class Orchestrator:
         self.kpi_events = KPIEventLogger.from_env()
         if getattr(self.orchestration_config, "kpi_rejection_summary_path", ""):
             self.kpi_events.summary_path = Path(self.orchestration_config.kpi_rejection_summary_path)
+        self.delivery_supervisor = DeliverySupervisor(
+            self.message_bus,
+            session_memory=self.session_memory,
+            kpi_events=self.kpi_events,
+            ack_timeout_sec=max(5, int(os.getenv("AI_BRIDGE_DELIVERY_ACK_TIMEOUT_SEC", "30") or "30")),
+        )
         self._postgres_watchdog_stop = threading.Event()
         self._postgres_watchdog_thread: threading.Thread | None = None
         self._training_consolidation_stop = threading.Event()
@@ -312,20 +388,14 @@ class Orchestrator:
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(ModelAvailabilityModule())
         self.module_manager.register(AntigravityStatusModule())
-        self.module_manager.register(APIBridgeModule())
         self.mimo_director.set_status_source(self._provider_health_snapshot)
         self.module_manager.register(SmartDecomposerModule())
         self.module_manager.register(PromptOptimizerModule())
         self.module_manager.register(ChatBusModule())
         self.module_manager.register(TriggerDispatcherModule())
-        self.module_manager.register(JSONThemesModule())
         self.module_manager.register(UnifiedVFSModule())
         self.module_manager.register(ColdBootModule())
         self.module_manager.register(QtDevBoxModule())
-        self.module_manager.register(UIDesignSystemModule())
-        self.module_manager.register(UIAntiTemplateModule())
-        self.module_manager.register(FrontendEngineeringBridgeModule())
-        self.module_manager.register(AutodevPipelineModule())
         self.module_manager.register(StrictTDDModule())
         self.module_manager.register(QwenCodeModule())
         self.module_manager.register(CodeReadabilityModule())
@@ -343,16 +413,6 @@ class Orchestrator:
         self.module_manager.register(AIIntelligenceModule())
         self.module_manager.register(KernelSecuritySentinel())
         
-        # Register DesignConceptAgent
-        from core.agents.design_concept_agent import DesignConceptAgent
-        design_agent = DesignConceptAgent()
-        self.attach_local_agent(
-            agent_id="design_concept_agent",
-            agent=design_agent,
-            agent_type="custom"
-        )
-        design_agent.set_host_bridge(self)
-        
         self.module_manager.load("ai_activity")
         self.module_manager.load("orchestrator_control")
         self.module_manager.load("model_usage")
@@ -361,17 +421,11 @@ class Orchestrator:
         self.mimo_director.set_vfs_source(self.module_manager.get_module("unified_vfs"))
         self.mimo_director.safe_sync()
         self.module_manager.load("model_availability")
-        self.module_manager.load("api_bridge")
         self.module_manager.load("smart_decomposer")
         self.module_manager.load("prompt_optimizer")
         self.module_manager.load("chat_bus")
         self.module_manager.load("trigger_dispatcher")
-        self.module_manager.load("json_themes")
         self.module_manager.load("cold_boot")
-        self.module_manager.load("ui_design_system")
-        self.module_manager.load("ui_anti_template")
-        self.module_manager.load("frontend_engineering_bridge")
-        self.module_manager.load("autodev_pipeline")
         self.module_manager.load("tdd_policy")
         self.module_manager.load("qwen_code")
         self.module_manager.load("readability_policy")
@@ -524,7 +578,7 @@ class Orchestrator:
         kpi_log = Path(getattr(self.kpi_events, "file_path", "memory_store/kpi_events.jsonl"))
         rolling = Path("core/mimo/profiles/rolling_kpi_store.json")
         summary = Path(getattr(self.orchestration_config, "kpi_dashboard_output_path", "memory_store/kpi_dashboard_24h.json") or "memory_store/kpi_dashboard_24h.json")
-        dashboard = build_kpi_dashboard(kpi_log_path=kpi_log, rolling_kpi_path=rolling, summary_path=summary)
+        dashboard = build_kpi_dashboard(kpi_log_path=kpi_log, rolling_kpi_path=rolling, summary_path=summary, delivery_snapshot=self.delivery_health_snapshot())
         self.kpi_events.write({"event_type": "kpi_dashboard_refresh", "tasks_total": dashboard.get("task_lifecycle", {}).get("tasks_total", 0), "rejection_rate": dashboard.get("trained_memory_rejection", {}).get("rejection_rate", 0.0), "dashboard_path": str(summary)})
         return dashboard
 
@@ -733,12 +787,6 @@ class Orchestrator:
         finally:
             if console_listener in self.console.listeners:
                 self.console.listeners.remove(console_listener)
-
-    def run_autodev_pipeline(self, specs: str, project_root: str = ".", figma_api_available: bool = False) -> dict[str, object]:
-        module = self.module_manager.get_module("autodev_pipeline")
-        if not isinstance(module, AutodevPipelineModule):
-            raise RuntimeError("autodev_pipeline module is not loaded")
-        return module.run_pipeline(specs=specs, project_root=project_root, figma_api_available=figma_api_available)
 
     def monitoring_snapshot(self) -> dict[str, object]:
         control = self._control_module()
@@ -1354,7 +1402,7 @@ class Orchestrator:
             # TPP: Mark pod as BUSY
             self._broadcast_pod_state(agent_id, AgentStatus.BUSY, task_id=task.task_id)
             
-            result = agent.run(task, memory_context=memory_context)
+            result = self._run_local_agent_via_delivery(task, agent_id, capability, agent, memory_context)
             
             # TPP: Mark pod as READY
             self._broadcast_pod_state(agent_id, AgentStatus.READY)

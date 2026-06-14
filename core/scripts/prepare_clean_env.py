@@ -22,7 +22,6 @@ CORE_MODULES = [
     "core/core/agent_lifecycle.py",
     "core/core/model_selector.py",
     "core/core/provider_budget_router.py",
-    "core/core/api_bridge_module.py",
     "core/core/task_submission_api.py",
     "core/core/session_memory.py",
     "core/core/persistent_memory.py",

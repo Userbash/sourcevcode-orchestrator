@@ -66,7 +66,7 @@ def test_submit_user_task_idempotency_returns_cached_result():
     from core.core.orchestrator import Orchestrator
 
     orchestrator = Orchestrator()
-    payload = {"type": "plan", "description": "Build frontend page", "session_id": "idem-1"}
+    payload = {"type": "plan", "description": "Build page logic", "session_id": "idem-1"}
     first = orchestrator.submit_user_task(payload, source="test")
     second = orchestrator.submit_user_task(payload, source="test")
     assert first.get("status") == second.get("status")

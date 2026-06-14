@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
 from typing import Any
 
 from .memory_backend import BackendEntry, InMemoryBackend, MemoryBackend
@@ -66,6 +67,7 @@ class HybridMemory:
         self._trained_memory_degrade_ttl_sec = max(120, int(getattr(self.settings, "trained_memory_degrade_ttl_sec", 900) or 900))
         self._trained_memory_degrade_releases = 0
         self._trained_memory_outcome_stats: dict[tuple[str, str], dict[str, int]] = {}
+        self._event_publisher: Callable[[str, dict[str, Any]], None] | None = None
 
     @staticmethod
     def make_key(scope: str, identifier: str, key: str) -> str:
@@ -102,6 +104,26 @@ class HybridMemory:
     @staticmethod
     def task_metrics_perf_key(task_id: str) -> str:
         return f"task:{task_id}:metrics:perf"
+
+
+    def set_event_publisher(self, publisher: Callable[[str, dict[str, Any]], None] | None) -> None:
+        self._event_publisher = publisher
+        if hasattr(self.persistent, "set_event_publisher"):
+            self.persistent.set_event_publisher(publisher)
+
+    def attach_event_bus(self, message_bus: Any | None) -> None:
+        if message_bus is None or not hasattr(message_bus, "publish"):
+            self.set_event_publisher(None)
+            return
+        self.set_event_publisher(lambda topic, payload: message_bus.publish(topic, payload))
+
+    def _emit_event(self, topic: str, payload: dict[str, Any]) -> None:
+        if self._event_publisher is None:
+            return
+        try:
+            self._event_publisher(topic, payload)
+        except Exception as exc:
+            logger.warning("[MEMORY] event publish failed for %s: %s", topic, exc)
 
     def get(self, scope: str, identifier: str, key: str) -> Any | None:
         skey = self.make_key(scope, identifier, key)
@@ -460,6 +482,13 @@ class HybridMemory:
         key = self._degrade_key(session_id, task_type)
         self._trained_memory_degrade[key] = datetime.now(UTC) + timedelta(seconds=self._trained_memory_degrade_ttl_sec)
         logger.info("[MEMORY] trained memory rejected session=%s task_type=%s threshold=%.2f reason=%s", session_id, task_type, threshold, reason)
+        self._emit_event("memory.trained.events", {
+            "event_type": "memory.trained.rejected",
+            "session_id": session_id,
+            "task_type": task_type,
+            "threshold": float(threshold),
+            "reason": reason,
+        })
 
     def _trained_outcome_key(self, session_id: str, task_type: str) -> tuple[str, str]:
         return (session_id, task_type)
@@ -473,6 +502,17 @@ class HybridMemory:
             stats["rejected"] += 1
         total = stats["accepted"] + stats["rejected"]
         rejection_rate = stats["rejected"] / total if total else 0.0
+        self._emit_event("memory.trained.events", {
+            "event_type": "memory.trained.outcome",
+            "session_id": session_id,
+            "task_type": task_type,
+            "accepted": bool(accepted),
+            "threshold": float(threshold),
+            "reason": reason,
+            "accepted_count": stats["accepted"],
+            "rejected_count": stats["rejected"],
+            "rejection_rate": rejection_rate,
+        })
         if not accepted and total >= 3 and rejection_rate >= 0.67:
             self.record_trained_memory_rejection(session_id=session_id, task_type=task_type, threshold=threshold, reason=f"{reason};high_rejection_rate={rejection_rate:.2f}")
 
