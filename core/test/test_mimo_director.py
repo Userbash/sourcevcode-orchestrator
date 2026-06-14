@@ -494,3 +494,35 @@ def test_director_safe_sync_tracks_failure_reason_and_recovery_attempts(monkeypa
     assert director.is_available is False
     assert director.last_failure_reason == "mimo_sync_failed"
     assert director.recovery_attempts == 1
+
+
+def test_director_prefers_mistral_gateway_when_local_llm_needs_supervision():
+    director = MimoOrchestrationDirector()
+    director.is_available = True
+    director.set_status_source(lambda: {"providers": {"mistral": {"ready": True, "status": "healthy"}}})
+    task = type("T", (), {
+        "session_id": "s11",
+        "task_id": "t11",
+        "memory_scope": "task",
+        "complexity": type("C", (), {"value": "medium"})(),
+        "type": DummyTaskType("plan"),
+        "input": type("I", (), {
+            "description": "break down migration rollout and prepare docs, tests, and implementation plan",
+            "constraints": [],
+            "acceptance_criteria": ["plan backend steps", "plan tests", "plan docs"],
+            "files": [],
+        })(),
+        "priority": type("P", (), {"value": "normal"})(),
+    })()
+
+    recommendation = director.recommend_model(
+        task,
+        {"local_llm": {"ready": True, "recommended_owner": "local_llm", "recommended_model": "qwen-2.5-7b-instruct"}},
+        current_budget=1200.0,
+        memory_context={"ready": True, "recommended_owner": "local_llm", "recommended_model": "qwen-2.5-7b-instruct"},
+    )
+
+    assert recommendation.allow is True
+    assert recommendation.provider == "mistral"
+    assert recommendation.reason == "mistral_gateway_manager_plan"
+    assert recommendation.model_name == "mistral-large-latest"

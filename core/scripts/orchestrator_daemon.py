@@ -42,19 +42,22 @@ async def main():
 
     security_manager = SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=["agy -p", "antigravity -p"]))
 
-    # Prefer mistral for codex-main when MISTRAL key exists (cost-saving mode).
+    # Respect explicit provider selection; otherwise prefer Mistral before OpenAI for codex-main.
     mistral_key = (os.getenv("MISTRAL_API_KEY") or "").strip()
     openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    openai_auto = os.getenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true").strip().lower() in {"1", "true", "yes", "on"}
-    if openai_auto and openai_key:
+    codex_preference = (os.getenv("AI_BRIDGE_CODEX_PROVIDER") or os.getenv("CODEX_PROVIDER") or "auto").strip().lower()
+    if codex_preference == "mistral" and mistral_key:
+        codex_provider = "mistral"
+        codex_model = os.getenv("CODEX_MISTRAL_MODEL", os.getenv("MISTRAL_MODEL", "codestral-latest"))
+    elif codex_preference == "openai" and openai_key:
         codex_provider = "openai"
         codex_model = os.getenv("CODEX_OPENAI_MODEL", "gpt-5-mini")
     elif mistral_key:
         codex_provider = "mistral"
-        codex_model = "mistral-large-latest"
+        codex_model = os.getenv("CODEX_MISTRAL_MODEL", os.getenv("MISTRAL_MODEL", "codestral-latest"))
     elif openai_key:
         codex_provider = "openai"
-        codex_model = os.getenv("CODEX_OPENAI_MODEL", "gpt-4o")
+        codex_model = os.getenv("CODEX_OPENAI_MODEL", "gpt-5-mini")
     else:
         codex_provider = "local"
         codex_model = "local-small"

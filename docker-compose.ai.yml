@@ -26,6 +26,10 @@ services:
     build:
       context: .
       dockerfile: ./core/Dockerfile
+    env_file:
+      - ./.env
+      - ./.env.gemini.local
+      - ./.env.bridge
     container_name: hebrew_ai_orchestrator
     environment:
       PYTHONPATH: /app
@@ -72,8 +76,9 @@ services:
           echo "[MIMO] CLI not found in PATH during boot."
         fi
 
-        # Run migration if needed (simplified check)
-        python3 scripts/migrate_themes_to_pg.py || echo "Migration failed or unnecessary."
+        if [ -f /app/scripts/migrate_themes_to_pg.py ]; then
+          python3 /app/scripts/migrate_themes_to_pg.py || echo "Migration failed or unnecessary."
+        fi
 
         exec python3 -m core.scripts.orchestrator_daemon
     ports:

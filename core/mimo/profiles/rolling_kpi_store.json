@@ -172,5 +172,38 @@
       0.87636,
       0.888
     ]
+  },
+  "plan::qwen2.5:32b-instruct-q4_k_m": {
+    "successes": [
+      true
+    ],
+    "latencies": [
+      130.98275339200063
+    ],
+    "quality_scores": [
+      0.9
+    ]
+  },
+  "test::codestral-latest": {
+    "successes": [
+      true
+    ],
+    "latencies": [
+      184.70463571899927
+    ],
+    "quality_scores": [
+      0.9
+    ]
+  },
+  "code::unknown": {
+    "successes": [
+      true
+    ],
+    "latencies": [
+      125.41885467499924
+    ],
+    "quality_scores": [
+      0.9
+    ]
   }
 }

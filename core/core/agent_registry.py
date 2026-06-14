@@ -9,6 +9,18 @@ class AgentRegistry:
     def __init__(self) -> None:
         self._agents: dict[str, AgentRecord] = {}
 
+    @staticmethod
+    def _normalize_agent_type(agent_type: str | AgentType) -> AgentType:
+        if isinstance(agent_type, AgentType):
+            return agent_type
+        raw = str(agent_type).strip().lower()
+        if raw in {"external_ai", "external", "ai"}:
+            return AgentType.CUSTOM
+        try:
+            return AgentType(raw)
+        except ValueError:
+            return AgentType.CUSTOM
+
     def register(
         self,
         agent_id: str,
@@ -29,7 +41,7 @@ class AgentRegistry:
             raise ValueError("capabilities are required")
         record = AgentRecord(
             id=agent_id,
-            type=AgentType(agent_type),
+            type=self._normalize_agent_type(agent_type),
             endpoint=endpoint,
             capabilities=sorted(set(capabilities)),
             limits=limits or {},

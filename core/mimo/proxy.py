@@ -9,6 +9,7 @@ from typing import Any
 
 from .bridge import MimoAsyncBridge
 from .state import MimoStateContext
+from core.core.mistral_governance import MistralGovernance
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class MimoOrchestrationDirector:
     def __init__(self) -> None:
         self.state = MimoStateContext()
         self.bridge = MimoAsyncBridge()
+        self.mistral_governance = MistralGovernance()
         self.is_available = True
         self._budget_module: Any | None = None
         self._memory_source: Any | None = None
@@ -583,6 +585,20 @@ class MimoOrchestrationDirector:
                 fallback_options=self._fallback_options(task, advisory_context),
             )
 
+        mistral_governance = context.get("mistral_governance") if isinstance(context.get("mistral_governance"), dict) else {}
+        if mistral_governance.get("selected_owner") == "mistral_gateway":
+            model_name = str(mistral_governance.get("preferred_model") or "mistral-large-latest").strip()
+            trace.append({"event": "mistral_gateway", "provider": "mistral", "model_name": model_name, "delegation_plan": len(mistral_governance.get("delegation_plan") or [])})
+            return MimoRecommendation(
+                provider="mistral",
+                model_name=model_name,
+                confidence=0.78,
+                allow=True,
+                reason=f"mistral_gateway_manager_{task_type}",
+                selection_trace=trace,
+                fallback_options=self._fallback_options(task, advisory_context),
+            )
+
         if str((local or {}).get("recommended_owner") or "").strip().lower() == "local_llm" and task_type in {"plan", "docs", "research", "review"} and complexity in {"low", "medium"}:
             model_name = str((local or {}).get("recommended_model") or (local or {}).get("preferred_model") or self._default_local_model(task_type)).strip()
             trace.append({"event": "mimo_recommendation", "owner": "local_llm", "provider": "local", "model_name": model_name})
@@ -688,9 +704,16 @@ class MimoOrchestrationDirector:
         context["vfs_pressure"] = self._vfs_pressure(task, context)
         context["selected_provider"] = str(context.get("selected_provider") or context.get("provider") or "local")
         context["selected_model"] = model_name
-        context["provider_health"] = self._provider_health()
+        context["provider_health"] = self._provider_health(memory_context if isinstance(memory_context, dict) else None)
         context["decision_mode"] = "mimo_control" if self.is_available else "safe_fallback"
         context["mimo_runtime_health"] = self._runtime_health()
+        mistral_health = context["provider_health"].get("mistral") if isinstance(context.get("provider_health"), dict) else {}
+        context["mistral_governance"] = self.mistral_governance.build_profile(
+            task,
+            local_advisory=memory_context if isinstance(memory_context, dict) else {},
+            current_budget=current_budget,
+            provider_ready=bool((mistral_health or {}).get("ready", bool(context.get("mimo_available")))),
+        )
         context["task_profile"] = self._task_profile(task_type, task=task, context=context)
         context["profile_weights"] = self._profile_weights(context["task_type"], str(context.get("selected_provider") or "local"), model_name, task=task, context=context)
         context["rolling_kpi"] = self._rolling_kpi(task, model_name)
@@ -707,6 +730,12 @@ class MimoOrchestrationDirector:
                 "profile_key": str(context["task_profile"].get("profile_key") or context["task_profile"].get("task_type") or task_type),
                 "requested_model": model_name,
                 "preferred_model": str(context.get("preferred_model") or model_name),
+            },
+            {
+                "event": "mistral_governance",
+                "selected_owner": str((context.get("mistral_governance") or {}).get("selected_owner") or ""),
+                "preferred_model": str((context.get("mistral_governance") or {}).get("preferred_model") or ""),
+                "management_profile": str((context.get("mistral_governance") or {}).get("management_profile") or ""),
             },
         ]
         return context

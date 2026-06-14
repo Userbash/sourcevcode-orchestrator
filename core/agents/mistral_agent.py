@@ -8,7 +8,7 @@ import httpx
 
 from .external_ai_agent import ExternalAIAgent
 from core.core.env_loader import load_env_file
-from core.core.models import AgentHealth, AgentResult, AgentStatus, Task, TaskStatus
+from core.core.models import AgentHealth, AgentResult, AgentStatus, Task, TaskStatus, TaskType
 
 logger = logging.getLogger("mistral_agent")
 
@@ -27,6 +27,24 @@ class MistralAgent(ExternalAIAgent):
         load_env_file(".env.bridge", override=True)
         load_env_file(".env.gemini.local", override=True)
         self.api_key = os.getenv("MISTRAL_API_KEY")
+
+    def _select_model_for_task(self, task: Task) -> str:
+        code_model = os.getenv("CODEX_MISTRAL_MODEL", "codestral-latest").strip() or "codestral-latest"
+        analysis_model = os.getenv("MISTRAL_MODEL", "mistral-large-latest").strip() or "mistral-large-latest"
+        fast_model = os.getenv("MISTRAL_FAST_MODEL", "mistral-medium-latest").strip() or "mistral-medium-latest"
+
+        if task.type in {TaskType.CODE, TaskType.FIX}:
+            return code_model
+        if task.type in {TaskType.REVIEW, TaskType.RESEARCH, TaskType.TEST}:
+            return analysis_model
+        if task.type == TaskType.DOCS:
+            complexity = getattr(task, "complexity", None)
+            if complexity is not None and str(complexity.value).lower() == "low":
+                return fast_model
+            return analysis_model
+        if task.type == TaskType.PLAN:
+            return analysis_model
+        return fast_model
 
     def health(self) -> AgentHealth:
         if not self.api_key:
@@ -63,6 +81,7 @@ class MistralAgent(ExternalAIAgent):
             
         max_retries = 3
         last_exc = None
+        model_name = self._select_model_for_task(task)
         
         for attempt in range(max_retries):
             try:
@@ -73,7 +92,7 @@ class MistralAgent(ExternalAIAgent):
                     f"{self.endpoint}/chat/completions",
                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                     json={
-                        "model": os.getenv("MISTRAL_MODEL", "mistral-large-latest"),
+                        "model": model_name,
                         "messages": [{"role": "user", "content": prompt_content}],
                     },
                     timeout=45.0,

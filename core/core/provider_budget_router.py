@@ -75,17 +75,26 @@ class ProviderBudgetRouter:
             else:
                 base = [preferred, "antigravity", "mistral", "local", "openai"]
         elif self.policy_mode == "strict":
-            # Strict cost-optimization: keep Antigravity first for code/review and Mistral second for fast fallback.
+            # Strict mode still honors an explicit Mistral-first selection for normal engineering work.
             if task.type in {TaskType.CODE, TaskType.REVIEW}:
-                base = ["antigravity", "mistral", "local", "openai"]
+                if preferred == "mistral":
+                    base = ["mistral", "antigravity", "local", "openai"]
+                else:
+                    base = ["antigravity", "mistral", "local", "openai"]
             elif task.type in {TaskType.TEST, TaskType.FIX}:
                 base = ["mistral", "antigravity", "local", "openai"]
             else:
                 base = [preferred, "antigravity", "mistral", "local", "openai"]
         elif self.force_antigravity and task.type in {TaskType.CODE, TaskType.REVIEW, TaskType.TEST, TaskType.DOCS, TaskType.RESEARCH, TaskType.FIX}:
-            base = ["antigravity", "mistral", "local", "openai"]
+            if preferred == "mistral" and task.type in {TaskType.CODE, TaskType.REVIEW, TaskType.TEST, TaskType.FIX}:
+                base = ["mistral", "antigravity", "local", "openai"]
+            else:
+                base = ["antigravity", "mistral", "local", "openai"]
         elif task.type in {TaskType.CODE, TaskType.REVIEW}:
-            base = [preferred, "antigravity", "mistral", "local", "openai"]
+            if preferred == "mistral":
+                base = ["mistral", "antigravity", "local", "openai"]
+            else:
+                base = [preferred, "antigravity", "mistral", "local", "openai"]
         elif task.type in {TaskType.TEST, TaskType.FIX}:
             base = ["mistral", "antigravity", "local", "openai"]
         elif task.type in {TaskType.DOCS, TaskType.RESEARCH}:

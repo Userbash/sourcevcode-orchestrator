@@ -4,7 +4,7 @@ import subprocess
 from types import SimpleNamespace
 
 from core.agents.gemini_cli_agent import GeminiCLIAgent
-from core.core.external_core import ExternalAIBridge
+from core.core.external_ai_bridge import ExternalAIBridge
 from core.core.models import Task, TaskContext, TaskInput, TaskStatus, TaskType
 from core.core.security import SecurityManager, SecurityPolicy
 

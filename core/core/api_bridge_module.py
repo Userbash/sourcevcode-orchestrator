@@ -21,6 +21,33 @@ from .dev_toolkit_module import DevToolkitModule, DevToolkitRequest
 logger = logging.getLogger("api_bridge_module")
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "as_dict"):
+        try:
+            return _json_safe(value.as_dict())
+        except Exception:
+            pass
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump(mode="json"))
+        except Exception:
+            pass
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return str(value)
+
+
 class ChatRequest(BaseModel):
     user_id: str
     message: str
@@ -201,9 +228,10 @@ class APIBridgeModule:
             summary["ready_agents"] = sum(1 for item in agent_health if item.get("status") == "ready")
             summary["problem_agents"] = sum(1 for item in agent_health if item.get("status") != "ready")
 
-        module_state = module_manager.finalize() if module_manager and hasattr(module_manager, "finalize") else {}
-        sourcecraft = self._sourcecraft_snapshot()
-        postgres = self._postgres_snapshot()
+        raw_module_state = module_manager.finalize() if module_manager and hasattr(module_manager, "finalize") else {}
+        module_state = _json_safe(raw_module_state)
+        sourcecraft = _json_safe(self._sourcecraft_snapshot())
+        postgres = _json_safe(self._postgres_snapshot())
         postgres_required = bool(os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip())
         postgres_ok = postgres.get("status") == "ok" or (not postgres_required and postgres.get("snapshot", {}).get("postgres_state") == "missing")
         overall_ok = bool(provider_health) and bool(agent_health) and summary["problem_agents"] == 0 and summary["problem_providers"] == 0 and postgres_ok

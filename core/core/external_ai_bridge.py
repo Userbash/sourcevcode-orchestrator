@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 from dataclasses import dataclass
@@ -47,9 +48,18 @@ class ExternalAIBridge:
             if resolved and os.access(resolved, os.X_OK):
                 return [resolved]
 
+        candidate_paths: list[str] = []
         for candidate in ("agy", "antigravity"):
             resolved = shutil.which(candidate)
             if resolved:
+                candidate_paths.append(resolved)
+        candidate_paths.extend([
+            "/usr/local/bin/agy",
+            "/app/core/bin/agy",
+            str(Path.home() / ".local" / "bin" / "agy"),
+        ])
+        for resolved in candidate_paths:
+            if resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK):
                 return [resolved]
         return None
 

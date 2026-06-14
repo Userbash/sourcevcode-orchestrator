@@ -23,7 +23,7 @@ from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
 from .model_selector import ModelChoice, ModelSelector
-from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType
+from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
@@ -809,9 +809,69 @@ class Orchestrator:
 
         return advisory_context
 
+    def _materialize_mistral_delegation_plan(self, task: Task, advisory_context: dict[str, object]) -> ExecutionPlan | None:
+        governance = advisory_context.get("mistral_governance")
+        if not isinstance(governance, dict):
+            return None
+        if str(governance.get("selected_owner") or "").strip().lower() != "mistral_gateway":
+            return None
+        delegation_plan = governance.get("delegation_plan")
+        if not isinstance(delegation_plan, list) or not delegation_plan:
+            return None
+
+        atomic_tasks: list[Task] = []
+        previous_task_id: str | None = None
+        for item in delegation_plan:
+            if not isinstance(item, dict):
+                continue
+            raw_type = str(item.get("task_type") or task.type.value).strip().lower()
+            try:
+                task_type = TaskType(raw_type)
+            except ValueError:
+                task_type = task.type
+            capability = CAPABILITY_BY_TASK_TYPE.get(task_type, raw_type)
+            subtask = Task(
+                task_type,
+                TaskInput(str(item.get("objective") or task.input.description)),
+                TaskContext(task.context.project, task.context.repo_path, task.context.branch),
+                priority=task.priority,
+                parent_task_id=task.task_id,
+                required_capability=capability,
+                dependencies=[previous_task_id] if previous_task_id else [],
+                routing_hints={
+                    "source": "mistral_gateway",
+                    "delegate_to": str(item.get("delegate_to") or "local_llm"),
+                    "mode": str(item.get("mode") or "subtask"),
+                    "managed_by": "mistral_governance",
+                },
+                session_id=task.session_id,
+            )
+            atomic_tasks.append(subtask)
+            previous_task_id = subtask.task_id
+
+        if not atomic_tasks:
+            return None
+
+        return ExecutionPlan(
+            root_task_id=task.task_id,
+            atomic_tasks=atomic_tasks,
+            draft_layers=[
+                {
+                    "name": "mistral_gateway_delegation",
+                    "owner": "mistral",
+                    "target": "local_llm",
+                    "delegated_tasks": len(atomic_tasks),
+                }
+            ],
+        )
+
     def create_execution_plan(self, task: Task) -> ExecutionPlan:
         self.console.emit("PLAN", "Задача проанализирована")
         advisory_context = self._build_decomposition_advisory(task)
+        gateway_plan = self._materialize_mistral_delegation_plan(task, advisory_context)
+        if gateway_plan is not None:
+            self.console.emit("PLAN", f"Mistral gateway execution plan created: {len(gateway_plan.atomic_tasks)} tasks")
+            return gateway_plan
 
         sourcecraft_module = self.module_manager.get_module("sourcecraft")
         if sourcecraft_module and hasattr(sourcecraft_module, "build_execution_plan"):
@@ -1191,6 +1251,8 @@ class Orchestrator:
         # Pre-flight provider diagnostics: verify DNS/TCP/API/model readiness before spending a task attempt.
         provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
         preflight_live = os.getenv("AI_BRIDGE_PREFLIGHT_LIVE_PROBE", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if self._testing_mode():
+            preflight_live = False
         provider_health = self.availability.check_provider(provider, live=preflight_live)
         module_context["availability_preflight"] = provider_health.as_dict()
         provider_ready = provider_health.status in {ProviderStatus.HEALTHY, ProviderStatus.DEGRADED}

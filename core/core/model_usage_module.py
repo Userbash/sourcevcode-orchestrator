@@ -11,6 +11,13 @@ from .models import AgentResult, Task
 
 logger = logging.getLogger("model_usage_module")
 
+RATE_CARD_USD_PER_1K: dict[str, tuple[float, float]] = {
+    "codestral-latest": (0.0003, 0.0009),
+    "mistral-medium-latest": (0.0004, 0.0012),
+    "mistral-large-latest": (0.0020, 0.0060),
+    "devstral-latest": (0.0012, 0.0035),
+}
+
 @dataclass
 class ModelStats:
     used_tokens: int = 0
@@ -126,9 +133,40 @@ class ModelUsageModule:
             self.stats[model] = ModelStats(limit_tokens=limit)
         return self.stats[model]
 
+    @staticmethod
+    def _normalize_provider(provider: str, model: str) -> str:
+        raw_provider = str(provider or "").strip().lower()
+        raw_model = str(model or "").strip().lower()
+        if raw_provider:
+            if raw_provider in {"google", "gemini", "agy", "antigravity-cli"}:
+                return "antigravity"
+            return raw_provider
+        if "mistral" in raw_model or "codestral" in raw_model or "devstral" in raw_model:
+            return "mistral"
+        if raw_model.startswith("gpt") or "openai" in raw_model:
+            return "openai"
+        return "unknown"
+
+    def estimate_usage_cost(self, model: str, *, input_tokens: int, output_tokens: int, provider: str = "") -> dict[str, Any]:
+        normalized_model = str(model or "unknown").strip()
+        normalized_provider = self._normalize_provider(provider, normalized_model)
+        input_rate, output_rate = RATE_CARD_USD_PER_1K.get(normalized_model, (0.0, 0.0))
+        estimated_cost = round(((max(0, int(input_tokens)) / 1000.0) * input_rate) + ((max(0, int(output_tokens)) / 1000.0) * output_rate), 6)
+        return {
+            "provider": normalized_provider,
+            "model": normalized_model,
+            "currency": "USD",
+            "input_tokens": max(0, int(input_tokens)),
+            "output_tokens": max(0, int(output_tokens)),
+            "estimated_cost_usd": estimated_cost,
+        }
+
     def before_task(self, task: Task, context: dict[str, Any]) -> None:
         model = context.get("model") or context.get("selected_model") or "unknown"
-        provider = context.get("provider") or context.get("selected_provider") or "unknown"
+        provider = self._normalize_provider(
+            str(context.get("provider") or context.get("selected_provider") or ""),
+            str(model),
+        )
         
         self.current = {
             "task_id": task.task_id,
@@ -141,18 +179,37 @@ class ModelUsageModule:
 
     def after_task(self, task: Task, result: AgentResult, context: dict[str, Any]) -> None:
         model = context.get("model") or context.get("selected_model") or "unknown"
-        provider = context.get("provider") or context.get("selected_provider") or "unknown"
+        provider = self._normalize_provider(
+            str(context.get("provider") or context.get("selected_provider") or result.provider or ""),
+            str(model),
+        )
         
         # Simulate token extraction. In a real scenario, this would come from result.metadata 
         # or the LLM provider API response (e.g. usage.total_tokens)
         # We will estimate tokens if not explicitly provided: ~ 4 chars per token.
         input_len = len(str(task.input))
         output_len = len(str(result.output))
-        estimated_tokens = (input_len + output_len) // 4
+        estimated_input_tokens = max(1, input_len // 4)
+        estimated_output_tokens = max(1, output_len // 4)
+        estimated_tokens = estimated_input_tokens + estimated_output_tokens
         
         # Override with actual tokens if provider sent them
         actual_tokens = context.get("usage_tokens", estimated_tokens)
-        
+        if isinstance(actual_tokens, int):
+            actual_input_tokens = min(actual_tokens, estimated_input_tokens)
+            actual_output_tokens = max(0, actual_tokens - actual_input_tokens)
+        else:
+            actual_input_tokens = estimated_input_tokens
+            actual_output_tokens = estimated_output_tokens
+            actual_tokens = estimated_tokens
+
+        cost_estimate = self.estimate_usage_cost(
+            str(model),
+            input_tokens=actual_input_tokens,
+            output_tokens=actual_output_tokens,
+            provider=provider,
+        )
+
         # Update Stats
         model_stat = self._get_or_create_stats(model)
         model_stat.used_tokens += actual_tokens
@@ -166,6 +223,8 @@ class ModelUsageModule:
             "agent_id": context.get("agent_id") or result.agent_id,
             "status": result.status.value,
             "tokens_used": actual_tokens,
+            "estimated_cost_usd": cost_estimate["estimated_cost_usd"],
+            "currency": cost_estimate["currency"],
             "completed_at": datetime.now(UTC).isoformat(),
         }
         self.history.append(record)

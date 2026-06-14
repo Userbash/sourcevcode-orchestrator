@@ -5,7 +5,7 @@ from core.agents.gemini_cli_agent import GeminiCLIAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.core.models import Priority, Task, TaskContext, TaskInput, TaskType
+from core.core.models import AgentResult, Priority, Task, TaskContext, TaskInput, TaskStatus, TaskType
 from core.core.orchestrator import Orchestrator
 from core.core.provider_budget_router import ProviderBudgetRouter
 from core.core.model_usage_module import ModelUsageModule
@@ -104,3 +104,30 @@ def test_model_usage_requests_parallelism_reduction_when_remaining_budget_is_low
     assert policy["remaining_percentage"] == 8.5
     assert policy["action"] == "reduce"
     assert module.should_reduce_parallelism() is True
+
+
+def test_model_usage_estimates_mistral_gateway_costs():
+    module = ModelUsageModule()
+    estimate = module.estimate_usage_cost("mistral-large-latest", input_tokens=2000, output_tokens=1000)
+
+    assert estimate["currency"] == "USD"
+    assert estimate["provider"] == "mistral"
+    assert estimate["estimated_cost_usd"] > 0
+
+
+def test_model_usage_after_task_records_estimated_cost_for_mistral():
+    module = ModelUsageModule()
+    task = Task(
+        TaskType.REVIEW,
+        TaskInput("review backend auth changes"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    context = {"model": "mistral-large-latest", "provider": "mistral", "usage_tokens": 500}
+    module.before_task(task, context)
+    result = AgentResult(task.task_id, "mistral-1", TaskStatus.DONE, {"summary": "ok"}, 0.9, [], [], provider="mistral", model_name="mistral-large-latest")
+
+    module.after_task(task, result, context)
+
+    assert module.history[-1]["provider"] == "mistral"
+    assert module.history[-1]["estimated_cost_usd"] > 0

@@ -516,3 +516,38 @@ def test_orchestrator_prefers_sourcecraft_execution_plan(monkeypatch):
     plan = orchestrator.create_execution_plan(task)
 
     assert plan is expected
+
+
+def test_orchestrator_create_execution_plan_materializes_mistral_gateway_delegation(monkeypatch):
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+
+    orchestrator = Orchestrator()
+    orchestrator.module_manager = SimpleNamespace(get_module=lambda name: None)
+    task = Task(
+        TaskType.PLAN,
+        TaskInput(
+            "Break down migration rollout",
+            acceptance_criteria=["plan backend steps", "plan tests", "plan docs"],
+        ),
+        TaskContext("demo", ".", "main"),
+    )
+
+    advisory = {
+        "local_llm": {"ready": True, "recommended_owner": "local_llm", "recommended_model": "qwen-2.5-7b-instruct"},
+        "mistral_governance": {
+            "selected_owner": "mistral_gateway",
+            "delegation_plan": [
+                {"delegate_to": "local_llm", "task_type": "plan", "objective": "plan backend steps", "complexity": "low", "mode": "subtask"},
+                {"delegate_to": "local_llm", "task_type": "test", "objective": "plan tests", "complexity": "low", "mode": "subtask"},
+                {"delegate_to": "local_llm", "task_type": "docs", "objective": "plan docs", "complexity": "low", "mode": "subtask"},
+            ],
+        },
+    }
+    monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task_obj: advisory)
+
+    plan = orchestrator.create_execution_plan(task)
+
+    assert len(plan.atomic_tasks) == 3
+    assert [item.type.value for item in plan.atomic_tasks] == ["plan", "test", "docs"]
+    assert all(item.routing_hints.get("source") == "mistral_gateway" for item in plan.atomic_tasks)
+    assert all(item.required_capability in {"plan", "test", "docs"} for item in plan.atomic_tasks)
