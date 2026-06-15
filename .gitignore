@@ -77,7 +77,12 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
 .coverage
+.coverage.*
 htmlcov/
 
 # AI Bridge & Orchestrator

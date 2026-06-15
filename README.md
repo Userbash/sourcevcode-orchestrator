@@ -97,6 +97,9 @@ MIT (see `LICENSE`).
 - The orchestrator can automatically read `GITHUB_API_KEY` and reuse it for `gh` and Git operations.
 - SourceCraft repository workflows are wired into the core routing and API bridge.
 - Host bridge diagnostics now allow common runtime checks such as `env`, `printenv`, `ps`, `df`, and `hostname`.
+- Task intake now normalizes noisy text, removes unsafe formatting artifacts, and preserves cleaner structured task input.
+- The routing stack now uses a normalized intake profile to choose safer providers, stronger review lanes, and parallel code fan-out when the request shape supports it.
+- Prompt optimization and memory context now surface intake-quality and risk hints so downstream agents act with clearer guardrails.
 
 ## Project changes in plain English
 
@@ -110,6 +113,14 @@ Recent work focused on making GitHub automation safer and more hands-off:
 
 The result is a workflow where the orchestrator can manage repository tasks, authenticate to GitHub, and keep the experience mostly invisible to the user.
 
-## SourceCraft Publication Note
+## Publication summary
 
-SourceCraft is the repository operations layer inside the orchestrator stack. This publication focuses on reliability rather than marketing language: websocket sessions are now isolated correctly, routing hints survive task creation, cost and provider policy are easier to tune, startup degrades more safely when host bridge dependencies are missing, and task envelopes are serialized more reliably across the transport layer. The result is a runtime that behaves more consistently for real users, especially in containerized and mixed-provider deployments. For the full publication summary, see `docs/SOURCECRAFT_PUBLICATION_REPORT.md`.
+The current publication centers on intake quality and execution safety.
+
+- User payloads are normalized before task creation, including Unicode cleanup, whitespace compaction, list normalization, and length trimming.
+- A new heuristic intake profile classifies intent, risk, scope, execution shape, input quality, and decision confidence.
+- That profile is propagated into task routing, provider prioritization, task decomposition, prompt optimization, and runtime memory context.
+- High-risk or low-quality requests now bias toward stronger providers and explicit validation paths instead of cheap-first routing.
+- Large multi-file code requests can opt into parallel fan-out earlier, while review and test work can force single-lane validation behavior.
+
+For the detailed publication report, see `docs/SOURCECRAFT_PUBLICATION_REPORT.md` and `docs/RELEASE_SUMMARY_LAYERED_RUNTIME_MEMORY_AND_MULTI_AGENT_ORCHESTRATION.md`.

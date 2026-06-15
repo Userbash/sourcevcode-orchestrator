@@ -7,6 +7,14 @@ The format follows Keep a Changelog principles and Semantic Versioning (`MAJOR.M
 ## [Unreleased]
 
 ### Added
+- Input normalization helpers for task intake:
+  - Unicode cleanup, whitespace compaction, control-character stripping, and list normalization
+  - heuristic request quantization for intent, risk, scope, execution shape, quality, and confidence
+- Routing-profile propagation across orchestration:
+  - normalized intake profile attached to created tasks
+  - prompt optimizer context enriched with normalized reasons and execution guidance
+  - memory runtime context enriched with normalization guidance for downstream agents
+- Regression coverage for normalized payload parsing, provider preference escalation, secure routing, and normalized-profile-based decomposition
 - Delivery supervision for local agent execution:
   - tracked delivery records and handshake states
   - payload checksum validation before execution
@@ -36,6 +44,8 @@ The format follows Keep a Changelog principles and Semantic Versioning (`MAJOR.M
   - API route documentation coverage validation
 
 ### Changed
+- Task routing, provider prioritization, and decomposition now react to normalized intake risk, quality, and execution-shape signals instead of relying only on raw task complexity.
+- High-risk or noisy requests now prefer stronger validation lanes and stronger providers, while multi-file code requests can trigger earlier parallel fan-out.
 - Simplified the orchestrator module set by removing legacy frontend, UI-theme, websocket, API bridge, and auto-dev pipeline paths from the active runtime.
 - Routed local agent execution through delivery envelopes and mailbox handshakes instead of direct `agent.run(...)` calls.
 - Wired session memory and persistent memory to the message bus so memory activity can be observed externally.

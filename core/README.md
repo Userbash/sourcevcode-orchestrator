@@ -2,6 +2,13 @@
 
 Reusable orchestration toolkit for agent-driven development workflows. It provides task decomposition, agent registration, capability routing, health checks, load balancing, feedback/retry loops, metrics, security guards, and WebSocket adapters for local and external agents.
 
+## Recent runtime changes
+
+- Added shared input normalization helpers for scalar text and list fields so task intake is cleaner and more predictable.
+- Added heuristic input quantization that classifies intent, risk, scope, execution shape, quality, and confidence for each task.
+- Routed the resulting `normalized_text_profile` through task creation, routing, provider selection, prompt optimization, decomposition, and memory context assembly.
+- Expanded regression coverage for normalized payload handling, high-risk routing, stronger provider preference, prompt guardrails, and parallel code fan-out.
+
 ## Structure
 
 ```text

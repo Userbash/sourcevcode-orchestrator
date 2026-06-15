@@ -59,4 +59,5 @@
 ## Publication Notes
 
 - `SOURCECRAFT_PUBLICATION_REPORT.md` - human-readable publication report for SourceCraft, including runtime changes, new features, and operational impact
+- `RELEASE_SUMMARY_LAYERED_RUNTIME_MEMORY_AND_MULTI_AGENT_ORCHESTRATION.md` - release summary for intake normalization, routing-profile propagation, and orchestration guardrail improvements
 - SourceCraft publication summary: SourceCraft now ships with explicit websocket routing hints, session isolation, degraded boot behavior for unsupported host bridge paths, and safer message serialization in the orchestration transport layer.

@@ -23,6 +23,45 @@ SourceCraft does not replace the orchestrator. It gives the orchestrator a focus
 
 ## What Changed In This Release
 
+### 0. Task intake is now normalized before routing
+
+This release adds a stricter intake preparation layer before a request becomes a task.
+
+The runtime now:
+
+- normalizes Unicode variants and zero-width/control characters
+- compacts whitespace and blank lines
+- normalizes list-like fields such as files, constraints, and acceptance criteria
+- trims oversized text to stable limits before routing or prompting
+
+This matters because the orchestrator should not route, decompose, or prioritize work from inconsistent raw text. A cleaner intake gives the rest of the stack a more reliable starting point.
+
+### 0.1 A normalized request profile now drives execution policy
+
+After normalization, the runtime builds a heuristic profile that describes the request in execution terms:
+
+- intent bucket
+- risk bucket
+- scope bucket
+- execution shape
+- input quality bucket
+- confidence score and trust level
+
+That profile is attached to the task and reused across the system. In practice, this means the same intake signal now influences multiple runtime layers instead of being lost after task creation.
+
+### 0.2 Routing and provider policy now use the intake profile
+
+The routing layer now treats the normalized request profile as a first-class policy input.
+
+Examples:
+
+- high-risk trusted requests can prefer stronger OpenAI-backed or secure review lanes earlier
+- noisy-but-usable requests avoid the cheapest routing path and move toward stronger validation
+- review and test work can force a single-lane validation path
+- large multi-file code work can trigger parallel decomposition earlier
+
+The practical outcome is that task handling is better aligned with what the user actually asked for, not just with generic task type defaults.
+
 ### 1. Websocket sessions now behave like real user sessions
 
 Before this release, websocket clients could fall into a shared default session identity. That made budgeting, provider state, and idempotency behavior bleed across unrelated websocket users.
