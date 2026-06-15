@@ -59,6 +59,7 @@ def test_memory_control_builds_provider_specific_runtime_context(tmp_path, monke
     module.on_load(_FakeAPI(session_memory=memory, layered_context_memory=layered, orchestration_config=config))
 
     task = _task()
+    task.routing_hints = {"normalized_text_profile": {"execution_shape": "parallel_candidate", "risk_bucket": "high", "decision_trust": "trusted", "confidence_score": 0.86}}
     module.register_submission(task, raw_payload="build feature", normalized_payload={"description": task.input.description}, source="user")
     module.register_planning_draft(task, {"local_llm": {"summary": "First draft a plan, then decompose"}}, source="test")
     plan = ExecutionPlan(root_task_id=task.task_id, atomic_tasks=[task], draft_layers=[{"name": "code", "objective": task.input.description}])
@@ -91,6 +92,8 @@ def test_memory_control_builds_provider_specific_runtime_context(tmp_path, monke
     assert context["memory_profile"] == "rich_synthesis"
     assert "layered_context_brief" in context
     assert "prompt_guidance" in context
+    assert context["normalized_text_profile"]["execution_shape"] == "parallel_candidate"
+    assert "normalization_guidance" in context
     assert module.finalize()["reads_total"] == 1
 
 

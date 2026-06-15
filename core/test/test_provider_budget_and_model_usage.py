@@ -216,3 +216,37 @@ def test_provider_budget_router_uses_cheaper_order_for_websocket_economy():
     providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
 
     assert providers[0] == "local"
+
+
+def test_provider_budget_router_prefers_openai_for_high_risk_trusted_profile():
+    task = Task(
+        TaskType.CODE,
+        TaskInput("Rotate production auth token handling"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    task.routing_hints = {"normalized_text_profile": {"risk_bucket": "high", "decision_trust": "trusted", "confidence_score": 0.83}}
+
+    class _Choice:
+        provider = "mistral"
+
+    providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
+
+    assert providers[0] == "openai"
+
+
+def test_provider_budget_router_prefers_stronger_providers_for_noisy_input_profile():
+    task = Task(
+        TaskType.DOCS,
+        TaskInput("docs????"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    task.routing_hints = {"normalized_text_profile": {"input_quality_bucket": "noisy_but_usable", "decision_trust": "trusted", "confidence_score": 0.76}}
+
+    class _Choice:
+        provider = "local"
+
+    providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
+
+    assert providers[0] == "openai"

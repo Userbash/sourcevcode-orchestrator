@@ -183,9 +183,11 @@ class TaskDecomposer:
         agents = self._parallel_code_agents()
         if len(agents) < 2:
             return None
+        profile = hints.get("normalized_text_profile") if isinstance(hints, dict) else None
         explicit = bool(hints.get("parallelize_code"))
+        profile_parallel = isinstance(profile, dict) and str(profile.get("execution_shape") or "") == "parallel_candidate"
         looks_large = len(task.input.files) > 1 or len(task.input.acceptance_criteria) > 1 or len(task.input.description.strip()) >= 80
-        if not explicit and complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not looks_large:
+        if not explicit and not profile_parallel and complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not looks_large:
             return None
         max_branches_raw = str(hints.get("parallel_branches") or "").strip()
         if max_branches_raw.isdigit():

@@ -80,6 +80,12 @@ class PromptOptimizerModule:
         return [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
 
     @staticmethod
+    def _normalized_text_profile(task: Task) -> dict[str, Any]:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        profile = hints.get("normalized_text_profile")
+        return profile if isinstance(profile, dict) else {}
+
+    @staticmethod
     def _task_type_label(task: Task) -> str:
         task_type = getattr(task, "type", None)
         return str(getattr(task_type, "value", task_type) or "unknown")
@@ -301,6 +307,21 @@ class PromptOptimizerModule:
             context_lines.append(f"constraints: {', '.join(task.input.constraints)}")
         if task.input.acceptance_criteria:
             context_lines.append(f"acceptance_criteria: {', '.join(task.input.acceptance_criteria)}")
+        profile = self._normalized_text_profile(task)
+        if profile:
+            context_lines.append(
+                "normalized_profile: "
+                f"intent={profile.get('intent_bucket', '')}; "
+                f"risk={profile.get('risk_bucket', '')}; "
+                f"scope={profile.get('scope_bucket', '')}; "
+                f"execution={profile.get('execution_shape', '')}; "
+                f"quality={profile.get('input_quality_bucket', '')}; "
+                f"trust={profile.get('decision_trust', '')}; "
+                f"confidence={profile.get('confidence_score', 0.0)}"
+            )
+            reasons = [str(item).strip() for item in (profile.get('reasons') or []) if str(item).strip()]
+            for item in reasons[:3]:
+                context_lines.append(f"normalized_reason: {item}")
         if history:
             context_lines.append(f"recent_successful_history_items: {len(history)}")
         trained = trained or self._trained_memory_context(task, context)
@@ -348,6 +369,11 @@ class PromptOptimizerModule:
                 core_only = self._normalize_lines(offload_policy.get("core_only"))
                 if core_only:
                     requirements.extend(f"core_boundary: {step}" for step in core_only[:5])
+        profile = self._normalized_text_profile(task)
+        if str(profile.get("execution_shape") or "") == "parallel_candidate":
+            requirements.append("parallelize only independent branches and keep a final consolidation step.")
+        if str(profile.get("decision_trust") or "") == "rough_hint":
+            requirements.append("validate intent and scope before acting because intake quantization confidence is limited.")
         if not requirements:
             requirements.append("derive explicit requirements from the objective before executing.")
         return requirements
@@ -369,6 +395,11 @@ class PromptOptimizerModule:
                 risks.append(note)
         if task.priority.value in {"high", "critical"}:
             risks.append("priority is elevated; prefer conservative changes and explicit validation.")
+        profile = self._normalized_text_profile(task)
+        if str(profile.get("risk_bucket") or "") == "high":
+            risks.append("intake quantization marked this request as high-risk; prefer stronger validation and explicit rollback.")
+        if str(profile.get("input_quality_bucket") or "") in {"noisy_but_usable", "sparse"}:
+            risks.append("input quality is degraded or sparse; restate assumptions before mutating code or state.")
         if offload and offload.get("high_risk"):
             risks.append("local LLM flagged high risk; inspect the prompt before mutating state.")
         if not risks:
@@ -424,6 +455,11 @@ class PromptOptimizerModule:
                 "summarize findings with source links or code references",
                 "end with a clear recommendation",
             ])
+        profile = self._normalized_text_profile(task)
+        if str(profile.get("execution_shape") or "") == "parallel_candidate":
+            steps.append("split the work into independent branches, assign ownership, and keep a final merge/review stage.")
+        if str(profile.get("execution_shape") or "") == "single_lane_validation":
+            steps.append("run the work through a single validated lane and keep review/test checkpoints explicit.")
         if history:
             steps.append("reuse only the relevant successful patterns from recent history.")
         if not steps:

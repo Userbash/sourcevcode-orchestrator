@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from .input_text_normalizer import normalize_text, normalize_text_list
+from .input_text_quantizer import quantize_input_text
 from .models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
 
 
@@ -95,6 +97,10 @@ def _normalize_cost_tier(raw: Any, *, source: str) -> str:
     return _COST_TIER_ALIASES.get(value, value)
 
 
+def _normalize_scalar(raw: Any, *, max_chars: int = 512) -> str:
+    return normalize_text(raw, max_chars=max_chars)
+
+
 def _provider_hint(normalized: dict[str, Any]) -> str | None:
     for key in ("provider", "preferred_provider"):
         value = normalized.get(key)
@@ -112,15 +118,7 @@ def _model_hint(normalized: dict[str, Any]) -> str | None:
 
 
 def _as_list(raw: Any) -> list[str]:
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        return [str(item).strip() for item in raw if str(item).strip()]
-    if isinstance(raw, str):
-        chunks = [item.strip() for item in raw.replace("\r", "\n").split("\n")]
-        return [item for item in chunks if item]
-    value = str(raw).strip()
-    return [value] if value else []
+    return normalize_text_list(raw)
 
 
 def _is_meaningful_text(text: str) -> bool:
@@ -140,25 +138,40 @@ def _extract_description(data: dict[str, Any]) -> str:
     for key in ("description", "message", "text", "prompt", "objective"):
         value = data.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return normalize_text(value, max_chars=6000)
     return ""
 
 
 def normalize_user_payload(payload: Any) -> dict[str, Any]:
-    if isinstance(payload, dict):
-        return payload
     if isinstance(payload, str):
-        stripped = payload.strip()
+        stripped = normalize_text(payload, max_chars=8000)
         if not stripped:
             return {}
         try:
             parsed = json.loads(stripped)
             if isinstance(parsed, dict):
-                return parsed
+                payload = parsed
+            else:
+                return {"description": stripped}
         except json.JSONDecodeError:
-            pass
-        return {"description": stripped}
-    return {}
+            return {"description": stripped}
+    if not isinstance(payload, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        key_name = str(key).strip()
+        if not key_name:
+            continue
+        if key_name in {"description", "message", "text", "prompt", "objective", "project", "repo_path", "branch", "session_id", "task_id", "provider", "preferred_provider", "model", "requested_model", "assigned_model", "source", "type", "priority", "complexity", "cost_tier", "tier"} and value is not None:
+            normalized[key_name] = _normalize_scalar(value, max_chars=6000 if key_name in {"description", "message", "text", "prompt", "objective"} else 512)
+        elif key_name in {"files", "constraints", "acceptance_criteria"}:
+            normalized[key_name] = _as_list(value)
+        elif isinstance(value, str):
+            normalized[key_name] = _normalize_scalar(value)
+        else:
+            normalized[key_name] = value
+    return normalized
 
 
 def validate_normalized_payload(normalized: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -204,14 +217,24 @@ def create_standard_task(data: dict[str, Any]) -> Task:
         complexity = _normalize_complexity(normalized.get("complexity"))
         provider = _provider_hint(normalized)
         requested_model = _model_hint(normalized)
+        files = _as_list(normalized.get("files"))
+        constraints = _as_list(normalized.get("constraints"))
+        acceptance_criteria = _as_list(normalized.get("acceptance_criteria")) or ["tests pass"]
+        task_type = _normalize_task_type(normalized.get("type"))
+        input_profile = quantize_input_text(
+            cleaned_text=description,
+            files=files,
+            acceptance_criteria=acceptance_criteria,
+            explicit_type=task_type.value,
+        )
 
         task = Task(
-            type=_normalize_task_type(normalized.get("type")),
+            type=task_type,
             input=TaskInput(
                 description=description,
-                files=_as_list(normalized.get("files")),
-                constraints=_as_list(normalized.get("constraints")),
-                acceptance_criteria=_as_list(normalized.get("acceptance_criteria")) or ["tests pass"],
+                files=files,
+                constraints=constraints,
+                acceptance_criteria=acceptance_criteria,
             ),
             context=TaskContext(
                 project=str(normalized.get("project", "default")),
@@ -229,6 +252,11 @@ def create_standard_task(data: dict[str, Any]) -> Task:
             task.routing_hints = {}
         task.routing_hints.setdefault("source", source)
         task.routing_hints.setdefault("cost_tier", cost_tier)
+        task.routing_hints["normalized_text_profile"] = input_profile
+        if input_profile.get("execution_shape") == "parallel_candidate" and task.type == TaskType.CODE:
+            task.routing_hints.setdefault("parallelize_code", True)
+            if input_profile.get("scope_bucket") in {"multi_file", "multi_area"}:
+                task.routing_hints.setdefault("parallel_branches", 3)
         if source == "websocket":
             task.routing_hints.setdefault("channel", "ws")
             task.routing_hints.setdefault("interactive", True)

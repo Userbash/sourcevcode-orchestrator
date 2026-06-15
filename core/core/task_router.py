@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, UTC
+from typing import Any
 
 from .agent_registry import AgentRegistry
 from .load_balancer import LoadBalancer, UNROUTABLE_AGENT_STATUSES, is_agent_routable
@@ -158,6 +159,31 @@ class TaskRouter:
     
     
     @staticmethod
+    def _normalized_text_profile(task: Task) -> dict[str, Any]:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        profile = hints.get("normalized_text_profile")
+        return profile if isinstance(profile, dict) else {}
+
+    @classmethod
+    def _profile_risk_bucket(cls, task: Task) -> str:
+        return str(cls._normalized_text_profile(task).get("risk_bucket") or "").strip().lower()
+
+    @classmethod
+    def _profile_quality_bucket(cls, task: Task) -> str:
+        return str(cls._normalized_text_profile(task).get("input_quality_bucket") or "").strip().lower()
+
+    @classmethod
+    def _profile_execution_shape(cls, task: Task) -> str:
+        return str(cls._normalized_text_profile(task).get("execution_shape") or "").strip().lower()
+
+    @classmethod
+    def _profile_trusted(cls, task: Task) -> bool:
+        profile = cls._normalized_text_profile(task)
+        trust = str(profile.get("decision_trust") or "").strip().lower()
+        confidence = float(profile.get("confidence_score", 0.0) or 0.0)
+        return trust == "trusted" or confidence >= 0.72
+
+    @staticmethod
     def _preferred_agent_id(task: Task) -> str | None:
         hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
         for key in ("preferred_agent_id", "batch_forced_agent_id", "forced_agent_id"):
@@ -173,16 +199,21 @@ class TaskRouter:
             if capability in agent.capabilities and agent.status not in UNROUTABLE_AGENT_STATUSES
         ]
 
-    @staticmethod
-    def _preferred_secure_agents(candidates: list[AgentRecord], task: Task) -> list[AgentRecord]:
-        if not task.complexity:
-            return []
-        if task.complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not task.priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
+    @classmethod
+    def _preferred_secure_agents(cls, candidates: list[AgentRecord], task: Task) -> list[AgentRecord]:
+        profile_risk = cls._profile_risk_bucket(task)
+        profile_quality = cls._profile_quality_bucket(task)
+        trusted_profile = cls._profile_trusted(task)
+        elevated = bool(task.complexity and task.complexity in {Complexity.HIGH, Complexity.CRITICAL})
+        elevated = elevated or task.priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}
+        elevated = elevated or (trusted_profile and profile_risk == "high")
+        elevated = elevated or profile_quality == "noisy_but_usable"
+        if not elevated:
             return []
         secure = [
             agent
             for agent in candidates
-            if agent.critical or any(token in f"{agent.id} {agent.model_name}".lower() for token in ("secure", "senior"))
+            if agent.critical or any(token in f"{agent.id} {agent.model_name}".lower() for token in ("secure", "senior", "review"))
         ]
         return secure
 
@@ -204,19 +235,22 @@ class TaskRouter:
 
         complexity = self.estimate_complexity(task)
         high_risk = self._requires_openai_priority(task)
+        profile_quality = self._profile_quality_bucket(task)
+        profile_execution = self._profile_execution_shape(task)
+        profile_present = bool(self._normalized_text_profile(task))
 
         reuse_hint = task.routing_hints.get("memory_reuse", {}) if isinstance(task.routing_hints, dict) else {}
         reuse_matched = bool(reuse_hint.get("matched"))
         reuse_similarity = float(reuse_hint.get("similarity", 0.0) or 0.0)
 
-        if reuse_matched and reuse_similarity >= 0.78 and complexity in {"low", "medium"} and not high_risk:
+        if reuse_matched and reuse_similarity >= 0.78 and complexity in {"low", "medium"} and not high_risk and (not profile_present or profile_quality == "clean"):
             non_openai = [agent for agent in candidates if agent.provider != "openai"]
             if non_openai:
                 preferred_group = self._preferred_non_openai_group(task, complexity, non_openai)
                 if preferred_group:
                     return preferred_group
 
-        if complexity in {"low", "medium"} and not high_risk:
+        if complexity in {"low", "medium"} and not high_risk and (not profile_present or profile_quality == "clean") and profile_execution != "single_lane_validation":
             non_openai = [agent for agent in candidates if agent.provider != "openai"]
             if non_openai:
                 preferred_group = self._preferred_non_openai_group(task, complexity, non_openai)
@@ -235,8 +269,8 @@ class TaskRouter:
 
         openai_first = [agent for agent in candidates if agent.provider == "openai"]
         if openai_first:
-            if high_risk or complexity in {"high", "critical"}:
-                secure = [agent for agent in openai_first if agent.model_name == "gpt-senior-secure"]
+            if high_risk or complexity in {"high", "critical"} or profile_execution == "single_lane_validation":
+                secure = [agent for agent in openai_first if any(token in agent.model_name for token in ("secure", "senior", "gpt-5"))]
                 return secure or openai_first
             return openai_first
 
@@ -282,6 +316,13 @@ class TaskRouter:
         if task.priority in {Priority.HIGH, Priority.CRITICAL}:
             return True
         if self.estimate_complexity(task) in {"high", "critical"}:
+            return True
+        profile = self._normalized_text_profile(task)
+        if self._profile_trusted(task) and str(profile.get("risk_bucket") or "").strip().lower() == "high":
+            return True
+        if str(profile.get("input_quality_bucket") or "").strip().lower() == "noisy_but_usable":
+            return True
+        if str(profile.get("execution_shape") or "").strip().lower() == "single_lane_validation":
             return True
         text = task.input.description.lower()
         risk = evaluate_risk_context(text)

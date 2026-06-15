@@ -336,3 +336,28 @@ def test_prompt_optimizer_respects_explicit_trained_memory_deny_policy():
     assert "TRAINED MEMORY:" not in task.input.description
     assert task.routing_hints["prompt_optimizer"]["trained_memory_used"] is False
     assert task.routing_hints["prompt_optimizer"]["trained_memory_reason"] == "policy_denied"
+
+
+def test_prompt_optimizer_surfaces_normalized_profile_context():
+    module = PromptOptimizerModule()
+    module.on_load(_FakeAPI())
+    task = _task()
+    task.routing_hints = {
+        "normalized_text_profile": {
+            "intent_bucket": "code",
+            "risk_bucket": "high",
+            "scope_bucket": "multi_file",
+            "execution_shape": "parallel_candidate",
+            "input_quality_bucket": "clean",
+            "decision_trust": "trusted",
+            "confidence_score": 0.88,
+            "reasons": ["Task references multiple files.", "Intent classified as code for execution planning."],
+        }
+    }
+
+    module.before_task(task, {})
+
+    assert "normalized_profile:" in task.input.description
+    assert "normalized_reason: Task references multiple files." in task.input.description
+    assert "parallelize only independent branches" in task.input.description
+    assert "high-risk; prefer stronger validation" in task.input.description

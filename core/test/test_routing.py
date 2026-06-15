@@ -152,3 +152,33 @@ def test_router_prefers_non_openai_agents_when_reusable_memory_is_strong():
 
     assert accepted.status.value == "accepted"
     assert accepted.assigned_agent == "local-code"
+
+
+def test_router_prefers_secure_agent_for_high_risk_trusted_profile():
+    registry = AgentRegistry()
+    registry.register("local-code", "codex", "local://local", ["code"], provider="local")
+    registry.register("secure-openai", "codex", "local://secure", ["code"], provider="openai", model_name="gpt-senior-secure", critical=True)
+    router = TaskRouter(registry, LoadBalancer())
+    task = Task(TaskType.CODE, TaskInput("Rotate auth secrets in production"), TaskContext("p", ".", "main"))
+    task.required_capability = "code"
+    task.routing_hints = {"normalized_text_profile": {"risk_bucket": "high", "decision_trust": "trusted", "confidence_score": 0.84}}
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "secure-openai"
+
+
+def test_router_avoids_economy_bias_for_single_lane_validation_profile():
+    registry = AgentRegistry()
+    registry.register("openai-review", "codex", "local://openai-review", ["review"], provider="openai", model_name="gpt-5-review")
+    registry.register("local-review", "codex", "local://local-review", ["review"], provider="local", model_name="local-small")
+    router = TaskRouter(registry, LoadBalancer())
+    task = Task(TaskType.REVIEW, TaskInput("Review risky auth changes"), TaskContext("p", ".", "main"))
+    task.required_capability = "review"
+    task.routing_hints = {"normalized_text_profile": {"execution_shape": "single_lane_validation", "input_quality_bucket": "clean", "decision_trust": "trusted", "confidence_score": 0.81}}
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "openai-review"

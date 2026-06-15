@@ -223,3 +223,25 @@ def test_feedback_loop_does_not_recurse_fix_tasks():
     ok, nested_fix = feedback.evaluate(fix_task, fix_result)
     assert not ok
     assert nested_fix is None
+
+
+
+def test_code_task_decomposition_uses_normalized_profile_for_parallel_fanout():
+    from core.core.task_submission_api import create_standard_task
+
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+    orchestrator.attach_local_agent("code-third", LocalCodeAgent("code-third"), model_name="mistral-large-latest", provider="mistral")
+
+    task = create_standard_task({
+        "message": "Implement backend and frontend changes for the feature and add tests",
+        "files": "backend/app.py\nfrontend/ui.tsx",
+        "acceptance_criteria": "backend updated\nfrontend updated\ntests pass",
+        "type": "code",
+    })
+
+    plan = orchestrator.decomposer.decompose(task)
+
+    code_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.CODE]
+    assert len(code_tasks) == 3
+    assert all(item.routing_hints.get("preferred_agent_id") for item in code_tasks)

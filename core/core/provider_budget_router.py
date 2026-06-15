@@ -138,6 +138,12 @@ class ProviderBudgetRouter:
         key = self._normalize_provider(provider)
         return key in self.suppression_snapshot()
 
+    @staticmethod
+    def _normalized_text_profile(task: Task) -> dict[str, Any]:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        profile = hints.get("normalized_text_profile")
+        return profile if isinstance(profile, dict) else {}
+
     def preferred_providers(self, task: Task, choice: ModelChoice) -> list[str]:
         preferred_hint = str((task.routing_hints or {}).get("provider_preference") or "").strip()
         preferred = self._normalize_provider(preferred_hint or choice.provider)
@@ -145,8 +151,17 @@ class ProviderBudgetRouter:
         cost_tier = str((task.routing_hints or {}).get("cost_tier") or "").strip().lower()
         source = str((task.routing_hints or {}).get("source") or "").strip().lower()
 
+        profile = self._normalized_text_profile(task)
+        profile_risk = str(profile.get("risk_bucket") or "").strip().lower()
+        profile_quality = str(profile.get("input_quality_bucket") or "").strip().lower()
+        profile_execution = str(profile.get("execution_shape") or "").strip().lower()
+        profile_intent = str(profile.get("intent_bucket") or "").strip().lower()
+        trusted_profile = str(profile.get("decision_trust") or "").strip().lower() == "trusted"
+
         is_critical = task.priority in {Priority.CRITICAL} or choice_complexity == Complexity.CRITICAL
         is_high_risk = task.priority in {Priority.HIGH, Priority.CRITICAL} or choice_complexity in {Complexity.HIGH, Complexity.CRITICAL}
+        if trusted_profile and profile_risk == "high":
+            is_high_risk = True
 
         if is_critical:
             # Security-critical uses OpenAI first when selected/available; otherwise honor the selector's ready fallback.
@@ -180,6 +195,12 @@ class ProviderBudgetRouter:
                 base = ["openai", "antigravity", "mistral", "local"]
             else:
                 base = [preferred, "openai", "antigravity", "mistral", "local"]
+        elif trusted_profile and profile_risk == "high":
+            base = ["openai", "antigravity", "mistral", "local", preferred]
+        elif profile_quality in {"noisy_but_usable", "sparse"}:
+            base = ["openai", "antigravity", "local", "mistral", preferred]
+        elif profile_execution == "single_lane_validation" or profile_intent in {"review", "test"}:
+            base = ["openai", "mistral", "antigravity", "local", preferred]
         elif task.type in {TaskType.CODE, TaskType.REVIEW}:
             if preferred == "mistral":
                 base = ["mistral", "antigravity", "local", "openai"]
@@ -190,7 +211,7 @@ class ProviderBudgetRouter:
         elif task.type in {TaskType.DOCS, TaskType.RESEARCH}:
             base = [preferred, "antigravity", "mistral", "local", "openai"]
         elif is_high_risk:
-            base = ["antigravity", preferred, "mistral", "local", "openai"]
+            base = ["openai", "antigravity", preferred, "mistral", "local"]
         else:
             base = [preferred, "antigravity", "mistral", "local", "openai"]
 

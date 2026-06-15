@@ -73,6 +73,12 @@ class MemoryControlModule:
         return "task", task.task_id
 
     @staticmethod
+    def _normalized_text_profile(task: Task) -> dict[str, Any]:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        profile = hints.get("normalized_text_profile")
+        return profile if isinstance(profile, dict) else {}
+
+    @staticmethod
     def _profile_for_provider(provider: str, model_name: str) -> str:
         provider_norm = _normalize_provider(provider)
         model_norm = str(model_name or "").strip().lower()
@@ -269,6 +275,8 @@ class MemoryControlModule:
             "reusable_task_memory_similarity",
             "reusable_task_memory_fingerprint",
             "reusable_task_memory_count",
+            "normalized_text_profile",
+            "normalization_guidance",
         ):
             if passthrough in context:
                 filtered[passthrough] = context[passthrough]
@@ -280,6 +288,9 @@ class MemoryControlModule:
         context = self._base_context(task, agent_id)
         context.update(self._trained_memory(task, agent_id))
         context.update(self._reusable_memory(task))
+        normalized_profile = self._normalized_text_profile(task)
+        if normalized_profile:
+            context["normalized_text_profile"] = dict(normalized_profile)
         layered = self._layered()
         if layered and hasattr(layered, "build_context_pie"):
             pie = layered.build_context_pie(task, agent_id=agent_id, provider=provider, model_name=model_name)
@@ -294,6 +305,16 @@ class MemoryControlModule:
             if getattr(pie, "prompt_guidance", None):
                 context["prompt_guidance"] = list(pie.prompt_guidance)
         profile = self._profile_for_provider(provider, model_name)
+        if normalized_profile:
+            if str(normalized_profile.get("risk_bucket") or "").strip().lower() == "high":
+                profile = "rich_synthesis"
+            elif str(normalized_profile.get("input_quality_bucket") or "").strip().lower() in {"noisy_but_usable", "sparse"}:
+                profile = "balanced"
+            context.setdefault("normalization_guidance", []).extend([
+                f"execution_shape={normalized_profile.get('execution_shape', '')}",
+                f"risk_bucket={normalized_profile.get('risk_bucket', '')}",
+                f"decision_trust={normalized_profile.get('decision_trust', '')}",
+            ])
         self._record_profile(profile)
         self.reads_total += 1
         self.applied_total += 1
