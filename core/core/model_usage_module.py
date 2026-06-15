@@ -236,6 +236,8 @@ class ModelUsageModule:
             "provider": provider,
             "model": model,
             "agent_id": context.get("agent_id"),
+            "prompt_version": context.get("prompt_version") or "v1",
+            "context_version": context.get("context_version") or "v1",
             "started_at": datetime.now(UTC).isoformat(),
         }
 
@@ -257,12 +259,17 @@ class ModelUsageModule:
         
         # Override with actual tokens if provider sent them
         actual_tokens = context.get("usage_tokens", estimated_tokens)
+        explicit_output_tokens = context.get("usage_output_tokens")
         if isinstance(actual_tokens, int):
-            actual_input_tokens = min(actual_tokens, estimated_input_tokens)
-            actual_output_tokens = max(0, actual_tokens - actual_input_tokens)
+            if isinstance(explicit_output_tokens, int):
+                actual_output_tokens = max(0, explicit_output_tokens)
+                actual_input_tokens = max(0, actual_tokens - actual_output_tokens)
+            else:
+                actual_input_tokens = min(actual_tokens, estimated_input_tokens)
+                actual_output_tokens = max(0, actual_tokens - actual_input_tokens)
         else:
             actual_input_tokens = estimated_input_tokens
-            actual_output_tokens = estimated_output_tokens
+            actual_output_tokens = estimated_output_tokens if not isinstance(explicit_output_tokens, int) else max(0, explicit_output_tokens)
             actual_tokens = estimated_tokens
 
         runtime = context.get("usage_runtime")
@@ -289,6 +296,14 @@ class ModelUsageModule:
             "agent_id": context.get("agent_id") or result.agent_id,
             "status": result.status.value,
             "tokens_used": actual_tokens,
+            "input_tokens": actual_input_tokens,
+            "output_tokens": actual_output_tokens,
+            "cached_input_tokens": max(0, int(context.get("usage_cached_input_tokens") or 0)),
+            "uncached_input_tokens": max(0, int(context.get("usage_uncached_input_tokens") or 0)),
+            "cache_hit_rate": round(float(context.get("cache_hit_rate") or 0.0), 4),
+            "cache_miss_reason": str(context.get("cache_miss_reason") or ""),
+            "prompt_version": str(context.get("prompt_version") or "v1"),
+            "context_version": str(context.get("context_version") or "v1"),
             "estimated_cost_usd": cost_estimate["estimated_cost_usd"],
             "currency": cost_estimate["currency"],
             "cost_components": dict(cost_estimate.get("cost_components") or {}),

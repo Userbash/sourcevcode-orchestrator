@@ -242,12 +242,14 @@ class ModelSelector:
         )
 
     def _openai_choice(self, task: Task, complexity: Complexity, secondary_review: bool, reason: str, fallback_model: str) -> ModelChoice:
-        if not OpenAIRuntimeRouter.enabled():
-            return ModelChoice(fallback_model, "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=reason)
         if not os.getenv("OPENAI_API_KEY", "").strip():
             if os.getenv("MISTRAL_API_KEY", "").strip():
                 return ModelChoice("mistral-large-latest", "mistral", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_mistral_fallback:{reason}")
-            return ModelChoice("antigravity-cli", "antigravity", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_antigravity_fallback:{reason}")
+            if (os.getenv("ANTIGRAVITY_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip():
+                return ModelChoice("antigravity-pro", "antigravity", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_antigravity_fallback:{reason}")
+            return self._local_planning_choice(task, complexity) if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} else self._local_code_choice(complexity)
+        if not OpenAIRuntimeRouter.enabled():
+            return ModelChoice(fallback_model, "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=reason)
         plan = self.openai_router.build_plan(task, task.input.description)
         return ModelChoice(plan.models[0], "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_{plan.reason}:{reason}")
 

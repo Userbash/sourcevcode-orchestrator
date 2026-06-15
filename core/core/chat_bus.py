@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
-from .kernel_protocol import KernelAPI, KernelModule
-from .models import Task, AgentResult
+from .kernel_protocol import KernelAPI
+from .models import AgentResult, Task
 
-logger = logging.getLogger("chat_bus")
 
 @dataclass
 class ChatAdapter:
@@ -16,6 +14,7 @@ class ChatAdapter:
     callback_url: Optional[str] = None
     session_id: Optional[str] = None
     capabilities: List[str] = field(default_factory=list)
+
 
 @dataclass
 class ChatBusModule:
@@ -30,14 +29,16 @@ class ChatBusModule:
 
     def on_load(self, api: KernelAPI) -> None:
         self._api = api
-        self._api.log("info", f"[BUS] {self.name} system online. Ready for AI registration.")
+        self.register_interface("api_bridge", callback_url=None, session_id="orchestrator")
+        self.register_interface("mistral", callback_url=None, session_id="orchestrator")
+        self._api.log("info", f"[BUS] {self.name} system online. Auto-registered api_bridge + mistral adapters.")
 
     def register_interface(self, provider_id: str, callback_url: Optional[str] = None, session_id: Optional[str] = None) -> str:
         """Automated registration method for any AI."""
         adapter = ChatAdapter(provider_id=provider_id, callback_url=callback_url, session_id=session_id)
         self._adapters[provider_id] = adapter
-        self._primary_adapter = provider_id # Last one registered becomes primary
-        
+        self._primary_adapter = provider_id
+
         if self._api:
             self._api.log("info", f"[BUS] AI Provider '{provider_id}' successfully connected via {callback_url or 'direct'}")
         return f"Connected to Core Bus. Primary channel: {provider_id}"
@@ -49,16 +50,25 @@ class ChatBusModule:
         self._broadcast("task_started", {
             "task_id": task.task_id,
             "type": task.type.value,
-            "message": f"Orchestrator began work on: {task.input.description[:50]}..."
+            "message": f"Orchestrator began work on: {task.input.description[:50]}...",
         })
 
     def after_task(self, task: Task, result: AgentResult, context: dict[str, Any]) -> None:
         self._broadcast("task_finished", {
             "task_id": task.task_id,
             "status": result.status.value,
-            "summary": result.output.get("summary", "Complete"),
-            "confidence": result.confidence
+            "summary": self._result_summary(result),
+            "confidence": result.confidence,
         })
+
+    @staticmethod
+    def _result_summary(result: AgentResult) -> str:
+        output = getattr(result, "output", None)
+        if output is None:
+            return "Complete"
+        if isinstance(output, dict):
+            return str(output.get("summary") or "Complete")
+        return str(getattr(output, "summary", "Complete") or "Complete")
 
     def _broadcast(self, event: str, payload: dict[str, Any]) -> None:
         """Sends updates to all registered AI interfaces."""
@@ -66,18 +76,13 @@ class ChatBusModule:
             return
 
         for pid, adapter in self._adapters.items():
-            # Emit internal kernel event
             self._api.emit_event(f"bus_{event}", {"provider": pid, **payload})
-            
-            # In a real production system, here we would trigger an outgoing HTTP request 
-            # to adapter.callback_url if provided. 
             if adapter.callback_url:
-                # self._trigger_webhook(adapter.callback_url, event, payload)
                 pass
 
     def finalize(self) -> dict[str, Any]:
         return {
             "status": "online",
             "active_adapters": list(self._adapters.keys()),
-            "primary": self._primary_adapter
+            "primary": self._primary_adapter,
         }

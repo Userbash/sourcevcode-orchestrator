@@ -29,15 +29,18 @@ class LocalLLMAgent(BaseAgent):
             prompt_parts.append(f"CONSTRAINTS: {'; '.join(task.input.constraints)}")
         if task.input.acceptance_criteria:
             prompt_parts.append(f"ACCEPTANCE CRITERIA: {'; '.join(task.input.acceptance_criteria)}")
-        if memory_context:
-            prompt_parts.append(f"MEMORY CONTEXT: {memory_context}")
+        memory_brief = self._memory_brief(memory_context)
+        if memory_brief:
+            prompt_parts.append(f"MEMORY CONTEXT:\n{memory_brief}")
 
         system = (
             "You are the local LLM execution lane for the orchestrator. "
             "Return a concise, actionable response that helps complete the assigned planning, docs, research, review, or test task. "
             "Do not claim file edits or commands you did not perform."
         )
-        response = local_llm.query("\n".join(prompt_parts), model_name=getattr(local_llm, "model_name", self._model), system=system)
+        prompt = "\n".join(prompt_parts)
+        self._record_execution_prompt(task, prompt, memory_context, provider="local", model_name=getattr(local_llm, "model_name", self._model))
+        response = local_llm.query(prompt, model_name=getattr(local_llm, "model_name", self._model), system=system)
         if not response:
             return self.result(task, "Local LLM returned no output", TaskStatus.FAILED, errors=["empty_local_llm_response"])
         local_usage = dict(getattr(local_llm, "last_query_metrics", {}) or {})

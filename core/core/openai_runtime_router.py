@@ -72,6 +72,34 @@ class OpenAIRuntimeRouter:
             return ["gpt-5.1-codex", "gpt-5-codex", "gpt-5.1", "gpt-5", "gpt-4.1"] if codex_task else ["gpt-5.1", "gpt-5", "gpt-4.1", "gpt-4o"]
         return ["gpt-5.2-codex", "gpt-5.1-codex-max", "gpt-5.2", "gpt-5.2-pro", "gpt-5.1", "gpt-5"]
 
+    def _budget_for_task(self, task: Task) -> int:
+        hints = getattr(task, "routing_hints", {}) or {}
+        source = str(hints.get("source") or "").strip().lower()
+        cost_tier = str(hints.get("cost_tier") or "").strip().lower()
+        if source != "websocket":
+            return self.session_budget
+        if cost_tier == "economy":
+            return self._read_int("OPENAI_SESSION_TOKEN_BUDGET_WS_ECONOMY", self._read_int("OPENAI_SESSION_TOKEN_BUDGET_WS", 40_000))
+        if cost_tier == "premium":
+            return self._read_int("OPENAI_SESSION_TOKEN_BUDGET_WS_PREMIUM", self._read_int("OPENAI_SESSION_TOKEN_BUDGET_WS", self.session_budget))
+        return self._read_int("OPENAI_SESSION_TOKEN_BUDGET_WS", min(self.session_budget, 80_000))
+
+    @staticmethod
+    def _prioritize_for_ws_cost_tier(task: Task, models: list[str], complexity: Complexity) -> tuple[list[str], str | None]:
+        hints = getattr(task, "routing_hints", {}) or {}
+        source = str(hints.get("source") or "").strip().lower()
+        cost_tier = str(hints.get("cost_tier") or "").strip().lower()
+        if source != "websocket":
+            return models, None
+        if cost_tier == "economy":
+            preferred = ["gpt-5-nano", "gpt-5-mini", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini"]
+            return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_economy"
+        if cost_tier == "premium" or complexity == Complexity.CRITICAL:
+            preferred = ["gpt-5.2-codex", "gpt-5.1-codex-max", "gpt-5.2", "gpt-5.2-pro", "gpt-5.1", "gpt-5"]
+            return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_premium"
+        preferred = ["gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini", "gpt-5-nano"]
+        return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_interactive"
+
     def _complexity_ordered_models(self, task: Task, complexity: Complexity, *, force_refresh: bool = False) -> list[str]:
         catalog = self.registry.get_catalog(force_refresh=force_refresh)
         codex_task = task.type in {TaskType.CODE, TaskType.FIX, TaskType.TEST}
@@ -111,7 +139,8 @@ class OpenAIRuntimeRouter:
         estimated = self._estimate_prompt_tokens(prompt or task.input.description) + self._estimate_completion_tokens(complexity)
         session_id = task.session_id or "default"
         used = self._session_token_usage.get(session_id, 0)
-        remaining = max(0, self.session_budget - used)
+        budget = self._budget_for_task(task)
+        remaining = max(0, budget - used)
 
         if remaining <= 0:
             models = ["gpt-5-nano", "gpt-4.1-nano", "gpt-4o-mini"]
@@ -119,6 +148,9 @@ class OpenAIRuntimeRouter:
         else:
             first_call = used <= 0
             models, reason = self._complexity_ordered_models(task, complexity, force_refresh=first_call)
+            models, ws_reason = self._prioritize_for_ws_cost_tier(task, models, complexity)
+            if ws_reason:
+                reason = ws_reason
             if estimated > remaining:
                 lightweight = ["gpt-5-nano", "gpt-5-mini", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini"]
                 models = self._dedupe(lightweight + models)

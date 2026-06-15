@@ -242,6 +242,30 @@ class PromptOptimizerModule:
             objective = objective[:320].rstrip() + "..."
         return objective
 
+    def _layered_context_memory(self, task: Task, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self._api:
+            return {}
+        layered = self._api.get_context("layered_context_memory")
+        if not layered or not hasattr(layered, "build_context_pie"):
+            return {}
+        try:
+            provider = str((context or {}).get("selected_provider") or (context or {}).get("provider") or "")
+            model_name = str((context or {}).get("selected_model") or (context or {}).get("model") or getattr(task, "assigned_model", "") or "")
+            pie = layered.build_context_pie(
+                task,
+                agent_id=str(getattr(task, "required_capability", "") or self._task_type_label(task)),
+                provider=provider,
+                model_name=model_name,
+                token_limit=max(120, self._memory_token_budget(task)),
+            )
+            return {
+                "layered_context_brief": str(getattr(pie, "layered_context_brief", "") or ""),
+                "prompt_guidance": list(getattr(pie, "prompt_guidance", []) or []),
+                "prompt_memory_brief": str(getattr(pie, "prompt_memory_brief", "") or ""),
+            }
+        except Exception:
+            return {}
+
     def _reusable_memory_context(self, task: Task, context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self._api:
             return {"matched": False, "brief": "", "similarity": 0.0, "reason": "api_unavailable"}
@@ -554,6 +578,13 @@ class PromptOptimizerModule:
                         refined,
                         f"OFFLOAD_POLICY: full={full_offload}; partial={partial_offload}",
                     ])
+        layered = self._layered_context_memory(task, context)
+        layered_brief = str(layered.get("layered_context_brief") or "").strip()
+        if layered_brief:
+            refined = "\n".join([refined, "LAYERED CONTEXT MEMORY:", layered_brief])
+        guidance = [str(item).strip() for item in (layered.get("prompt_guidance") or []) if str(item).strip()]
+        if guidance:
+            refined = "\n".join([refined, "PROMPT GUIDANCE:", *[f"- {item}" for item in guidance[:6]]])
         return refined
 
     def before_task(self, task: Task, context: dict[str, Any]) -> None:

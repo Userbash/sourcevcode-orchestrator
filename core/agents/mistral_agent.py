@@ -72,6 +72,9 @@ class MistralAgent(ExternalAIAgent):
             prompt_parts.append(f"CONSTRAINTS: {'; '.join(task.input.constraints)}")
         if task.input.acceptance_criteria:
             prompt_parts.append(f"ACCEPTANCE CRITERIA: {'; '.join(task.input.acceptance_criteria)}")
+        memory_brief = self._memory_brief(memory_context)
+        if memory_brief:
+            prompt_parts.append(f"MEMORY CONTEXT:\n{memory_brief}")
         
         prompt_content = "\n".join(prompt_parts)
         
@@ -82,6 +85,7 @@ class MistralAgent(ExternalAIAgent):
         max_retries = 3
         last_exc = None
         model_name = self._select_model_for_task(task)
+        self._record_execution_prompt(task, prompt_content, memory_context, provider=self.provider, model_name=model_name)
         
         for attempt in range(max_retries):
             try:

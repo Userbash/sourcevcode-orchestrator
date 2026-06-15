@@ -39,6 +39,8 @@ class SessionMemory(MemoryProtocol):
         self.backend = backend or InMemoryBackend()
         self.policy = policy or MemoryPolicy()
         self.hybrid = hybrid or HybridMemory(backend=self.backend)
+        from .layered_context_memory import LayeredContextMemory
+        self.layered = LayeredContextMemory(self)
 
     @staticmethod
     def make_key(scope: MemoryScope, identifier: str, key: str) -> str:

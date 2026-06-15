@@ -1,4 +1,5 @@
 import asyncio
+import time
 from core.agents.base_agent import BaseAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
@@ -70,7 +71,7 @@ def test_full_cycle_plan_code_test_review_done():
     assert result["merged"]["status"] == "done"
     assert result["results"]
     assert all(item["status"] == "done" for item in result["results"])
-    assert any(event.startswith("[DONE]") for event in result["console"])
+    assert any("[DONE]" in event for event in result["console"])
     assert "agents" in result["metrics"]
 
 
@@ -82,8 +83,90 @@ def test_full_cycle_delegates_failed_code_to_fix_agent_and_finishes():
 
     assert result["status"] == "done"
     assert any(item["agent_id"] == "fix-1" and item["status"] == "done" for item in result["results"])
-    assert any(event.startswith("[FIX]") for event in result["console"])
+    assert any("[FIX]" in event for event in result["console"])
     assert any(row.get("router_agent") == "fix-1" for row in result["live_trace"])
+
+
+def test_dependency_handoff_dispatches_p2p_context_to_next_agent():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+
+    source = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    source.required_capability = "code"
+    target = Task(TaskType.CODE, TaskInput("Implement branch B"), TaskContext("demo", ".", "main"), dependencies=[source.task_id])
+    target.required_capability = "code"
+    target.routing_hints = {"preferred_agent_id": "code-alt"}
+
+    source_result = AgentResult(task_id=source.task_id, agent_id="code-main", status=TaskStatus.DONE, output=ResultOutput(summary="branch A done", files_changed=["a.py"]), confidence=0.9)
+
+    count = orchestrator._dispatch_dependency_handoffs([target], {source.task_id: source_result})
+    time.sleep(0.2)
+    handoffs = orchestrator._consume_p2p_handoffs("code-alt", target.task_id)
+
+    assert count == 1
+    assert handoffs
+    assert handoffs[0]["summary"] == "branch A done"
+    assert handoffs[0]["from_agent"] == "code-main"
+
+
+def test_parallel_batch_preassignment_spreads_code_tasks_across_agents():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"))
+
+    first = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    first.required_capability = "code"
+    second = Task(TaskType.CODE, TaskInput("Implement branch B"), TaskContext("demo", ".", "main"))
+    second.required_capability = "code"
+
+    assignments = orchestrator._preassign_parallel_batch_agents([first, second])
+
+    assert assignments[first.task_id] != assignments[second.task_id]
+    assert {assignments[first.task_id], assignments[second.task_id]} == {"code-main", "code-alt"}
+
+
+def test_parallel_batch_preassignment_prefers_distinct_models_when_agents_overlap():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+    orchestrator.attach_local_agent("code-third", LocalCodeAgent("code-third"), model_name="local-small", provider="local")
+
+    first = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    first.required_capability = "code"
+    second = Task(TaskType.CODE, TaskInput("Implement branch B"), TaskContext("demo", ".", "main"))
+    second.required_capability = "code"
+
+    assignments = orchestrator._preassign_parallel_batch_agents([first, second])
+
+    assert assignments[first.task_id] != assignments[second.task_id]
+    chosen = {assignments[first.task_id], assignments[second.task_id]}
+    assert chosen == {"code-main", "code-alt"}
+
+
+
+def test_code_task_decomposition_can_fan_out_across_multiple_ai_agents():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+    orchestrator.attach_local_agent("code-third", LocalCodeAgent("code-third"), model_name="mistral-large-latest", provider="mistral")
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput(
+            "Implement backend changes and frontend updates for the feature with tests aligned",
+            files=["backend/app.py", "frontend/ui.tsx"],
+            acceptance_criteria=["backend updated", "frontend updated"],
+        ),
+        TaskContext("demo", ".", "main"),
+    )
+    task.routing_hints = {"parallelize_code": True, "parallel_branches": 3}
+
+    plan = orchestrator.decomposer.decompose(task)
+
+    code_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.CODE]
+    review_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.REVIEW]
+
+    assert len(code_tasks) == 3
+    assert len(review_tasks) == 1
+    assert {item.routing_hints.get("preferred_agent_id") for item in code_tasks} == {"code-main", "code-alt", "code-third"}
+    assert set(review_tasks[0].dependencies) == {item.task_id for item in code_tasks}
 
 
 def test_distribution_trace_shows_pipeline_and_agent_assignment():

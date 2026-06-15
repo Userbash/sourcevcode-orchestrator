@@ -9,7 +9,7 @@ class MemoryPolicy:
     denylist_keys: set[str] = field(default_factory=lambda: {
         "api_key", "apikey", "token", "password", "secret", "private_key", "refresh_token", "cookie",
     })
-    max_entry_size: int = 128_000
+    max_entry_size: int = 512_000
 
     def redact(self, payload: Any) -> Any:
         if isinstance(payload, dict):

@@ -39,6 +39,29 @@ def test_openai_registry_uses_cached_text_models(tmp_path, monkeypatch):
     assert "gpt-5.2-codex" in catalog.codex
 
 
+
+
+def test_openai_registry_exposes_fetch_error_diagnostics(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    def fake_fetch(self):
+        self._last_diagnostics = type(self._last_diagnostics)(
+            ok=False,
+            error_type="AuthenticationError",
+            error_message="invalid_api_key",
+        )
+        return []
+
+    monkeypatch.setattr(OpenAIModelRegistry, "_fetch_live", fake_fetch)
+    registry = OpenAIModelRegistry()
+
+    assert registry.get_models(force_refresh=True) == []
+    assert registry.diagnostics() == {
+        "ok": False,
+        "error_type": "AuthenticationError",
+        "error_message": "invalid_api_key",
+    }
+
 def test_openai_runtime_router_prefers_light_model_for_low_budget(monkeypatch):
     monkeypatch.setenv("OPENAI_SESSION_TOKEN_BUDGET", "64")
     OpenAIRuntimeRouter._session_token_usage.clear()
@@ -53,9 +76,14 @@ def test_openai_runtime_router_prefers_light_model_for_low_budget(monkeypatch):
 def test_model_selector_openai_auto_is_opt_in(monkeypatch):
     task = _task(TaskType.REVIEW, Complexity.HIGH)
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "false")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.delenv("ANTIGRAVITY_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     legacy = ModelSelector().select(task)
-    assert legacy.provider == "openai"
-    assert legacy.model_name == "gpt-4o"
+    assert legacy.provider == "local"
+    assert legacy.model_name == "deepseek-r1:14b"
 
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -94,3 +122,34 @@ def test_provider_budget_router_honors_critical_mistral_fallback(monkeypatch):
 
     assert choice.provider == "mistral"
     assert providers[:3] == ["mistral", "antigravity", "local"]
+
+
+def test_openai_runtime_router_uses_websocket_budget_and_interactive_reason(monkeypatch):
+    monkeypatch.setenv("OPENAI_SESSION_TOKEN_BUDGET", "120000")
+    monkeypatch.setenv("OPENAI_SESSION_TOKEN_BUDGET_WS", "2000")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+    task = _task(complexity=Complexity.MEDIUM)
+    task.session_id = "ws-runtime-1"
+    task.routing_hints = {"source": "websocket", "cost_tier": "interactive"}
+
+    plan = router.build_plan(task, "short prompt")
+
+    assert plan.remaining_tokens == 2000
+    assert plan.reason == "ws_interactive"
+    assert plan.models[0] in {"gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini", "gpt-5-nano"}
+
+
+def test_openai_runtime_router_uses_websocket_economy_models(monkeypatch):
+    monkeypatch.setenv("OPENAI_SESSION_TOKEN_BUDGET_WS_ECONOMY", "5000")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+    task = _task(complexity=Complexity.LOW)
+    task.session_id = "ws-runtime-2"
+    task.routing_hints = {"source": "websocket", "cost_tier": "economy"}
+
+    plan = router.build_plan(task, "small")
+
+    assert plan.remaining_tokens == 5000
+    assert plan.reason == "ws_economy"
+    assert plan.models[0] in {"gpt-5-nano", "gpt-5-mini", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini"}

@@ -5,6 +5,7 @@ from typing import Any
 
 from .model_selector import ModelSelector, evaluate_risk_context
 from .models import (
+    Complexity,
     ExecutionPlan,
     Priority,
     Task,
@@ -158,6 +159,90 @@ class TaskDecomposer:
         else:
             task.routing_hints.setdefault("kpi_floor_source", "default")
         task.routing_hints.setdefault("kpi_floor", kpi_floor)
+
+
+    def _parallel_code_agents(self) -> list[str]:
+        api = getattr(self.model_selector, "_api", None)
+        registry = getattr(api, "registry", None) if api is not None else None
+        local_agents = getattr(api, "local_agents", {}) if api is not None else {}
+        if registry is None or not hasattr(registry, "list_agents"):
+            return []
+        agents: list[str] = []
+        for record in registry.list_agents():
+            if record.id not in local_agents:
+                continue
+            if "code" not in getattr(record, "capabilities", []):
+                continue
+            agents.append(record.id)
+        return agents
+
+    def _parallel_code_plan(self, task: Task) -> ExecutionPlan | None:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        complexity = task.complexity or self.model_selector.classify(task)
+        task.complexity = complexity
+        agents = self._parallel_code_agents()
+        if len(agents) < 2:
+            return None
+        explicit = bool(hints.get("parallelize_code"))
+        looks_large = len(task.input.files) > 1 or len(task.input.acceptance_criteria) > 1 or len(task.input.description.strip()) >= 80
+        if not explicit and complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not looks_large:
+            return None
+        max_branches_raw = str(hints.get("parallel_branches") or "").strip()
+        if max_branches_raw.isdigit():
+            max_branches = max(2, int(max_branches_raw))
+        else:
+            try:
+                max_branches = max(2, int(__import__("os").getenv("AI_BRIDGE_PARALLEL_CODE_BRANCHES_MAX", "4")))
+            except ValueError:
+                max_branches = 4
+        selected_agents = agents[:min(len(agents), max_branches)]
+        branch_labels = ["primary", "fast", "safe", "alt", "review-ready", "fallback"]
+        branches: list[Task] = []
+        for idx, agent_id in enumerate(selected_agents):
+            label = branch_labels[idx] if idx < len(branch_labels) else f"branch-{idx+1}"
+            branch = Task(
+                TaskType.CODE,
+                TaskInput(
+                    f"[{label}] {task.input.description}",
+                    files=list(task.input.files),
+                    constraints=list(task.input.constraints),
+                    acceptance_criteria=list(task.input.acceptance_criteria),
+                ),
+                task.context,
+                Priority.NORMAL if task.priority == Priority.NORMAL else task.priority,
+                parent_task_id=task.task_id,
+                draft_layer=f"parallel_code_{label}",
+                routing_hints={
+                    **dict(hints),
+                    "preferred_agent_id": agent_id,
+                    "batch_forced_agent_id": agent_id,
+                    "parallelize_code": True,
+                    "parallel_group": "code_fanout",
+                    "fanout_label": label,
+                },
+            )
+            branch.required_capability = "code"
+            branches.append(branch)
+
+        review = Task(
+            TaskType.REVIEW,
+            TaskInput(
+                f"Review and consolidate parallel implementations for: {task.input.description}",
+                files=list(task.input.files),
+                acceptance_criteria=["best implementation selected", "tradeoffs documented"],
+            ),
+            task.context,
+            Priority.HIGH if task.priority in {Priority.HIGH, Priority.CRITICAL} else Priority.NORMAL,
+            parent_task_id=task.task_id,
+            dependencies=[branch.task_id for branch in branches],
+            draft_layer="parallel_code_review",
+            routing_hints={**dict(hints), "parallel_source": "code_fanout"},
+        )
+        review.required_capability = "review"
+        tasks = [*branches, review]
+        for atomic in tasks:
+            self._decorate(atomic)
+        return ExecutionPlan(root_task_id=task.task_id, atomic_tasks=tasks, draft_layers=[{"name": "parallel_code", "objective": task.input.description, "capability": "code", "task_type": "code", "parallel": True}])
 
     def _draft_layers_to_plan(self, task: Task, draft: dict[str, Any]) -> ExecutionPlan:
         layers = draft.get("layers") if isinstance(draft.get("layers"), list) else []
@@ -349,6 +434,11 @@ class TaskDecomposer:
         return self._draft_layers_to_plan(task, draft)
 
     def decompose(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ExecutionPlan:
+
+        if task.type == TaskType.CODE:
+            parallel_plan = self._parallel_code_plan(task)
+            if parallel_plan is not None:
+                return parallel_plan
 
         if task.type != TaskType.PLAN:
             self._decorate(task)

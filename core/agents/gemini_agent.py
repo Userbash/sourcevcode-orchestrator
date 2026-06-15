@@ -21,6 +21,7 @@ class GeminiAgent(BaseAgent):
     def __init__(self, agent_id: str, model_name: str = "gemini-2.5-flash") -> None:
         super().__init__(agent_id, capabilities=["code", "review", "test", "docs", "research"])
         self.model_name = model_name
+        self.provider = "gemini"
         self._client: Any | None = None
         self._mode: str | None = None
         self._init_error: str | None = None
@@ -61,6 +62,10 @@ class GeminiAgent(BaseAgent):
                 return self.result(task, "Gemini generation failed", TaskStatus.FAILED, errors=[message])
 
             prompt = task.input.description
+            memory_brief = self._memory_brief(memory_context)
+            if memory_brief:
+                prompt = f"{prompt}\nMEMORY CONTEXT:\n{memory_brief}"
+            self._record_execution_prompt(task, prompt, memory_context, provider=self.provider, model_name=self.model_name)
 
             if self._mode == "google.genai":
                 response = self._client.models.generate_content(model=self.model_name, contents=prompt)

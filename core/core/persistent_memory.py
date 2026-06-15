@@ -763,6 +763,42 @@ class PersistentMemoryManager:
         rows = sorted(self._trained_records, key=lambda row: int(row.get("trained_memory_id", 0)), reverse=True)
         return [self._trained_record_from_dict(row) for row in rows[:bounded_limit]]
 
+    def list_session_memories(self, *, session_id: str, agent_id: str | None = None, memory_type_prefix: str | None = None, limit: int = 200) -> list[MemoryRecord]:
+        normalized_session_id = self.upsert_session(session_id, agent_id=agent_id or "any")
+        bounded_limit = max(1, int(limit))
+        prefix = str(memory_type_prefix or "").strip()
+        if self._pg_enabled:
+            with self._connect() as conn:
+                with conn.cursor() as cur:
+                    clauses = ["session_id = %s"]
+                    params: list[Any] = [normalized_session_id]
+                    if agent_id:
+                        clauses.append("agent_id = %s")
+                        params.append(agent_id)
+                    if prefix:
+                        clauses.append("memory_type LIKE %s")
+                        params.append(f"{prefix}%")
+                    params.append(bounded_limit)
+                    cur.execute(
+                        f"""
+                        SELECT memory_id, session_id, agent_id, memory_type, content, metadata, importance_score, created_at, updated_at
+                        FROM {AI_BRIDGE_SCHEMA}.memories
+                        WHERE {' AND '.join(clauses)}
+                        ORDER BY memory_id DESC
+                        LIMIT %s
+                        """,
+                        tuple(params),
+                    )
+                    return [self._record_from_row(row) for row in cur.fetchall()]
+
+        rows = [row for row in self._records if str(row.get("session_id", "")) == normalized_session_id]
+        if agent_id:
+            rows = [row for row in rows if str(row.get("agent_id", "")) == str(agent_id)]
+        if prefix:
+            rows = [row for row in rows if str(row.get("memory_type", "")).startswith(prefix)]
+        rows.sort(key=lambda row: int(row.get("memory_id", 0)), reverse=True)
+        return [self._record_from_dict(row) for row in rows[:bounded_limit]]
+
     def list_memories(self, *, limit: int = 200, memory_type_prefix: str | None = None) -> list[MemoryRecord]:
         bounded_limit = max(1, int(limit))
         prefix = str(memory_type_prefix or "").strip()

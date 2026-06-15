@@ -11,7 +11,7 @@ def test_model_selector_uses_critical_model_for_security_task():
     choice = ModelSelector().select(task)
 
     assert choice.complexity == Complexity.CRITICAL
-    assert choice.model_name in {"gpt-senior-secure", "antigravity-cli"}
+    assert choice.model_name in {"gpt-senior-secure", "antigravity-cli", "antigravity-pro"}
     assert choice.requires_secondary_review
 
 
@@ -20,6 +20,8 @@ def test_kpi_reduces_priority_for_low_quality_agent():
     agent = registry.register("reviewer-1", "reviewer", "local://reviewer", ["review"])
     agent.metrics.quality_score = 0.2
     agent.metrics.test_pass_rate = 0.2
+    agent.metrics.review_score = 0.2
+    agent.metrics.success_rate = 0.2
     agent.metrics.error_rate = 0.8
 
     evaluator = KPIEvaluator(threshold=0.65)

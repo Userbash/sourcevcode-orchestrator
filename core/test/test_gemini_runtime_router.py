@@ -18,13 +18,13 @@ def _task(complexity: Complexity, session_id: str = "s1") -> Task:
 def test_router_prefers_lite_for_low_complexity():
     router = GeminiRuntimeRouter()
     plan = router.build_plan(_task(Complexity.LOW), "small prompt")
-    assert plan.models[0] == "gemini-2.5-flash-lite"
+    assert plan.models[0] == "antigravity-flash-lite"
 
 
 def test_router_prefers_pro_for_high_complexity():
     router = GeminiRuntimeRouter()
     plan = router.build_plan(_task(Complexity.HIGH), "large refactor task")
-    assert plan.models[0] == "gemini-2.5-pro"
+    assert plan.models[0] == "antigravity-pro"
 
 
 def test_router_tracks_session_usage():
@@ -40,7 +40,7 @@ def test_router_exposes_strategy_profiles():
     profiles = GeminiRuntimeRouter.strategy_profiles()
 
     assert set(profiles) == {"low_cost", "docs_research", "code_fix", "high_reasoning"}
-    assert profiles["high_reasoning"][0] == "gemini-2.5-pro"
+    assert profiles["high_reasoning"][0] == "antigravity-thinking"
 
 
 def test_router_sets_strategy_by_task_type_and_complexity():

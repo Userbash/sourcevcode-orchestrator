@@ -4,12 +4,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from .kernel_protocol import KernelAPI, KernelModule
-from .models import Task, AgentResult, QualityReport
+from .kernel_protocol import KernelAPI
+from .models import AgentResult, QualityReport, Task
 
 logger = logging.getLogger("orchestrator_advisor")
+
 
 class SystemOptimization(BaseModel):
     bottlenecks: List[str]
@@ -17,11 +18,13 @@ class SystemOptimization(BaseModel):
     agent_performance_insights: dict[str, str]
     overall_health_rating: float
 
+
 class QualityAudit(BaseModel):
     is_sufficient: bool
     missing_elements: List[str]
     architectural_concerns: List[str]
     remediation_steps: Optional[str]
+
 
 @dataclass
 class OrchestratorAdvisorModule:
@@ -37,22 +40,25 @@ class OrchestratorAdvisorModule:
 
     def audit_quality(self, task: Task, result: AgentResult, report: QualityReport) -> Optional[QualityAudit]:
         reasoning = self._api.get_module("reasoning") if self._api else None
-        if not reasoning or not getattr(reasoning, "_client", None):
+        if not reasoning:
             return None
+        summary = ""
+        if getattr(result, "output", None) is not None:
+            summary = str(result.output.get("summary", "") or "")
 
         prompt = f"""Audit the quality of the following result against the task requirements:
 Task: {task.input.description}
 Acceptance Criteria: {', '.join(task.input.acceptance_criteria)}
-Result Summary: {result.output.get('summary')}
+Result Summary: {summary}
 Current Report Issues: {', '.join(report.issues)}
 """
-        
+
         system_prompt = "You are a lead system architect. Audit the work of an AI agent and ensure it meets production standards."
         return reasoning.structured_call(prompt, QualityAudit, system_prompt=system_prompt, model="gpt-4o")
 
     def suggest_optimizations(self, metrics: dict[str, Any]) -> Optional[SystemOptimization]:
         reasoning = self._api.get_module("reasoning") if self._api else None
-        if not reasoning or not getattr(reasoning, "_client", None):
+        if not reasoning:
             return None
 
         prompt = f"Analyze the current system metrics and suggest optimizations: {metrics}"

@@ -326,6 +326,7 @@ class ModelAvailability:
         registry = OpenAIModelRegistry()
         models = registry.get_models(force_refresh=bool(live if live is not None else self._live_probe_enabled()))
         diagnostics["models"] = models
+        diagnostics["registry"] = registry.diagnostics()
         configured = [
             os.getenv("CODEX_OPENAI_MODEL", "").strip(),
             *self._env_models("OPENAI_HIGH_MODELS"),

@@ -17,6 +17,21 @@ def test_register_agent_and_route_by_capability():
     assert accepted.status.value == "accepted"
 
 
+def test_router_honors_preferred_agent_id_for_parallel_batch():
+    registry = AgentRegistry()
+    registry.register("code-main", "codex", "local://code-main", ["code", "fix"])
+    registry.register("code-alt", "codex", "local://code-alt", ["code", "fix"])
+    router = TaskRouter(registry, LoadBalancer())
+    task = Task(TaskType.CODE, TaskInput("implement branch A"), TaskContext("p", ".", "main"))
+    task.required_capability = "code"
+    task.routing_hints = {"preferred_agent_id": "code-alt"}
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "code-alt"
+
+
 def test_sourcecraft_task_routes_to_orchestrator_when_no_dedicated_agent():
     registry = AgentRegistry()
     registry.register("codex-main", "codex", "local://codex", ["code", "fix"])

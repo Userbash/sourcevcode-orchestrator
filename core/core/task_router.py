@@ -8,6 +8,7 @@ from .agent_registry import AgentRegistry
 from .load_balancer import LoadBalancer, UNROUTABLE_AGENT_STATUSES, is_agent_routable
 from .model_selector import evaluate_risk_context
 from .models import AgentRecord, Complexity, ExecutionPlan, Priority, Task, TaskAcceptance, TaskStatus, TaskType, TaskEnvelope
+from .tdd_policy_module import StrictTDDModule
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,21 @@ class TaskRouter:
         return max(valid_candidates, key=score)
 
     def route(self, task: Task) -> TaskAcceptance:
+        tdd_override = self._route_via_tdd_policy(task)
+        if tdd_override is not None:
+            return tdd_override
+
         capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
+        preferred_agent_id = self._preferred_agent_id(task)
+        if preferred_agent_id:
+            preferred_agent = self.registry.get(preferred_agent_id)
+            if (
+                preferred_agent
+                and capability in preferred_agent.capabilities
+                and is_agent_routable(preferred_agent, task.priority)
+            ):
+                preferred_agent.metrics.queue_depth += 1
+                return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, preferred_agent.id, self.estimate_complexity(task), "Task accepted (preferred agent routing)")
         sourcecraft_task = self._is_sourcecraft_work(task)
         if sourcecraft_task and capability not in SOURCECRAFT_CAPABILITIES:
             capability = "sourcecraft"
@@ -118,6 +133,38 @@ class TaskRouter:
 
         agent.metrics.queue_depth += 1
         return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, agent.id, self.estimate_complexity(task), "Task accepted")
+
+    def _route_via_tdd_policy(self, task: Task) -> TaskAcceptance | None:
+        if self._api is None or not hasattr(self._api, "get_module"):
+            return None
+        module = self._api.get_module("tdd_policy")
+        if not isinstance(module, StrictTDDModule):
+            return None
+        decision = module.route_gate(task)
+        if not isinstance(decision, dict):
+            return None
+        capability = str(decision.get("capability") or "").strip().lower()
+        if not capability:
+            return None
+        candidates = [agent for agent in self._candidate_agents(capability) if is_agent_routable(agent, task.priority)]
+        if not candidates:
+            return TaskAcceptance(task.task_id, TaskStatus.REJECTED, None, self.estimate_complexity(task), str(decision.get("message") or f"No available TDD agent for capability {capability}"))
+        agent = self.load_balancer.choose(candidates, capability, task.priority, task)
+        if not agent:
+            return TaskAcceptance(task.task_id, TaskStatus.REJECTED, None, self.estimate_complexity(task), str(decision.get("message") or f"No available TDD agent for capability {capability}"))
+        agent.metrics.queue_depth += 1
+        return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, agent.id, self.estimate_complexity(task), str(decision.get("message") or "Task accepted under TDD policy"))
+
+    
+    
+    @staticmethod
+    def _preferred_agent_id(task: Task) -> str | None:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        for key in ("preferred_agent_id", "batch_forced_agent_id", "forced_agent_id"):
+            value = hints.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
 
     def _candidate_agents(self, capability: str) -> list[AgentRecord]:
         return [

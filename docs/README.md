@@ -48,9 +48,15 @@
 - `AI_BRIDGE_HARDENING_BACKLOG.md` - micro-task backlog
 - `AI_BRIDGE_EXECUTION_PLAN_R1_R4.md` - encapsulated by-agent plan
 - `GEMINI_AUTO_ROUTING_MODULE_PLAN.md` - Gemini routing plan
+- `LLM_COST_CACHE_BLUEPRINT.md` - non-breaking rollout plan for prompt cache efficiency and cost telemetry
 
 ## Session Memory
 
 - `AI_BRIDGE_SESSION_MEMORY.md` - architecture and security model for session memory
 - `AI_BRIDGE_SESSION_MEMORY_BACKLOG.md` - micro-task decomposition
 - `AI_BRIDGE_SESSION_MEMORY_RELEASE_PLAN.md` - rollout plan
+
+## Publication Notes
+
+- `SOURCECRAFT_PUBLICATION_REPORT.md` - human-readable publication report for SourceCraft, including runtime changes, new features, and operational impact
+- SourceCraft publication summary: SourceCraft now ships with explicit websocket routing hints, session isolation, degraded boot behavior for unsupported host bridge paths, and safer message serialization in the orchestration transport layer.

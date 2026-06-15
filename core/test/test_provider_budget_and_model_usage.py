@@ -182,3 +182,37 @@ def test_model_usage_after_task_records_local_cost_components(monkeypatch):
     assert module.history[-1]["provider"] == "local"
     assert module.history[-1]["estimated_cost_usd"] > 0
     assert module.history[-1]["cost_components"]["latency_sec"] == 2.5
+
+
+def test_provider_budget_router_honors_websocket_provider_preference():
+    task = Task(
+        TaskType.DOCS,
+        TaskInput("Explain websocket routing"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    task.routing_hints = {"source": "websocket", "provider_preference": "openai", "cost_tier": "interactive"}
+
+    class _Choice:
+        provider = "mistral"
+
+    providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
+
+    assert providers[0] == "openai"
+
+
+def test_provider_budget_router_uses_cheaper_order_for_websocket_economy():
+    task = Task(
+        TaskType.DOCS,
+        TaskInput("Summarize release notes"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    task.routing_hints = {"source": "websocket", "cost_tier": "economy"}
+
+    class _Choice:
+        provider = "openai"
+
+    providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
+
+    assert providers[0] == "local"

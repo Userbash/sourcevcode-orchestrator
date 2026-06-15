@@ -39,6 +39,51 @@ class BaseAgent(ABC):
     def get_api(self) -> KernelAPI | None:
         return self._api
 
+    @staticmethod
+    def _memory_brief(memory_context: dict | None = None, *, max_chars: int = 1600) -> str:
+        if not isinstance(memory_context, dict) or not memory_context:
+            return ""
+        lines: list[str] = []
+        for label, key in (
+            ("LAYERED CONTEXT", "layered_context_brief"),
+            ("TRAINED MEMORY", "trained_memory_brief"),
+            ("REUSABLE TASK MEMORY", "reusable_task_memory_brief"),
+            ("PROMPT MEMORY", "prompt_memory_brief"),
+        ):
+            value = str(memory_context.get(key) or "").strip()
+            if value:
+                lines.append(f"{label}: {value}")
+        handoffs = memory_context.get("handoff_summaries")
+        if isinstance(handoffs, list):
+            compact = [str(item).strip() for item in handoffs if str(item).strip()]
+            if compact:
+                lines.append(f"P2P HANDOFFS: {' | '.join(compact[:3])}")
+        guidance = memory_context.get("prompt_guidance")
+        if isinstance(guidance, list):
+            compact = [str(item).strip() for item in guidance if str(item).strip()]
+            if compact:
+                lines.append(f"PROMPT GUIDANCE: {' | '.join(compact[:4])}")
+        text = "\n".join(lines).strip()
+        if len(text) <= max_chars:
+            return text
+        return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+    def _record_execution_prompt(self, task: Task, prompt: str, memory_context: dict | None = None, *, provider: str | None = None, model_name: str | None = None) -> None:
+        api = self.get_api()
+        layered = api.get_context("layered_context_memory") if api and hasattr(api, "get_context") else None
+        if layered and hasattr(layered, "record_execution_prompt"):
+            try:
+                layered.record_execution_prompt(
+                    task,
+                    agent_id=self.agent_id,
+                    provider=provider or getattr(self, "provider", None) or getattr(self, "_provider", "local"),
+                    model_name=model_name or getattr(self, "model_name", None) or getattr(self, "_model", "unknown"),
+                    prompt=prompt,
+                    memory_context=memory_context,
+                )
+            except Exception:
+                pass
+
     @abstractmethod
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
         raise NotImplementedError

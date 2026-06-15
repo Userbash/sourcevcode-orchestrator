@@ -6,16 +6,19 @@ from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
-from .kernel_protocol import KernelAPI, KernelModule
-from .models import Task, AgentResult, Complexity, TaskType
+from .kernel_protocol import KernelAPI
+from .models import Task
+from .reasoning_module import strip_json_fences
 
 logger = logging.getLogger("ai_intelligence")
+
 
 class ComplexityAnalysis(BaseModel):
     complexity: str = Field(description="low, medium, high, critical")
     reasoning: str
     estimated_effort_hours: float
     required_capabilities: List[str]
+
 
 class ErrorDiagnosis(BaseModel):
     error_type: str = Field(description="quota, auth, logic, network, context_overflow, unknown")
@@ -24,10 +27,12 @@ class ErrorDiagnosis(BaseModel):
     suggested_fix: Optional[str]
     recommended_fallback_model: Optional[str]
 
+
 class MergeStrategy(BaseModel):
     merged_summary: str
     conflicts: List[str]
     integrated_diff: str
+
 
 @dataclass
 class AIIntelligenceModule:
@@ -43,7 +48,7 @@ class AIIntelligenceModule:
 
     def estimate_complexity(self, task: Task) -> Optional[ComplexityAnalysis]:
         reasoning = self._api.get_module("reasoning") if self._api else None
-        if not reasoning or not getattr(reasoning, "_client", None):
+        if not reasoning:
             return None
 
         prompt = f"""Analyze the complexity of this task:
@@ -55,7 +60,6 @@ Acceptance Criteria count: {len(task.input.acceptance_criteria)}
         return reasoning.structured_call(prompt, ComplexityAnalysis, system_prompt="You are a technical project manager.", model="gpt-4o")
 
     def diagnose_error(self, raw_error: str, task: Task, model_used: str) -> Optional[ErrorDiagnosis]:
-        # Local LLM is great for classification if ready
         local_llm = self._api.get_module("local_llm") if self._api else None
         if local_llm and getattr(local_llm, "ready", False):
             try:
@@ -65,15 +69,13 @@ Model: {model_used}
 Task: {task.input.description[:200]}
 Keys: error_type (quota, auth, logic, network, context_overflow, unknown), is_retryable (bool), explanation, suggested_fix, recommended_fallback_model.
 """
-                resp = local_llm.query(prompt)
-                import json
-                return ErrorDiagnosis.model_validate_json(resp)
+                resp = local_llm.query(prompt).strip()
+                return ErrorDiagnosis.model_validate_json(strip_json_fences(resp))
             except Exception:
                 pass
 
-        # Fallback to Cloud Reasoning
         reasoning = self._api.get_module("reasoning") if self._api else None
-        if not reasoning or not getattr(reasoning, "_client", None):
+        if not reasoning:
             return None
 
         prompt = f"Diagnose error: {raw_error}\nModel: {model_used}\nTask: {task.input.description[:300]}"

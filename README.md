@@ -109,3 +109,7 @@ Recent work focused on making GitHub automation safer and more hands-off:
 - SourceCraft is used as the repository-operation layer for repo status, PR, and release workflows.
 
 The result is a workflow where the orchestrator can manage repository tasks, authenticate to GitHub, and keep the experience mostly invisible to the user.
+
+## SourceCraft Publication Note
+
+SourceCraft is the repository operations layer inside the orchestrator stack. This publication focuses on reliability rather than marketing language: websocket sessions are now isolated correctly, routing hints survive task creation, cost and provider policy are easier to tune, startup degrades more safely when host bridge dependencies are missing, and task envelopes are serialized more reliably across the transport layer. The result is a runtime that behaves more consistently for real users, especially in containerized and mixed-provider deployments. For the full publication summary, see `docs/SOURCECRAFT_PUBLICATION_REPORT.md`.

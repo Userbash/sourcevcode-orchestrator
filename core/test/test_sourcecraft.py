@@ -14,12 +14,18 @@ async def main():
     )
     
     print("Отправка задачи в Оркестратор...")
-    result = orch.dispatch(task)
-    print(f"Статус задачи: {result.status.value}")
-    if hasattr(result, 'output'):
-        print(f"Вывод: {result.output}")
-    if result.errors:
-        print(f"Ошибки: {result.errors}")
+    result = await orch.run(task)
+    print(f"Статус задачи: {result.get('status')}")
+    merged = result.get('merged')
+    if merged:
+        if isinstance(merged, dict):
+            print(f"Вывод: {merged.get('summary')}")
+            if merged.get('errors'):
+                print(f"Ошибки: {merged.get('errors')}")
+        else:
+            print(f"Вывод: {getattr(merged, 'summary', '')}")
+            if getattr(merged, 'errors', None):
+                print(f"Ошибки: {getattr(merged, 'errors', None)}")
 
 if __name__ == "__main__":
     asyncio.run(main())

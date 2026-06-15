@@ -5,10 +5,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from .kernel_protocol import KernelAPI, KernelModule
+from .kernel_protocol import KernelAPI
 from .models import TaskType, Priority
-
-logger = logging.getLogger("trigger_dispatcher")
 
 
 @dataclass

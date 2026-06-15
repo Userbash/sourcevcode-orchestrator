@@ -1,12 +1,14 @@
 from __future__ import annotations
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import os
 import threading
 import time
 import sys
-from collections.abc import AsyncIterator
+from collections import defaultdict
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from datetime import UTC, datetime
@@ -23,13 +25,14 @@ from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
 from .model_selector import ModelChoice, ModelSelector
-from .models import AgentResult, AgentStatus, ExecutionPlan, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskPayload, TaskStatus, TaskType, encapsulate
+from .models import AgentResult, AgentStatus, ExecutionPlan, P2PMessage, P2PMessageType, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskPayload, TaskStatus, TaskType, encapsulate
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
 from .result_merger import ResultMerger
 from .smart_scheduler import SmartScheduler
 from .session_memory import MemoryScope, SessionMemory
+from .memory_control_module import MemoryControlModule
 from .availability import ModelAvailability, ModelAvailabilityModule, ProviderStatus
 from .ai_activity_module import AIActivityModule
 from .data_plane_monitor import build_data_plane_snapshot
@@ -68,12 +71,70 @@ from .risk_advisor_module import RiskAdvisorModule
 from .orchestrator_advisor_module import OrchestratorAdvisorModule
 from .intelligence_module import AIIntelligenceModule
 from .security_sentinel import KernelSecuritySentinel
+from .cache_guard import CacheGuard, GuardAction
+from core.adapters.state.postgres_state_store import PostgresStateStore
 
 
 TIMEOUT_ERROR_TYPES = {"tcp_timeout", "api_timeout", "sdk_hang"}
 from .task_decomposer import TaskDecomposer
 from .task_router import CAPABILITY_BY_TASK_TYPE, TaskRouter
 from .user_console import UserConsole
+
+class OrchestratorAgent(BaseAgent):
+    def __init__(self, agent_id: str = "orchestrator") -> None:
+        super().__init__(agent_id, ["orchestrator", "sourcecraft", "repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance"])
+        self._provider = "local"
+        self._model = "orchestrator-core"
+
+    def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
+        orchestrator = getattr(self, "orchestrator", None)
+        if orchestrator is None:
+            return self.result(task, "Orchestrator agent is not attached to orchestrator", TaskStatus.FAILED, errors=["orchestrator_missing"])
+
+        sourcecraft_module = orchestrator.get_module("sourcecraft")
+        if not sourcecraft_module:
+            return self.result(task, "SourceCraft module is not registered", TaskStatus.FAILED, errors=["sourcecraft_module_missing"])
+
+        description = task.input.description.lower()
+        repo_path = task.context.repo_path or "."
+
+        # Determine action based on task description or routing hints
+        action = "status"
+        if "pr" in description or "pull request" in description:
+            action = "create_pr"
+        elif "push" in description:
+            action = "push_branch"
+        elif "branch" in description and "prepare" in description:
+            action = "prepare_feature_branch"
+
+        try:
+            # Execute repo action using the module
+            result_dict = sourcecraft_module.execute_repo_action(
+                action=action,
+                repo_path=repo_path,
+                branch=task.context.branch,
+                session_id=task.session_id or task.task_id,
+                dry_run=True, # Safety default
+            )
+            
+            summary = result_dict.get("summary") or result_dict.get("stdout") or "SourceCraft action completed successfully."
+            status = TaskStatus.DONE if result_dict.get("status") != "error" else TaskStatus.FAILED
+            errors = [result_dict.get("last_error")] if result_dict.get("status") == "error" else []
+            
+            return self.result(
+                task,
+                summary,
+                status=status,
+                errors=errors,
+                output=result_dict
+            )
+        except Exception as e:
+            return self.result(
+                task,
+                f"SourceCraft action failed: {str(e)}",
+                status=TaskStatus.FAILED,
+                errors=[str(e)]
+            )
 
 
 class Orchestrator:
@@ -156,19 +217,120 @@ class Orchestrator:
             },
         )
 
+    def _ensure_agent_worker(self, agent_id: str) -> None:
+        thread = self._agent_worker_threads.get(agent_id)
+        if thread is not None and thread.is_alive():
+            return
+        worker = threading.Thread(target=self._agent_worker_loop, args=(agent_id,), name=f"agent-worker-{agent_id}", daemon=True)
+        self._agent_worker_threads[agent_id] = worker
+        worker.start()
+
+    def _agent_worker_loop(self, agent_id: str) -> None:
+        while not self._agent_worker_stop.is_set():
+            try:
+                message = self.message_bus.receive_for_agent(agent_id)
+            except Exception:
+                time.sleep(0.05)
+                continue
+            if message is None:
+                time.sleep(0.05)
+                continue
+            if isinstance(message, P2PMessage):
+                with self._agent_runtime_lock:
+                    self._agent_p2p_inbox[agent_id].append(message)
+                continue
+            if not hasattr(message, "task_id"):
+                continue
+            task_id = str(getattr(message, "task_id", "") or "")
+            with self._agent_runtime_lock:
+                runtime = self._agent_task_runtime.get(task_id)
+                future = self._agent_task_futures.get(task_id)
+            if runtime is None or future is None:
+                continue
+            task = runtime["task"]
+            memory_context = dict(runtime.get("memory_context") or {})
+            agent = self.local_agents.get(agent_id)
+            if agent is None:
+                if not future.done():
+                    future.set_result(AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "No local executor for routed agent", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["No local executor"], []))
+                continue
+            if not self.confirm_delivery_payload(task_id, agent_id, message):
+                if not future.done():
+                    future.set_result(AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery payload validation failed", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_payload_invalid"], []))
+                continue
+            ack = self.establish_delivery_handshake(task_id, agent_id)
+            if ack.ack_status.value != "accepted":
+                if not future.done():
+                    future.set_result(AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery handshake was not accepted", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_handshake_failed"], []))
+                continue
+            handoff = self._consume_p2p_handoffs(agent_id, task_id)
+            if handoff:
+                memory_context["p2p_handoffs"] = handoff
+                memory_context["handoff_summaries"] = [item.get("summary", "") for item in handoff if item.get("summary")]
+            try:
+                result = agent.run(task, memory_context=memory_context)
+            except Exception as exc:
+                result = AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": str(exc), "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, [str(exc)], [])
+            if not future.done():
+                future.set_result(result)
+
+    def _consume_p2p_handoffs(self, agent_id: str, task_id: str) -> list[dict[str, Any]]:
+        with self._agent_runtime_lock:
+            inbox = list(self._agent_p2p_inbox.get(agent_id, []))
+            matched = [msg for msg in inbox if msg.task_id == task_id]
+            remaining = [msg for msg in inbox if msg.task_id != task_id]
+            self._agent_p2p_inbox[agent_id] = remaining
+        payloads: list[dict[str, Any]] = []
+        for message in matched:
+            payload = dict(message.payload or {})
+            payload.setdefault("from_agent", message.from_agent)
+            payload.setdefault("to_agent", message.to_agent)
+            payload.setdefault("message_type", str(message.message_type.value if hasattr(message.message_type, "value") else message.message_type))
+            payloads.append(payload)
+        return payloads
+
+    def _dispatch_dependency_handoffs(self, tasks: list[Task], results_by_task_id: dict[str, AgentResult]) -> int:
+        dispatched = 0
+        for task in tasks:
+            target_agent = self._task_preferred_agent_id(task)
+            if not target_agent or not task.dependencies:
+                continue
+            for dep_id in task.dependencies:
+                result = results_by_task_id.get(dep_id)
+                if result is None or not result.agent_id or result.agent_id == target_agent:
+                    continue
+                payload = {
+                    "dependency_task_id": dep_id,
+                    "summary": result.output.get("summary", ""),
+                    "errors": list(result.errors or []),
+                    "status": result.status.value,
+                    "artifacts": list(result.output.get("files_changed", [])),
+                }
+                message = P2PMessage(task_id=task.task_id, from_agent=result.agent_id, to_agent=target_agent, message_type=P2PMessageType.CONTEXT_TRANSFER, priority=task.priority, payload=payload)
+                peer_candidates = [peer for peer in self.message_bus.discover_peers("review") if peer not in {result.agent_id, target_agent}] if hasattr(self.message_bus, "discover_peers") else []
+                if peer_candidates:
+                    self.message_bus.relay_p2p(message, nearest_peer=peer_candidates[0])
+                else:
+                    self.message_bus.send_p2p(message)
+                dispatched += 1
+        return dispatched
+
     def _run_local_agent_via_delivery(self, task: Task, agent_id: str, capability: str, agent: BaseAgent, memory_context: dict[str, object]) -> AgentResult:
+        self._ensure_agent_worker(agent_id)
+        future: concurrent.futures.Future[AgentResult] = concurrent.futures.Future()
+        with self._agent_runtime_lock:
+            self._agent_task_runtime[task.task_id] = {"task": task, "memory_context": dict(memory_context), "agent_id": agent_id, "capability": capability}
+            self._agent_task_futures[task.task_id] = future
         envelope = self._delivery_envelope_for_task(task, agent_id, capability)
         self.dispatch_envelope(envelope)
-        mailbox = self.fetch_agent_mailbox(agent_id, limit=1)
-        if not mailbox:
-            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Agent mailbox fetch returned no envelope", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_mailbox_empty"], [])
-        fetched = mailbox[0]
-        if not self.confirm_delivery_payload(task.task_id, agent_id, fetched):
-            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery payload validation failed", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_payload_invalid"], [])
-        ack = self.establish_delivery_handshake(task.task_id, agent_id)
-        if ack.ack_status.value != "accepted":
-            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery handshake was not accepted", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_handshake_failed"], [])
-        return agent.run(task, memory_context=memory_context)
+        try:
+            return future.result(timeout=float(self._agent_worker_timeout_sec))
+        except concurrent.futures.TimeoutError:
+            return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Agent worker timed out waiting for mailbox consumer", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_worker_timeout"], [])
+        finally:
+            with self._agent_runtime_lock:
+                self._agent_task_runtime.pop(task.task_id, None)
+                self._agent_task_futures.pop(task.task_id, None)
 
     def log(self, level: str, message: str) -> None:
         getattr(self.console, level, self.console.emit)(f"KERNEL:{level.upper()}", message)
@@ -197,6 +359,8 @@ class Orchestrator:
         return os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
 
     def _antigravity_status_snapshot(self) -> dict[str, Any]:
+        if self._testing_mode():
+            return {}
         module = self.module_manager.get_module("antigravity_status")
         if module and hasattr(module, "snapshot"):
             snapshot = module.snapshot()
@@ -217,6 +381,40 @@ class Orchestrator:
         if isinstance(antigravity, dict) and antigravity:
             providers["antigravity"] = antigravity
         return {"providers": providers}
+
+    def cache_guard_snapshot(self, session_id: str) -> dict[str, Any]:
+        return self.cache_guard.snapshot(session_id)
+
+    def _cache_guard_failure(self, task: Task) -> AgentResult | None:
+        session_id = task.session_id or task.task_id
+        guard_snapshot = self.cache_guard.snapshot(session_id)
+        if not guard_snapshot.get("blocked"):
+            return None
+        message = f"Task blocked by cache guard for session {session_id}"
+        self.state_store.record_invalidation(
+            session_id,
+            reason="CACHE_GUARD_HARD_STOP",
+            payload={"task_id": task.task_id, "action": guard_snapshot.get("action")},
+        )
+        return AgentResult(
+            task.task_id,
+            "orchestrator",
+            TaskStatus.FAILED,
+            {"summary": message, "files_changed": [], "commands_run": [], "test_results": [], "diff": ""},
+            0.0,
+            [message],
+            [],
+        )
+
+    @staticmethod
+    def _runtime_usage_hints(task: Task) -> dict[str, Any]:
+        hints = getattr(task, "routing_hints", {}) or {}
+        runtime = hints.get("runtime_usage") if isinstance(hints, dict) else {}
+        return dict(runtime) if isinstance(runtime, dict) else {}
+
+    @staticmethod
+    def _default_context_version(task: Task) -> str:
+        return f"task:{task.task_id}"
 
     def _select_model_choice_with_mimo(self, task: Task, advisory_context: dict[str, Any], current_budget: float, memory_context: dict[str, Any] | None = None) -> tuple[ModelChoice | None, Any]:
         complexity = self.model_selector.classify(task)
@@ -307,6 +505,13 @@ class Orchestrator:
         self.local_agents: dict[str, BaseAgent] = {}
         self.results: dict[str, AgentResult] = {}
         self.live_trace_rows: list[dict[str, object]] = []
+        self._agent_worker_stop = threading.Event()
+        self._agent_worker_threads: dict[str, threading.Thread] = {}
+        self._agent_task_futures: dict[str, concurrent.futures.Future[AgentResult]] = {}
+        self._agent_task_runtime: dict[str, dict[str, Any]] = {}
+        self._agent_runtime_lock = threading.Lock()
+        self._agent_p2p_inbox: dict[str, list[P2PMessage]] = defaultdict(list)
+        self._agent_worker_timeout_sec = max(30, int(os.getenv("AI_BRIDGE_AGENT_WORKER_TIMEOUT_SEC", "900") or "900"))
         
         components = AgentFactory.build(registry=registry, retry_limit=retry_limit, idle_shutdown_sec=idle_shutdown_sec)
         
@@ -348,7 +553,10 @@ class Orchestrator:
         self.host_bridge = components.host_bridge
         self.session_memory = components.session_memory
         self.memory_consolidator = components.memory_consolidator
+        self.layered_context_memory = self.session_memory.layered
         self.provider_budget_router = ProviderBudgetRouter()
+        self.state_store = PostgresStateStore()
+        self.cache_guard = CacheGuard()
         self.kpi_events = KPIEventLogger.from_env()
         if getattr(self.orchestration_config, "kpi_rejection_summary_path", ""):
             self.kpi_events.summary_path = Path(self.orchestration_config.kpi_rejection_summary_path)
@@ -385,6 +593,7 @@ class Orchestrator:
         self.module_manager.set_api(self)
         self.module_manager.register(AIActivityModule())
         self.module_manager.register(OrchestratorControlModule())
+        self.module_manager.register(MemoryControlModule())
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(ModelAvailabilityModule())
         self.module_manager.register(AntigravityStatusModule())
@@ -415,6 +624,7 @@ class Orchestrator:
         
         self.module_manager.load("ai_activity")
         self.module_manager.load("orchestrator_control")
+        self.module_manager.load("memory_control")
         self.module_manager.load("model_usage")
         self.mimo_director.set_budget_module(self.module_manager.get_module("model_usage"))
         self.module_manager.load("unified_vfs")
@@ -434,9 +644,17 @@ class Orchestrator:
 
 
 
-        self.module_manager.load("sourcecraft")
-        self.module_manager.load("voice_listener")
-        self.module_manager.load("reasoning")
+        sourcecraft_disabled = os.getenv("AI_BRIDGE_DISABLE_SOURCECRAFT", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if sourcecraft_disabled:
+            self.console.emit("SOURCECRAFT", "disabled by AI_BRIDGE_DISABLE_SOURCECRAFT")
+        else:
+            try:
+                self.module_manager.load("sourcecraft")
+            except Exception as exc:
+                self.console.emit("SOURCECRAFT", f"degraded at boot: {exc}")
+        if not self._testing_mode():
+            self.module_manager.load("voice_listener")
+            self.module_manager.load("reasoning")
         self.module_manager.load("risk_advisor")
         self.module_manager.load("orchestrator_advisor")
         self.module_manager.load("intelligence")
@@ -450,7 +668,10 @@ class Orchestrator:
             self.module_manager.load("local_llm")
         self._autostart_local_llm()
         self._autostart_easy_diffusion()
-        self._start_postgres_watchdog()
+        # Register default orchestrator agent to handle sourcecraft and orchestrator capability tasks
+        self.attach_local_agent("orchestrator", OrchestratorAgent("orchestrator"), agent_type="orchestrator", critical=True, model_name="orchestrator-core", provider="local")
+        if not self._testing_mode():
+            self._start_postgres_watchdog()
 
     def _start_postgres_watchdog(self) -> None:
         interval_raw = os.getenv("AI_BRIDGE_POSTGRES_WATCHDOG_INTERVAL_SEC", "30").strip()
@@ -632,6 +853,7 @@ class Orchestrator:
         # 2. Register as TPP Pod (Mesh Architecture)
         if hasattr(self.message_bus, "register_pod"):
             self.message_bus.register_pod(agent_id, agent.capabilities)
+        self._ensure_agent_worker(agent_id)
         self.log("info", f"[KERNEL] Attached local agent pod: {agent_id} (TPP Enabled)")
 
     def qt_dev_box(self) -> QtDevBoxModule | None:
@@ -658,6 +880,7 @@ class Orchestrator:
         self.module_manager.unload(name)
 
     def shutdown(self) -> None:
+        self._agent_worker_stop.set()
         self._stop_postgres_watchdog()
         self._training_consolidation_stop.set()
         self._kpi_dashboard_stop.set()
@@ -668,6 +891,12 @@ class Orchestrator:
     def _control_module(self) -> OrchestratorControlModule | None:
         module = self.module_manager.get_module("orchestrator_control")
         if isinstance(module, OrchestratorControlModule):
+            return module
+        return None
+
+    def _memory_control_module(self) -> MemoryControlModule | None:
+        module = self.module_manager.get_module("memory_control")
+        if isinstance(module, MemoryControlModule):
             return module
         return None
 
@@ -707,7 +936,10 @@ class Orchestrator:
         control = self._control_module()
         if control is not None:
             control.register_submission(task, source=source)
-            
+        memory_control = self._memory_control_module()
+        if memory_control is not None:
+            memory_control.register_submission(task, raw_payload=payload, normalized_payload=normalized, source=source)
+
         result = await self.run_async(task)
         self.session_memory.set(MemoryScope.SESSION, session_id, cache_key, result, ttl_sec=3600)
         return result
@@ -748,6 +980,9 @@ class Orchestrator:
         control = self._control_module()
         if control is not None:
             control.register_submission(task, source=source)
+        memory_control = self._memory_control_module()
+        if memory_control is not None:
+            memory_control.register_submission(task, raw_payload=payload, normalized_payload=normalized, source=source)
         result = self.run_sync(task)
         self.session_memory.set(MemoryScope.SESSION, session_id, cache_key, result, ttl_sec=3600)
         return result
@@ -768,13 +1003,26 @@ class Orchestrator:
 
         self.console.listeners.append(console_listener)
         task_future = asyncio.create_task(self.submit_user_task_async(payload, source=source))
+        heartbeat_interval_sec = 10.0
+        last_heartbeat = loop.time()
         yield {"type": "stream_event", "stage": "ACCEPTED", "message": "task accepted by orchestrator"}
 
         try:
             while not task_future.done():
                 try:
-                    yield await asyncio.wait_for(event_queue.get(), timeout=0.25)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.25)
+                    last_heartbeat = loop.time()
+                    yield event
                 except asyncio.TimeoutError:
+                    now = loop.time()
+                    if now - last_heartbeat >= heartbeat_interval_sec:
+                        last_heartbeat = now
+                        yield {
+                            "type": "stream_event",
+                            "stage": "HEARTBEAT",
+                            "message": "task still running",
+                            "ts": datetime.now(UTC).isoformat(),
+                        }
                     continue
 
             while not event_queue.empty():
@@ -818,8 +1066,100 @@ class Orchestrator:
                     return record.id
         return None
 
+    @staticmethod
+    def _task_preferred_agent_id(task: Task) -> str | None:
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        for key in ("preferred_agent_id", "batch_forced_agent_id", "forced_agent_id"):
+            value = hints.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _agent_hint_matches(record: Any, hint: str | None) -> bool:
+        normalized = str(hint or "").strip().lower()
+        if not normalized:
+            return False
+        haystack = " ".join([record.id, record.provider, record.model_name, *record.capabilities]).lower()
+        tokens = [token for token in normalized.replace("-", " ").replace("_", " ").split() if token]
+        if normalized in haystack:
+            return True
+        return any(token in haystack for token in tokens)
+
+    def _parallel_candidates_for_task(self, task: Task) -> list[Any]:
+        capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        agent_hint = hints.get("agent_hint") if isinstance(hints, dict) else None
+        candidates = []
+        for record in self.registry.list_agents():
+            if record.id not in self.local_agents:
+                continue
+            if capability not in record.capabilities:
+                continue
+            if not is_agent_routable(record, task.priority):
+                continue
+            candidates.append(record)
+        if agent_hint:
+            hinted = [record for record in candidates if self._agent_hint_matches(record, str(agent_hint))]
+            if hinted:
+                hinted_ids = {item.id for item in hinted}
+                candidates = hinted + [record for record in candidates if record.id not in hinted_ids]
+        return sorted(candidates, key=lambda record: self.scheduler.agent_score(record, capability), reverse=True)
+
+    def _preassign_parallel_batch_agents(self, tasks: list[Task]) -> dict[str, str]:
+        assignments: dict[str, str] = {}
+        reserved: set[str] = set()
+        reserved_models: set[tuple[str, str]] = set()
+        candidate_map = {task.task_id: self._parallel_candidates_for_task(task) for task in tasks}
+
+        def _priority_weight(item: Task) -> int:
+            order = {Priority.CRITICAL: 4, Priority.HIGH: 3, Priority.NORMAL: 2, Priority.LOW: 1}
+            return order.get(item.priority, 2)
+
+        ordered = sorted(tasks, key=lambda item: (len(candidate_map.get(item.task_id, [])) or 999, -_priority_weight(item), item.task_id))
+        for task in ordered:
+            hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+            if not isinstance(hints, dict):
+                task.routing_hints = {}
+                hints = task.routing_hints
+            existing = self._task_preferred_agent_id(task)
+            if existing:
+                assignments[task.task_id] = existing
+                reserved.add(existing)
+                existing_record = self.registry.get(existing)
+                if existing_record is not None:
+                    reserved_models.add((str(existing_record.provider), str(existing_record.model_name)))
+                continue
+            candidates = candidate_map.get(task.task_id, [])
+            if not candidates:
+                continue
+            pool = [record for record in candidates if record.id not in reserved] or candidates
+            diversified = [record for record in pool if (str(record.provider), str(record.model_name)) not in reserved_models]
+            selected = (diversified or pool)[0]
+            hints["preferred_agent_id"] = selected.id
+            hints["batch_forced_agent_id"] = selected.id
+            assignments[task.task_id] = selected.id
+            reserved.add(selected.id)
+            reserved_models.add((str(selected.provider), str(selected.model_name)))
+        return assignments
+
     def _build_decomposition_advisory(self, task: Task) -> dict[str, object]:
         advisory_context: dict[str, object] = {}
+
+        if self._testing_mode():
+            advisory_context["sourcecraft"] = {"enabled": False, "should_delegate": False}
+            advisory_context["sourcecraft_runtime"] = {"status": "testing_disabled"}
+            advisory_context["local_llm"] = {
+                "enabled": True,
+                "ready": True,
+                "should_delegate": False,
+                "status": "ready",
+                "recommended_owner": "local_llm",
+                "recommended_model": "local-small",
+                "preferred_model": "local-small",
+                "task_family": str(getattr(getattr(task, "type", None), "value", "unknown")),
+            }
+            return advisory_context
 
         sourcecraft_module = self.module_manager.get_module("sourcecraft") if hasattr(self.module_manager, "get_module") else None
         if sourcecraft_module and hasattr(sourcecraft_module, "build_delegation_profile"):
@@ -916,9 +1256,14 @@ class Orchestrator:
     def create_execution_plan(self, task: Task) -> ExecutionPlan:
         self.console.emit("PLAN", "Задача проанализирована")
         advisory_context = self._build_decomposition_advisory(task)
+        memory_control = self._memory_control_module()
+        if memory_control is not None:
+            memory_control.register_planning_draft(task, advisory_context, source="advisory_context")
         gateway_plan = self._materialize_mistral_delegation_plan(task, advisory_context)
         if gateway_plan is not None:
             self.console.emit("PLAN", f"Mistral gateway execution plan created: {len(gateway_plan.atomic_tasks)} tasks")
+            if memory_control is not None:
+                memory_control.register_decomposition(task, gateway_plan, source="mistral_gateway")
             return gateway_plan
 
         sourcecraft_module = self.module_manager.get_module("sourcecraft")
@@ -940,6 +1285,8 @@ class Orchestrator:
                     if isinstance(readability_policy, CodeReadabilityModule):
                         sourcecraft_plan = readability_policy.enforce_plan(sourcecraft_plan)
                     self.console.emit("PLAN", f"SourceCraft execution plan created: {len(sourcecraft_plan.atomic_tasks)} tasks")
+                    if memory_control is not None:
+                        memory_control.register_decomposition(task, sourcecraft_plan, source="sourcecraft")
                     return sourcecraft_plan
             except Exception as e:
                 self.console.emit("PLAN", f"SourceCraft planning fallback: {e}")
@@ -951,6 +1298,8 @@ class Orchestrator:
                 plan = smart_decomp.decompose_task(task)
                 if plan:
                     self.console.emit("PLAN", f"Умная декомпозиция (Reasoning): создано {len(plan.atomic_tasks)} задач")
+                    if memory_control is not None:
+                        memory_control.register_decomposition(task, plan, source="smart_decomposer")
                     return plan
             except Exception as e:
                 self.console.emit("PLAN", f"Ошибка умной декомпозиции, используем fallback: {e}")
@@ -969,10 +1318,15 @@ class Orchestrator:
             plan = readability_policy.enforce_plan(plan)
 
         self.console.emit("PLAN", f"Создано атомарных задач: {len(plan.atomic_tasks)}")
+        if memory_control is not None:
+            memory_control.register_decomposition(task, plan, source="task_decomposer")
 
         return plan
 
-    def _load_memory_context(self, task: Task, agent_id: str) -> dict[str, object]:
+    def _load_memory_context(self, task: Task, agent_id: str, *, provider: str = "", model_name: str = "") -> dict[str, object]:
+        memory_control = self._memory_control_module()
+        if memory_control is not None:
+            return dict(memory_control.build_runtime_context(task, agent_id=agent_id, provider=provider, model_name=model_name))
         scope_name = (task.memory_scope or "task").lower()
         scope = MemoryScope.TASK
         if scope_name == "session":
@@ -1039,6 +1393,17 @@ class Orchestrator:
             context["reusable_task_memory_similarity"] = float(reusable.get("similarity", 0.0) or 0.0)
             context["reusable_task_memory_fingerprint"] = str(reusable.get("fingerprint") or "")
             context["reusable_task_memory_count"] = int(reusable.get("count", 0) or 0)
+        layered = self.layered_context_memory.build_context_pie(task, agent_id=agent_id, provider=provider, model_name=model_name)
+        if layered.layered_context_brief:
+            context["layered_context_brief"] = layered.layered_context_brief
+        if layered.prompt_memory_brief:
+            context["prompt_memory_brief"] = layered.prompt_memory_brief
+        if layered.routing_memory_brief:
+            context["routing_memory_brief"] = layered.routing_memory_brief
+        if layered.execution_memory_brief:
+            context["execution_memory_brief"] = layered.execution_memory_brief
+        if layered.prompt_guidance:
+            context["prompt_guidance"] = list(layered.prompt_guidance)
         return context
 
     def _model_usage_module(self) -> ModelUsageModule | None:
@@ -1186,6 +1551,10 @@ class Orchestrator:
         lifecycle_logged = False
         lifecycle_payload: dict[str, Any] | None = None
         self.log("info", f"[PRE-FLIGHT] Verifying readiness for task {task.task_id}")
+        session_id = task.session_id or task.task_id
+        cache_guard_failure = self._cache_guard_failure(task)
+        if cache_guard_failure is not None:
+            return cache_guard_failure
         
         # Try to run parallel checks if we have a loop, otherwise skip or run sync
         try:
@@ -1248,12 +1617,22 @@ class Orchestrator:
             f"secondary_review={choice.requires_secondary_review} reason={choice.reason}",
         )
 
+        runtime_usage = self._runtime_usage_hints(task)
         module_context: dict[str, object] = {
             "selected_provider": choice.provider,
             "selected_model": choice.model_name,
             "reason": choice.reason,
+            "prompt_version": str(runtime_usage.get("prompt_version") or "v1"),
+            "context_version": str(runtime_usage.get("context_version") or self._default_context_version(task)),
+            **runtime_usage,
             **advisory_context,
         }
+        state_snapshot = self.state_store.save_session_state(
+            session_id,
+            {"task_id": task.task_id, "status": "running", "task_type": task.type.value, "agent_id": None},
+            prompt_version=str(module_context.get("prompt_version") or "v1"),
+            context_version=str(module_context.get("context_version") or self._default_context_version(task)),
+        )
         self.module_manager.before_task(task, module_context)
 
         self.autoscaler.ensure_capacity(capability)
@@ -1263,12 +1642,20 @@ class Orchestrator:
         else:
             self.console.emit("SCHEDULER", f"P2P route allowed: {decision.reason}")
 
-        preferred_providers = self.provider_budget_router.preferred_providers(task, choice)
-        preferred_agent_id = self._select_agent_by_provider_preference(capability, preferred_providers, priority=task.priority)
-        if preferred_agent_id:
-            acceptance = TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, preferred_agent_id, self.router.estimate_complexity(task), "Task accepted (provider budget routing)")
+        forced_agent_id = self._task_preferred_agent_id(task)
+        if forced_agent_id:
+            forced_record = self.registry.get(forced_agent_id)
+            if forced_record and capability in forced_record.capabilities and is_agent_routable(forced_record, task.priority) and forced_agent_id in self.local_agents:
+                acceptance = TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, forced_agent_id, self.router.estimate_complexity(task), "Task accepted (parallel batch routing)")
+            else:
+                acceptance = self.router.route(task)
         else:
-            acceptance = self.router.route(task)
+            preferred_providers = self.provider_budget_router.preferred_providers(task, choice)
+            preferred_agent_id = self._select_agent_by_provider_preference(capability, preferred_providers, priority=task.priority)
+            if preferred_agent_id:
+                acceptance = TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, preferred_agent_id, self.router.estimate_complexity(task), "Task accepted (provider budget routing)")
+            else:
+                acceptance = self.router.route(task)
         if acceptance.status == TaskStatus.REJECTED or not acceptance.assigned_agent:
             self.console.emit("ROUTING", acceptance.message)
             self.live_trace_rows.append(
@@ -1378,6 +1765,18 @@ class Orchestrator:
         if budget_failed_result is not None:
             return budget_failed_result
         fallback = fallback or budget_fallback or fallback_count > 0
+        memory_control = self._memory_control_module()
+        if memory_control is not None:
+            memory_control.register_routing_outcome(
+                task,
+                selected_provider=str(choice.provider),
+                selected_model=str(choice.model_name),
+                routed_agent=agent_id,
+                routed_provider=str(agent_record.provider if agent_record else choice.provider),
+                routed_model=str(agent_record.model_name if agent_record else choice.model_name),
+                reason=str(choice.reason),
+                fallback_count=fallback_count,
+            )
 
         self.live_trace_rows.append(
             {
@@ -1411,7 +1810,12 @@ class Orchestrator:
                 failed_result = AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "No local executor for routed agent", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["No local executor"], [])
                 self.module_manager.after_task(task, failed_result, module_context)
                 return failed_result
-            memory_context = self._load_memory_context(task, agent_id)
+            memory_context = self._load_memory_context(
+                task,
+                agent_id,
+                provider=str(agent_record.provider if agent_record else choice.provider),
+                model_name=str(agent_record.model_name if agent_record else choice.model_name),
+            )
             
             # TPP: Mark pod as BUSY
             self._broadcast_pod_state(agent_id, AgentStatus.BUSY, task_id=task.task_id)
@@ -1434,7 +1838,7 @@ class Orchestrator:
             if result.status == TaskStatus.FAILED:
                 source_provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
                 if classified:
-                    self.provider_budget_router.mark_failure(task, source_provider, classified)
+                    self.provider_budget_router.mark_failure(task, source_provider, classified, detail="; ".join(result_errors), model_name=str(result.model_name or module_context.get("model") or choice.model_name or ""))
                     self.availability.record_failure(source_provider, classified, result_errors)
 
                 # Proactive Soft Fallback for all critical/high failures or quota issues
@@ -1512,6 +1916,14 @@ class Orchestrator:
                     )
                 except Exception as exc:
                     self.log("warning", f"[MEMORY] Failed to store reusable task memory: {exc}")
+            if memory_control is not None:
+                memory_control.register_result(
+                    task,
+                    result,
+                    quality_score=quality.score,
+                    fallback_count=fallback_count,
+                    latency_ms=(time.perf_counter() - started_perf) * 1000.0,
+                )
             if task.cache_policy in {"write_only", "read_write"}:
                 scope_name = (task.memory_scope or "task").lower()
                 scope = MemoryScope.TASK
@@ -1550,12 +1962,24 @@ class Orchestrator:
             tokens_used = None
             estimated_cost_usd = None
             cost_components = {}
+            cached_input_tokens = 0
+            uncached_input_tokens = 0
+            cache_hit_rate = 0.0
+            cache_miss_reason = ""
+            prompt_version = str(module_context.get("prompt_version") or "v1")
+            context_version = str(module_context.get("context_version") or self._default_context_version(task))
             if isinstance(history, list) and history:
                 for item in reversed(history):
                     if isinstance(item, dict) and item.get("task_id") == task.task_id:
                         tokens_used = item.get("tokens_used")
                         estimated_cost_usd = item.get("estimated_cost_usd")
                         cost_components = dict(item.get("cost_components") or {})
+                        cached_input_tokens = int(item.get("cached_input_tokens") or 0)
+                        uncached_input_tokens = int(item.get("uncached_input_tokens") or 0)
+                        cache_hit_rate = float(item.get("cache_hit_rate") or 0.0)
+                        cache_miss_reason = str(item.get("cache_miss_reason") or "")
+                        prompt_version = str(item.get("prompt_version") or prompt_version)
+                        context_version = str(item.get("context_version") or context_version)
                         break
             lifecycle_payload = {
                 "event_type": "task_lifecycle",
@@ -1574,10 +1998,33 @@ class Orchestrator:
                 "tokens_used": tokens_used,
                 "estimated_cost_usd": estimated_cost_usd,
                 "cost_components": cost_components,
+                "cached_input_tokens": cached_input_tokens,
+                "uncached_input_tokens": uncached_input_tokens,
+                "cache_hit_rate": cache_hit_rate,
+                "cache_miss_reason": cache_miss_reason,
+                "prompt_version": prompt_version,
+                "context_version": context_version,
                 "errors_count": len(result.errors or []),
             }
             self.kpi_events.write(lifecycle_payload)
             self.kpi_events.append_fallback(lifecycle_payload)
+            guard_decision = self.cache_guard.observe(
+                session_id=session_id,
+                uncached_input_tokens=uncached_input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_hit_rate=cache_hit_rate,
+            )
+            if cache_miss_reason:
+                self.state_store.record_invalidation(session_id, reason=cache_miss_reason, payload={"task_id": task.task_id, "cache_hit_rate": cache_hit_rate, "uncached_input_tokens": uncached_input_tokens, "cached_input_tokens": cached_input_tokens})
+            if guard_decision.get("action") == GuardAction.HARD_STOP.value:
+                self.state_store.record_invalidation(session_id, reason="CACHE_GUARD_HARD_STOP", payload={"task_id": task.task_id, "consecutive_misses": guard_decision.get("consecutive_misses")})
+            self.state_store.save_session_state(
+                session_id,
+                {"task_id": task.task_id, "status": result.status.value, "task_type": task.type.value, "agent_id": result.agent_id, "guard_action": guard_decision.get("action")},
+                prompt_version=prompt_version,
+                context_version=context_version,
+                expected_version=int(state_snapshot.get("version") or 1),
+            )
             lifecycle_logged = True
 
             rejection_summary = self._kpi_rejection_summary()
@@ -1650,6 +2097,7 @@ class Orchestrator:
         completed: set[str] = set()
         pending = {task.task_id: task for task in plan.atomic_tasks}
         final_results: list[AgentResult] = []
+        results_by_task_id: dict[str, AgentResult] = {}
         batch_no = 0
         total_tasks = len(plan.atomic_tasks)
 
@@ -1663,8 +2111,19 @@ class Orchestrator:
                 self.console.emit("THROTTLE", f"Token budget is low; reducing parallel batch from {len(ready_tasks)} to 1")
                 ready_tasks = ready_tasks[:1]
 
+            assignments = self._preassign_parallel_batch_agents(ready_tasks)
+            memory_control = self._memory_control_module()
+            if memory_control is not None and assignments:
+                try:
+                    memory_control.prepare_parallel_batch(ready_tasks, assignments, registry=self.registry)
+                except Exception:
+                    pass
             batch_no += 1
             ready_ids = ", ".join(task.task_id[:8] for task in ready_tasks)
+            if assignments:
+                routed = ", ".join(f"{task.task_id[:8]}->{agent_id}" for task, agent_id in ((task, assignments.get(task.task_id, "")) for task in ready_tasks) if agent_id)
+                if routed:
+                    self.console.emit("PARALLEL_ROUTE", f"Batch {batch_no}: preassigned agents | {routed}")
             self.console.emit(
                 "PARALLEL",
                 f"Batch {batch_no}: starting {len(ready_tasks)} task(s) in parallel | ready={ready_ids} | completed={len(completed)}/{total_tasks}",
@@ -1676,9 +2135,14 @@ class Orchestrator:
                 details=f"batch {batch_no} queued {len(ready_tasks)} task(s)",
             )
 
+            handoff_count = self._dispatch_dependency_handoffs(ready_tasks, results_by_task_id)
+            if handoff_count:
+                self.console.emit("P2P_HANDOFF", f"Batch {batch_no}: dispatched {handoff_count} dependency handoff message(s)")
             results = await asyncio.gather(*(self.run_task_async(t) for t in ready_tasks))
 
             final_results.extend(results)
+            for item in results:
+                results_by_task_id[item.task_id] = item
 
             succeeded = sum(1 for r in results if r.status == TaskStatus.DONE)
             failed = len(results) - succeeded

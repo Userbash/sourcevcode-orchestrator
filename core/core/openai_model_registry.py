@@ -18,10 +18,18 @@ class OpenAIModelCatalog:
     reasoning: list[str]
 
 
+@dataclass(slots=True)
+class OpenAIRegistryDiagnostics:
+    ok: bool
+    error_type: str | None = None
+    error_message: str | None = None
+
+
 class OpenAIModelRegistry:
     def __init__(self) -> None:
         self.cache_path = Path(os.getenv("OPENAI_MODELS_CACHE_PATH", "core/.cache/openai_models.json"))
         self.ttl_sec = int(os.getenv("OPENAI_MODELS_CACHE_TTL_SEC", "21600"))
+        self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True)
 
     @staticmethod
     def _api_key() -> str:
@@ -37,6 +45,7 @@ class OpenAIModelRegistry:
     def _fetch_live(self) -> list[str]:
         key = self._api_key()
         if not key:
+            self._last_diagnostics = OpenAIRegistryDiagnostics(ok=False, error_type="missing_api_key", error_message="OPENAI_API_KEY is not set")
             return []
         try:
             import logging
@@ -47,7 +56,12 @@ class OpenAIModelRegistry:
 
             client = OpenAI(api_key=key, max_retries=1)
             models = client.models.list()
-        except Exception:
+        except Exception as exc:
+            self._last_diagnostics = OpenAIRegistryDiagnostics(
+                ok=False,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
             return []
 
         out: list[str] = []
@@ -55,6 +69,7 @@ class OpenAIModelRegistry:
             model_id = str(getattr(item, "id", "")).strip()
             if model_id and self._is_text_model(model_id):
                 out.append(model_id)
+        self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True)
         return self._dedupe(out)
 
     @staticmethod
@@ -88,12 +103,20 @@ class OpenAIModelRegistry:
         if not force_refresh:
             cached = self._load_cache()
             if cached:
+                self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True)
                 return cached
         live = self._fetch_live()
         if live:
             self._save_cache(live)
             return live
         return self._load_cache()
+
+    def diagnostics(self) -> dict[str, str | bool | None]:
+        return {
+            "ok": self._last_diagnostics.ok,
+            "error_type": self._last_diagnostics.error_type,
+            "error_message": self._last_diagnostics.error_message,
+        }
 
     def get_catalog(self, force_refresh: bool = False) -> OpenAIModelCatalog:
         models = self.get_models(force_refresh=force_refresh)

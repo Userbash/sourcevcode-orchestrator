@@ -109,6 +109,24 @@ class SourceCraftModule(KernelModule):
     def _repo_root() -> Path:
         return Path(__file__).resolve().parents[2]
 
+    @staticmethod
+    def _workspace_root() -> Path:
+        raw = os.getenv("AI_BRIDGE_WORKSPACE_ROOT", "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        return SourceCraftModule._repo_root()
+
+    @classmethod
+    def _default_repo_path(cls) -> str:
+        workspace = cls._workspace_root()
+        if workspace.exists():
+            return str(workspace)
+        return "."
+
+    @staticmethod
+    def _container_runtime() -> bool:
+        return Path("/run/.containerenv").exists() or Path("/.dockerenv").exists()
+
     def _candidate_bins(self) -> list[str]:
         env_bin = os.getenv("SOURCECRAFT_CLI_BIN", "").strip()
         if env_bin:
@@ -477,32 +495,51 @@ class SourceCraftModule(KernelModule):
 
     def _run_command(self, command: list[str], *, repo_path: str = ".", timeout_sec: float | None = None) -> dict[str, Any]:
         resolved_repo = str(Path(repo_path or ".").resolve())
-        if self._host_bridge and hasattr(self._host_bridge, "execute"):
-            proc = self._host_bridge.execute(
-                command,
-                cwd=resolved_repo,
-                timeout=int(timeout_sec or self._timeout_sec()),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        else:
-            proc = subprocess.run(
-                command,
-                cwd=resolved_repo,
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec or self._timeout_sec(),
-                check=False,
-            )
-        return {
-            "command": command,
-            "repo_path": resolved_repo,
-            "returncode": proc.returncode,
-            "stdout": self._redact_text((proc.stdout or "").strip()),
-            "stderr": self._redact_text((proc.stderr or "").strip()),
-            "ok": proc.returncode == 0,
-        }
+        try:
+            if self._host_bridge and hasattr(self._host_bridge, "execute"):
+                proc = self._host_bridge.execute(
+                    command,
+                    cwd=resolved_repo,
+                    timeout=int(timeout_sec or self._timeout_sec()),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            else:
+                proc = subprocess.run(
+                    command,
+                    cwd=resolved_repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec or self._timeout_sec(),
+                    check=False,
+                )
+            return {
+                "command": command,
+                "repo_path": resolved_repo,
+                "returncode": proc.returncode,
+                "stdout": self._redact_text((proc.stdout or "").strip()),
+                "stderr": self._redact_text((proc.stderr or "").strip()),
+                "ok": proc.returncode == 0,
+            }
+        except (FileNotFoundError, OSError) as exc:
+            return {
+                "command": command,
+                "repo_path": resolved_repo,
+                "returncode": 127,
+                "stdout": "",
+                "stderr": str(exc),
+                "ok": False,
+            }
+        except Exception as exc:
+            return {
+                "command": command,
+                "repo_path": resolved_repo,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": str(exc),
+                "ok": False,
+            }
 
     def _run_sourcecraft_command(self, args: list[str], *, repo_path: str = ".", timeout_sec: float | None = None) -> dict[str, Any]:
         if not self._binary:
@@ -536,33 +573,62 @@ class SourceCraftModule(KernelModule):
             return f"{owner}/{repo}"
         return None
 
+    def _run_with_fallback(self, primary: list[str], fallback: list[str] | None = None, *, repo_path: str) -> dict[str, Any]:
+        first = self._run_command(primary, repo_path=repo_path)
+        if first.get("ok") or not fallback:
+            return first
+        second = self._run_command(fallback, repo_path=repo_path)
+        if second.get("ok"):
+            second["fallback_from"] = primary
+            return second
+        return first
+
     def ensure_ready(self, *, repo_path: str = ".") -> dict[str, Any]:
-        repo_slug = self._resolve_repo_slug(repo_path)
+        resolved_repo_path = repo_path or self._default_repo_path()
         try:
-            ghbox_probe = self._run_command(["dh", "sh", "-lc", "command -v gh >/dev/null 2>&1"], repo_path=repo_path)
+            repo_slug = self._resolve_repo_slug(resolved_repo_path)
         except Exception:
-            ghbox_probe = {"ok": False, "stderr": "ghbox bridge unavailable"}
-        try:
-            gh_auth = self._run_command(["dh", "gh", "auth", "status"], repo_path=repo_path)
-        except Exception:
-            gh_auth = {"ok": shutil.which("gh") is not None, "stdout": "direct gh available" if shutil.which("gh") else "", "stderr": ""}
-        try:
-            git_name = self._run_command(["dh", "git", "config", "--global", "user.name"], repo_path=repo_path)
-            git_email = self._run_command(["dh", "git", "config", "--global", "user.email"], repo_path=repo_path)
-        except Exception:
-            git_name = self._run_command(["git", "config", "user.name"], repo_path=repo_path)
-            git_email = self._run_command(["git", "config", "user.email"], repo_path=repo_path)
-        branch_probe = self._run_command(["git", "symbolic-ref", "--short", "HEAD"], repo_path=repo_path)
-        try:
-            repo_access = self._run_command(["dh", "gh", "repo", "view", repo_slug], repo_path=repo_path) if repo_slug else {"ok": False, "stderr": "repo slug unavailable"}
-        except Exception:
-            repo_access = {"ok": False, "stderr": "repo access check unavailable"}
+            repo_slug = None
+        ghbox_probe = self._run_with_fallback(
+            ["dh", "sh", "-lc", "command -v gh >/dev/null 2>&1"],
+            ["sh", "-lc", "command -v gh >/dev/null 2>&1"],
+            repo_path=resolved_repo_path,
+        )
+        gh_auth = self._run_with_fallback(
+            ["dh", "gh", "auth", "status"],
+            ["gh", "auth", "status"],
+            repo_path=resolved_repo_path,
+        )
+        git_name = self._run_with_fallback(
+            ["dh", "git", "config", "--global", "user.name"],
+            ["git", "config", "--global", "user.name"],
+            repo_path=resolved_repo_path,
+        )
+        git_email = self._run_with_fallback(
+            ["dh", "git", "config", "--global", "user.email"],
+            ["git", "config", "--global", "user.email"],
+            repo_path=resolved_repo_path,
+        )
+        branch_probe = self._run_command(["git", "symbolic-ref", "--short", "HEAD"], repo_path=resolved_repo_path)
+        repo_access = (
+            self._run_with_fallback(
+                ["dh", "gh", "repo", "view", repo_slug],
+                ["gh", "repo", "view", repo_slug],
+                repo_path=resolved_repo_path,
+            )
+            if repo_slug
+            else {"ok": False, "stderr": "repo slug unavailable"}
+        )
+        ghbox_ready = bool(ghbox_probe.get("ok"))
+        direct_gh = bool(ghbox_probe.get("fallback_from"))
         report = {
             "status": "ready",
             "checked_at": datetime.now(UTC).isoformat(),
+            "repo_path": str(Path(resolved_repo_path).resolve()),
             "src_ready": bool(self._binary),
             "src_version": self._version,
-            "ghbox_ready": bool(ghbox_probe.get("ok")),
+            "ghbox_ready": ghbox_ready,
+            "gh_runtime": "direct" if direct_gh else "ghbox",
             "gh_auth_ready": bool(gh_auth.get("ok")),
             "token_scope_ok": bool(repo_access.get("ok")) if repo_slug else bool(gh_auth.get("ok")),
             "git_identity": {
@@ -581,7 +647,7 @@ class SourceCraftModule(KernelModule):
             report["warnings"].append("src binary not available")
         if not report["ghbox_ready"]:
             report["status"] = "degraded"
-            report["warnings"].append("ghbox bridge is not ready")
+            report["warnings"].append("GitHub CLI runtime is not ready")
         if not report["gh_auth_ready"]:
             report["status"] = "degraded"
             report["warnings"].append("GitHub authentication is not ready")
@@ -821,8 +887,12 @@ class SourceCraftModule(KernelModule):
         elif normalized == "push_branch":
             if not resolved_branch:
                 return {"status": "error", "action": normalized, "reason": "branch is required", "bridge_mode": self._bridge_mode(), "tools": availability}
-            runner = "dh"
-            command = ["dh", "git", "push", "-u", remote, resolved_branch]
+            if dry_run or (self._host_bridge and hasattr(self._host_bridge, "execute")):
+                runner = "dh"
+                command = ["dh", "git", "push", "-u", remote, resolved_branch]
+            else:
+                runner = "git"
+                command = ["git", "push", "-u", remote, resolved_branch]
         elif normalized in {"create_pr", "open_pr_with_template"}:
             if not resolved_repo_slug:
                 return {"status": "error", "action": normalized, "reason": "repository slug could not be resolved from origin remote", "bridge_mode": self._bridge_mode(), "tools": availability}
@@ -1042,6 +1112,8 @@ class SourceCraftModule(KernelModule):
             self._host_bridge = api.get_context("host_bridge")
         except Exception:
             self._host_bridge = None
+        if self._container_runtime():
+            self._host_bridge = None
         self._binary = self._resolve_binary()
         if not self._binary:
             self._status = "error"
@@ -1057,7 +1129,13 @@ class SourceCraftModule(KernelModule):
             self._status = "ready"
             self._last_error = None
             api.log("info", f"[SOURCECRAFT] src ready: {self._version}")
-            self.ensure_ready(repo_path=".")
+            try:
+                self.ensure_ready(repo_path=self._default_repo_path())
+            except Exception as exc:
+                self._status = "degraded"
+                self._last_error = f"runtime bootstrap degraded: {exc}"
+                self._runtime_health = {"status": "degraded", "warnings": [self._last_error], "src_ready": True}
+                api.log("warning", f"[SOURCECRAFT] runtime bootstrap degraded: {exc}")
         else:
             self._status = "degraded"
             self._last_error = "; ".join(self._last_probe.get("errors", []))
@@ -1082,7 +1160,8 @@ class SourceCraftModule(KernelModule):
 
         role_profile = self._role_profile()
         delegation = self.build_delegation_profile(task, context)
-        runtime = self._runtime_health or self.ensure_ready(repo_path=str(getattr(getattr(task, "context", None), "repo_path", ".") or "."))
+        runtime_repo_path = str(getattr(getattr(task, "context", None), "repo_path", "") or "") or self._default_repo_path()
+        runtime = self._runtime_health or self.ensure_ready(repo_path=runtime_repo_path)
         context["sourcecraft"] = {
             "enabled": self._status in {"ready", "degraded"},
             "binary": self._binary,

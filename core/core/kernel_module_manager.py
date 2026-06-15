@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,26 +21,45 @@ class KernelModuleManager:
     def register(self, module: KernelModule) -> None:
         self._modules[module.name] = module
 
+    @staticmethod
+    def _run_coroutine_blocking(coro: Any) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+            return
+
+        result: dict[str, BaseException | None] = {"error": None}
+
+        def runner() -> None:
+            try:
+                asyncio.run(coro)
+            except BaseException as exc:  # pragma: no cover - propagated to caller
+                result["error"] = exc
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        thread.join()
+        if result["error"] is not None:
+            raise result["error"]
+
     def load(self, name: str) -> None:
         if self._api is None:
             raise RuntimeError("KernelAPI not initialized in ModuleManager")
         module = self._modules.get(name)
         if not module or name in self._loaded:
             return
-            
-        import asyncio
-        import inspect
-        
-        if inspect.iscoroutinefunction(module.on_load):
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(module.on_load(self._api))
-            except RuntimeError:
-                asyncio.run(module.on_load(self._api))
-        else:
-            module.on_load(self._api)
-            
-        self._loaded.add(name)
+
+        try:
+            if inspect.iscoroutinefunction(module.on_load):
+                self._run_coroutine_blocking(module.on_load(self._api))
+            else:
+                module.on_load(self._api)
+            self._loaded.add(name)
+        except Exception as exc:
+            if self._api:
+                self._api.log("error", f"[KERNEL] Module {name} failed to load: {exc}")
+            raise
 
     def unload(self, name: str) -> None:
         if name not in self._loaded:
@@ -46,10 +68,18 @@ class KernelModuleManager:
         if module is None:
             self._loaded.remove(name)
             return
-        if hasattr(module, "on_unload"):
-            module.on_unload()
-        self._loaded.remove(name)
-
+        try:
+            if hasattr(module, "on_unload"):
+                if inspect.iscoroutinefunction(module.on_unload):
+                    self._run_coroutine_blocking(module.on_unload())
+                else:
+                    module.on_unload()
+        except Exception as exc:
+            if self._api:
+                self._api.log("error", f"[KERNEL] Module {name} failed to unload: {exc}")
+            raise
+        finally:
+            self._loaded.remove(name)
 
     def get_module(self, name: str) -> KernelModule | None:
         return self._modules.get(name)

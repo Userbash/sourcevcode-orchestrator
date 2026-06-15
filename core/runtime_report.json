@@ -37,11 +37,6 @@
       "size": 4502
     },
     {
-      "module": "core/core/api_bridge_module.py",
-      "exists": true,
-      "size": 10940
-    },
-    {
       "module": "core/core/task_submission_api.py",
       "exists": true,
       "size": 4760

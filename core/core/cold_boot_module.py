@@ -26,6 +26,11 @@ class ColdBootModule:
         self._api = api
         self._api.log("info", "[COLD_BOOT] Infrastructure Sentinel active.")
         
+        testing = os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
+        if testing:
+            self._api.log("info", "[COLD_BOOT] Skipping bootstrap in testing mode.")
+            return
+
         if os.getenv("AI_BRIDGE_AUTO_BOOTSTRAP", "true").lower() == "true":
             self.ensure_infrastructure()
 

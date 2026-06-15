@@ -317,6 +317,52 @@ def test_sourcecraft_ensure_ready_reports_runtime_health(tmp_path, monkeypatch):
     assert module.finalize()["runtime"]["status"] == "ready"
 
 
+
+
+def test_sourcecraft_ensure_ready_falls_back_to_direct_gh_runtime(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+
+    def fake_run(command, *, repo_path=".", timeout_sec=None):
+        joined = " ".join(command)
+        if joined == "dh sh -lc command -v gh >/dev/null 2>&1":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "sh -lc command -v gh >/dev/null 2>&1":
+            return {"ok": True, "stdout": "", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh gh auth status":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "gh auth status":
+            return {"ok": True, "stdout": "logged in", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.name":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "git config --global user.name":
+            return {"ok": True, "stdout": "Userbash", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.email":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "git config --global user.email":
+            return {"ok": True, "stdout": "wairuste@gmail.com", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "git remote get-url origin":
+            return {"ok": True, "stdout": "https://github.com/Userbash/sourcevcode-orchestrator.git", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "git symbolic-ref --short HEAD":
+            return {"ok": True, "stdout": "feat/sourcecraft-runtime-health", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh gh repo view Userbash/sourcevcode-orchestrator":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "gh repo view Userbash/sourcevcode-orchestrator":
+            return {"ok": True, "stdout": "repo ok", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        raise AssertionError(joined)
+
+    monkeypatch.setattr(module, "_run_command", fake_run)
+    report = module.ensure_ready(repo_path=".")
+
+    assert report["status"] == "ready"
+    assert report["ghbox_ready"] is True
+    assert report["gh_runtime"] == "direct"
+    assert report["gh_auth_ready"] is True
+
 def test_sourcecraft_push_branch_requires_preview_token(tmp_path, monkeypatch):
     src = tmp_path / "src"
     _make_src_script(src, 'echo "Version: 0.1.2"')
@@ -431,3 +477,18 @@ def test_orchestrator_create_execution_plan_materializes_mistral_gateway_delegat
     assert [item.type.value for item in plan.atomic_tasks] == ["plan", "test", "docs"]
     assert all(item.routing_hints.get("source") == "mistral_gateway" for item in plan.atomic_tasks)
     assert all(item.required_capability in {"plan", "test", "docs"} for item in plan.atomic_tasks)
+
+
+def test_sourcecraft_on_load_degrades_when_runtime_bootstrap_raises(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    monkeypatch.setattr(module, "ensure_ready", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("distrobox missing")))
+
+    module.on_load(_FakeAPI())
+
+    assert module.finalize()["status"] == "degraded"
+    assert module.finalize()["runtime"]["status"] == "degraded"
+    assert "runtime bootstrap degraded" in module.finalize()["runtime"]["warnings"][0]

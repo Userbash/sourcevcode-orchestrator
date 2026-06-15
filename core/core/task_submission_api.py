@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from .models import Priority, Task, TaskContext, TaskInput, TaskType
+from .models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
 
 
 _TASK_TYPE_ALIASES: dict[str, str] = {
@@ -30,6 +30,24 @@ _PRIORITY_ALIASES: dict[str, str] = {
     "default": "normal",
 }
 
+_COMPLEXITY_ALIASES: dict[str, str] = {
+    "small": "low",
+    "light": "low",
+    "balanced": "medium",
+    "default": "medium",
+    "heavy": "high",
+    "urgent": "critical",
+}
+
+_COST_TIER_ALIASES: dict[str, str] = {
+    "cheap": "economy",
+    "low": "economy",
+    "fast": "interactive",
+    "default": "interactive",
+    "normal": "interactive",
+    "high": "premium",
+}
+
 _GARBAGE_PATTERNS = (
     r"^[\W_]+$",
     r"^(n/?a|none|null|undefined|test|asdf|qwerty|lol)$",
@@ -52,6 +70,45 @@ def _normalize_priority(raw: Any) -> Priority:
         return Priority(mapped)
     except ValueError:
         return Priority.NORMAL
+
+
+def _normalize_complexity(raw: Any) -> Complexity | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    value = str(raw).strip().lower()
+    mapped = _COMPLEXITY_ALIASES.get(value, value)
+    try:
+        return Complexity(mapped)
+    except ValueError:
+        return None
+
+
+def _normalize_source(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    return value or "user_input"
+
+
+def _normalize_cost_tier(raw: Any, *, source: str) -> str:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return "interactive" if source == "websocket" else "standard"
+    return _COST_TIER_ALIASES.get(value, value)
+
+
+def _provider_hint(normalized: dict[str, Any]) -> str | None:
+    for key in ("provider", "preferred_provider"):
+        value = normalized.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _model_hint(normalized: dict[str, Any]) -> str | None:
+    for key in ("model", "requested_model", "assigned_model"):
+        value = normalized.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _as_list(raw: Any) -> list[str]:
@@ -142,6 +199,12 @@ def create_standard_task(data: dict[str, Any]) -> Task:
         if not description:
             raise ValueError("missing description")
 
+        source = _normalize_source(normalized.get("source"))
+        cost_tier = _normalize_cost_tier(normalized.get("cost_tier") or normalized.get("tier"), source=source)
+        complexity = _normalize_complexity(normalized.get("complexity"))
+        provider = _provider_hint(normalized)
+        requested_model = _model_hint(normalized)
+
         task = Task(
             type=_normalize_task_type(normalized.get("type")),
             input=TaskInput(
@@ -157,12 +220,24 @@ def create_standard_task(data: dict[str, Any]) -> Task:
             ),
             priority=_normalize_priority(normalized.get("priority")),
             session_id=normalized.get("session_id"),
+            complexity=complexity,
         )
         ext_task_id = normalized.get("task_id")
         if isinstance(ext_task_id, str) and ext_task_id.strip():
             task.task_id = ext_task_id.strip()
         if not task.routing_hints:
             task.routing_hints = {}
+        task.routing_hints.setdefault("source", source)
+        task.routing_hints.setdefault("cost_tier", cost_tier)
+        if source == "websocket":
+            task.routing_hints.setdefault("channel", "ws")
+            task.routing_hints.setdefault("interactive", True)
+            task.routing_hints.setdefault("ws_priority", task.priority.value)
+        if provider:
+            task.routing_hints["provider_preference"] = provider
+        if requested_model:
+            task.assigned_model = requested_model
+            task.routing_hints["requested_model"] = requested_model
         task.routing_hints.setdefault("input_validation", {"status": "ok", "issues": []})
         return task
     except Exception as e:

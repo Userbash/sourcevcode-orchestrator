@@ -32,7 +32,7 @@ class RiskAdvisorModule:
 
     def evaluate_task(self, task: Task) -> Optional[RiskAssessment]:
         reasoning = self._api.get_module("reasoning") if self._api else None
-        if not reasoning or not getattr(reasoning, "_client", None):
+        if not reasoning:
             return None
 
         prompt = f"""Evaluate the risk of the following task:
