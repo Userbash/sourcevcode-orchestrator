@@ -77,12 +77,40 @@ def test_sourcecraft_module_builds_delegation_profile():
     assert "summarize repository state" in profile["sourcecraft_actions"]
 
 
-def test_orchestrator_registers_sourcecraft_module():
+def test_orchestrator_registers_sourcecraft_module(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_DISABLE_SOURCECRAFT", "false")
     orchestrator = Orchestrator()
 
     assert "sourcecraft" in orchestrator.loaded_kernel_modules()
     state = orchestrator.module_manager.finalize()
     assert "sourcecraft" in state
+
+
+def test_sourcecraft_module_does_not_delegate_generic_review():
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+
+    module = SourceCraftModule()
+    module._status = "ready"
+    task = Task(TaskType.REVIEW, TaskInput("Review risky auth changes"), TaskContext("demo", ".", "main"))
+
+    profile = module.build_delegation_profile(task, {"description": task.input.description})
+
+    assert profile["task_family"] == "general"
+    assert profile["should_delegate"] is False
+    assert profile["recommended_owner"] == "core"
+
+
+def test_sourcecraft_module_resolves_pr_action_from_mixed_repo_task():
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+
+    module = SourceCraftModule()
+    module._status = "ready"
+    task = Task(TaskType.PLAN, TaskInput("Prepare repo status and draft pull request for release automation"), TaskContext("demo", ".", "main"), required_capability="sourcecraft")
+
+    resolution = module.resolve_repo_action_for_task(task, {"description": task.input.description})
+
+    assert resolution["action"] == "create_pr"
+    assert resolution["target_branch"] == "main"
 
 
 def test_task_decomposer_auto_marks_sourcecraft_repo_tasks():
@@ -477,6 +505,33 @@ def test_orchestrator_create_execution_plan_materializes_mistral_gateway_delegat
     assert [item.type.value for item in plan.atomic_tasks] == ["plan", "test", "docs"]
     assert all(item.routing_hints.get("source") == "mistral_gateway" for item in plan.atomic_tasks)
     assert all(item.required_capability in {"plan", "test", "docs"} for item in plan.atomic_tasks)
+
+
+def test_orchestrator_agent_uses_sourcecraft_action_resolver():
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+    from core.core.orchestrator import OrchestratorAgent
+
+    captured: dict[str, object] = {}
+
+    class _SourceCraft:
+        def resolve_repo_action_for_task(self, task, context=None):
+            return {"action": "repo_governance_report", "target_branch": "main"}
+
+        def execute_repo_action(self, **kwargs):
+            captured.update(kwargs)
+            return {"status": "dry_run", "summary": "prepared"}
+
+    agent = OrchestratorAgent()
+    agent.orchestrator = SimpleNamespace(get_module=lambda name: _SourceCraft() if name == "sourcecraft" else None)
+    task = Task(TaskType.REVIEW, TaskInput("Review risky auth changes"), TaskContext("demo", ".", "main"), required_capability="sourcecraft")
+
+    result = agent.run(task)
+
+    assert result.status.value == "done"
+    assert captured["action"] == "repo_governance_report"
+    assert captured["branch"] is None
+    assert captured["target_branch"] == "main"
+    assert captured["dry_run"] is True
 
 
 def test_sourcecraft_on_load_degrades_when_runtime_bootstrap_raises(tmp_path, monkeypatch):

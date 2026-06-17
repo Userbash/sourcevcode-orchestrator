@@ -15,6 +15,7 @@ from typing import Any, Dict
 
 from .env_loader import load_env_file
 from .kernel_protocol import KernelAPI, KernelModule
+from .openai_provider import build_openai_client_kwargs
 
 logger = logging.getLogger("voice_listener")
 
@@ -258,7 +259,7 @@ class VoiceListenerModule(KernelModule):
             "AI_BRIDGE_VOICE_TRANSCRIBE_PROMPT",
             "Это русский голосовой ввод для AI-оркестратора. Точно распознавай слово 'оркестратор' и технические команды.",
         )
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(**build_openai_client_kwargs())
         if self._api:
             self._api.log("info", f"[{self.name.upper()}] Using OpenAI STT backend ({model_name}).")
 
@@ -325,7 +326,7 @@ class VoiceListenerModule(KernelModule):
             return text
 
         model_name = os.getenv("AI_BRIDGE_VOICE_OPENAI_REFINE_MODEL", "gpt-4o-mini")
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(**build_openai_client_kwargs())
         try:
             response = client.chat.completions.create(
                 model=model_name,

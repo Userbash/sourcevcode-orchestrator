@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from .base_agent import BaseAgent
 from core.core.env_loader import load_env_file
+from core.core.openai_provider import build_openai_client_kwargs
 from core.core.openai_runtime_router import OpenAIRuntimeRouter
 from core.core.models import AgentHealth, AgentResult, AgentStatus, Task, TaskStatus
 
@@ -19,7 +20,7 @@ VISION_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".svg")
 class CodexAgent(BaseAgent):
     """
     CodexAgent: specialized for high-quality code generation and refactoring.
-    Can use OpenAI (GPT-4o), Mistral (Codestral), or DeepSeek based on available API keys.
+    Can use OpenAI-compatible, Mistral (Codestral), or DeepSeek based on available API keys.
     """
 
     def __init__(self, agent_id: str = "codexagent") -> None:
@@ -84,18 +85,17 @@ class CodexAgent(BaseAgent):
             return result
 
         if self._provider == "none":
-            return self.result(task, "No API key (OpenAI, Mistral, or DeepSeek) for Codex", TaskStatus.FAILED, errors=["OPENAI_API_KEY, MISTRAL_API_KEY or DEEPSEEK_API_KEY missing"])
+            return self.result(task, "No API key (OpenAI-compatible, Mistral, or DeepSeek) for Codex", TaskStatus.FAILED, errors=["OPENAI_API_KEY, MISTRAL_API_KEY or DEEPSEEK_API_KEY missing"])
 
         self.active_tasks += 1
         try:
             prompt = self._build_prompt(task)
-            
+
             if self._provider == "openai":
                 return self._run_openai(task, prompt)
-            elif self._provider == "deepseek":
+            if self._provider == "deepseek":
                 return self._run_deepseek(task, prompt)
-            else:
-                return self._run_mistral(task, prompt)
+            return self._run_mistral(task, prompt)
         except Exception as e:
             self.last_error = str(e)
             return self.result(task, "Codex execution error", TaskStatus.FAILED, errors=[str(e)])
@@ -105,7 +105,7 @@ class CodexAgent(BaseAgent):
     def _build_prompt(self, task: Task) -> str:
         prompt_parts = [
             "SYSTEM: You are an elite software engineer (Codex Agent). Generate precise, idiomatic, and verified code.",
-            f"OBJECTIVE: {task.input.description}"
+            f"OBJECTIVE: {task.input.description}",
         ]
         if task.input.files:
             prompt_parts.append(f"FILES: {', '.join(task.input.files)}")
@@ -124,18 +124,18 @@ class CodexAgent(BaseAgent):
             prompt_parts.append(f"CONSTRAINTS: {'; '.join(task.input.constraints)}")
         if task.input.acceptance_criteria:
             prompt_parts.append(f"ACCEPTANCE CRITERIA: {'; '.join(task.input.acceptance_criteria)}")
-        
+
         return "\n".join(prompt_parts)
 
     def _run_openai(self, task: Task, prompt: str) -> AgentResult:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
-        client = OpenAI(api_key=self.openai_key, max_retries=1)
+        client = OpenAI(**build_openai_client_kwargs(max_retries=1))
         model = task.assigned_model or self._model
         if OpenAIRuntimeRouter.enabled():
             model = self.openai_router.select_model(task, prompt)
             task.assigned_model = model
-            
+
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -146,7 +146,7 @@ class CodexAgent(BaseAgent):
             err_msg = str(e).lower()
             if "429" in err_msg or "too many requests" in err_msg or "quota" in err_msg:
                 return self.result(task, "OpenAI API error: 429 Too Many Requests (Quota/Rate Limit)", TaskStatus.FAILED, 0.0, ["OpenAI quota exceeded or rate limited."])
-            elif "401" in err_msg or "unauthorized" in err_msg or "api key" in err_msg:
+            if "401" in err_msg or "unauthorized" in err_msg or "api key" in err_msg:
                 return self.result(task, "OpenAI API error: 401 Unauthorized", TaskStatus.FAILED, 0.0, ["OPENAI_API_KEY is invalid."])
             raise e
 

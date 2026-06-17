@@ -12,6 +12,7 @@
     "code_refactor.json",
     "test.json",
     "test_regression.json",
+    "test_critical.json",
     "review.json",
     "review_senior.json",
     "review_security.json",
@@ -22,7 +23,8 @@
     "fix.json",
     "fix_regression.json",
     "research.json",
-    "research_deep.json"
+    "research_deep.json",
+    "research_compare.json"
   ],
   "provider_profiles": [
     "providers/provider__openai.json",

@@ -1,22 +1,34 @@
-import os
-from dotenv import load_dotenv
+from __future__ import annotations
+
+import json
+
+from core.core.env_loader import load_env_file
 from core.core.integrations.antigravity_manager import AntigravityManager
-from core.core.host_bridge import HostBridge
+from core.core.provider_credentials import credential_snapshot
 
-# Load env files to ensure variables are picked up
-load_dotenv(".env.bridge", override=True)
-load_dotenv(".env.gemini.local", override=True)
+load_env_file(".env")
+load_env_file(".env.bridge", override=True)
+load_env_file(".env.gemini.local", override=True)
 
-# Verify presence of keys
-gemini_key = os.getenv('GEMINI_API_KEY')
-google_key = os.getenv('GOOGLE_API_KEY')
-print(f"GEMINI_API_KEY set: {bool(gemini_key)}")
-print(f"GOOGLE_API_KEY set: {bool(google_key)}")
 
-# Use AntigravityManager to check status
-try:
-    manager = AntigravityManager(host_bridge=HostBridge())
+def main() -> None:
+    credential = credential_snapshot(("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"))
+    manager = AntigravityManager()
     status = manager.status()
-    print(f"Antigravity Status: {status}")
-except Exception as e:
-    print(f"Error checking Antigravity: {e}")
+    api_probe = status.get("api_probe") or {}
+    summary = {
+        "provider": "antigravity",
+        "configured": bool(credential.get("configured")),
+        "usable_by_policy": bool(credential.get("usable")),
+        "placeholder": bool(credential.get("placeholder")),
+        "ready": bool(status.get("ready")),
+        "auth_mode": status.get("auth_mode"),
+        "model_count": len(status.get("models", [])),
+        "api_status_code": api_probe.get("status_code"),
+        "error": api_probe.get("error") or (status.get("auth_probe") or {}).get("error") or (status.get("models_probe") or {}).get("error"),
+    }
+    print(json.dumps(summary, ensure_ascii=True))
+
+
+if __name__ == "__main__":
+    main()

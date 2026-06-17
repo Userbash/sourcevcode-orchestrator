@@ -43,8 +43,98 @@ def has_auth_marker() -> bool:
     return _store().auth_marker_present()
 
 
+def _prefer_oauth_cli() -> bool:
+    return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_cli_command() -> list[str] | None:
+    env_bin = os.getenv("ANTIGRAVITY_CLI_BIN", "").strip()
+    if env_bin:
+        resolved = shutil.which(env_bin) if not Path(env_bin).is_absolute() else env_bin
+        if resolved and Path(resolved).is_file() and os.access(resolved, os.X_OK):
+            return [resolved]
+
+    home = Path.home()
+    candidate_paths: list[str] = []
+    search_roots = [home]
+    var_home = Path("/var/home")
+    if var_home.is_dir():
+        for user_home in var_home.glob("*"):
+            if user_home.is_dir() and user_home not in search_roots:
+                search_roots.append(user_home)
+    for candidate in ("agy", "antigravity", "gemini"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            candidate_paths.append(resolved)
+        for search_root in search_roots:
+            candidate_paths.extend([
+                str(search_root / ".npm-packages" / "bin" / candidate),
+                str(search_root / ".local" / "bin" / candidate),
+            ])
+    for resolved in candidate_paths:
+        if resolved and Path(resolved).is_file() and os.access(resolved, os.X_OK):
+            return [resolved]
+    return None
+
+
+def _cli_runtime_env() -> dict[str, str]:
+    env = os.environ.copy()
+    home = env.get("HOME", "")
+    extra_bins = []
+    if home:
+        extra_bins.extend([
+            str(Path(home) / ".npm-packages" / "bin"),
+            str(Path(home) / ".local" / "bin"),
+        ])
+    var_home = Path("/var/home")
+    if var_home.is_dir():
+        for user_home in var_home.glob("*"):
+            if user_home.is_dir():
+                extra_bins.extend([
+                    str(user_home / ".npm-packages" / "bin"),
+                    str(user_home / ".local" / "bin"),
+                ])
+    path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    merged: list[str] = []
+    for part in [*extra_bins, *path_parts]:
+        if part and part not in merged:
+            merged.append(part)
+    env["PATH"] = os.pathsep.join(merged)
+    if _prefer_oauth_cli():
+        for key in ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            env.pop(key, None)
+    return env
+
+
+def _translate_cli_args(args: list[str]) -> list[str]:
+    cmd_prefix = _resolve_cli_command()
+    if not cmd_prefix:
+        raise FileNotFoundError("antigravity_cli_not_found")
+    cli_name = Path(cmd_prefix[0]).name.lower()
+    if cli_name != "gemini":
+        return [*cmd_prefix, *args]
+    if args[:1] == ["models"]:
+        return [*cmd_prefix, "--version"]
+    if args[:1] == ["-p"]:
+        prompt = args[1] if len(args) > 1 else ""
+        return [*cmd_prefix, "-p", prompt, "--skip-trust"]
+    if "--prompt-interactive" in args:
+        index = args.index("--prompt-interactive")
+        prompt = args[index + 1] if index + 1 < len(args) else AUTH_PROMPT
+        return [*cmd_prefix, "--prompt-interactive", prompt, "--skip-trust"]
+    return [*cmd_prefix, *args]
+
+
+def _interactive_login_command(log_path: str) -> list[str]:
+    return _translate_cli_args(["--log-file", log_path, "--prompt-interactive", AUTH_PROMPT])
+
+
 def _run_capture(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
+    translated = _translate_cli_args(cmd)
+    proc = subprocess.run(translated, check=False, capture_output=True, text=True, timeout=timeout, env=_cli_runtime_env(), cwd=str(ROOT))
+    if cmd[:1] == ["models"] and Path(translated[0]).name.lower() == "gemini" and proc.returncode == 0:
+        return subprocess.CompletedProcess(translated, proc.returncode, stdout="antigravity-cli\ngemini-cli\n", stderr=proc.stderr)
+    return proc
 
 
 def _classify_failure_text(raw: str) -> str:
@@ -61,7 +151,7 @@ def _classify_failure_text(raw: str) -> str:
 
 
 def _probe_models(timeout: int = 60) -> dict[str, Any]:
-    proc = _run_capture(["agy", "models"], timeout=timeout)
+    proc = _run_capture(["models"], timeout=timeout)
     models = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
     error_text = str(proc.stderr or proc.stdout or "")
     return {
@@ -75,7 +165,7 @@ def _probe_models(timeout: int = 60) -> dict[str, Any]:
 
 
 def _probe_generation(timeout: int = 90) -> dict[str, Any]:
-    proc = _run_capture(["agy", "-p", "healthcheck: reply with ok", "--print-timeout", "60s"], timeout=timeout)
+    proc = _run_capture(["-p", "healthcheck: reply with ok", "--print-timeout", "60s"], timeout=timeout)
     error_text = str(proc.stderr or proc.stdout or "")
     return {
         "ok": proc.returncode == 0,
@@ -87,7 +177,7 @@ def _probe_generation(timeout: int = 90) -> dict[str, Any]:
 
 
 def _print_models() -> int:
-    proc = _run_capture(["agy", "models"], timeout=60)
+    proc = _run_capture(["models"], timeout=60)
     if proc.stdout:
         print(proc.stdout.rstrip())
     if proc.stderr:
@@ -202,7 +292,7 @@ def _analyze_output(text: str, opened_urls: set[str], *, open_browser: bool) -> 
 def _interactive_pty(cmd: list[str], timeout_sec: int) -> int:
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvp(cmd[0], cmd)
+        os.execvpe(cmd[0], cmd, _cli_runtime_env())
 
     opened_urls: set[str] = set()
     deadline = time.time() + timeout_sec
@@ -349,10 +439,10 @@ def managed_login_run(session_id: str, wait_timeout_sec: int = 600) -> int:
         transcript_path=str(store.session_transcript_file(session_id)),
     )
 
-    cmd = ["agy", "--log-file", log_path, "--prompt-interactive", AUTH_PROMPT]
+    cmd = _interactive_login_command(log_path)
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvp(cmd[0], cmd)
+        os.execvpe(cmd[0], cmd, _cli_runtime_env())
 
     opened_urls: set[str] = set()
     deadline = time.time() + max(30, wait_timeout_sec)
@@ -450,7 +540,7 @@ def login_interactive(wait_timeout_sec: int = 600, force: bool = False) -> int:
     _store().record_login_started()
     log_file = _login_log_path()
     print(f"Log file: {log_file}")
-    cmd = ["agy", "--log-file", str(log_file), "--prompt-interactive", AUTH_PROMPT]
+    cmd = _interactive_login_command(str(log_file))
     status = _interactive_pty(cmd, wait_timeout_sec)
 
     print()

@@ -31,8 +31,12 @@ SOURCECRAFT_PR_KEYWORDS = (
     "pr ",
     " pr",
     "merge request",
-    "review",
     "patch",
+    "pr review",
+    "pull request review",
+    "reviewer",
+    "reviewers",
+    "codereview",
 )
 SOURCECRAFT_ISSUE_KEYWORDS = (
     "issue",
@@ -47,12 +51,13 @@ SOURCECRAFT_RELEASE_KEYWORDS = (
     "tag",
 )
 SOURCECRAFT_DOCS_KEYWORDS = (
-    "docs",
-    "documentation",
-    "explain",
-    "summary",
     "commit message",
     "commit log",
+    "pr description",
+    "repo summary",
+    "repository summary",
+    "release notes",
+    "change summary",
 )
 SOURCECRAFT_CAPABILITIES = (
     "sourcecraft",
@@ -263,19 +268,29 @@ class SourceCraftModule(KernelModule):
         capability = str(required_capability or "").strip().lower()
         if capability in {"repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance"}:
             return capability
-        if any(keyword in task_text for keyword in SOURCECRAFT_REPO_KEYWORDS):
+        repo_signal = any(keyword in task_text for keyword in SOURCECRAFT_REPO_KEYWORDS)
+        pr_signal = any(keyword in task_text for keyword in SOURCECRAFT_PR_KEYWORDS)
+        release_signal = any(keyword in task_text for keyword in SOURCECRAFT_RELEASE_KEYWORDS)
+        issue_signal = any(keyword in task_text for keyword in SOURCECRAFT_ISSUE_KEYWORDS)
+        branch_governance_signal = any(
+            keyword in task_text for keyword in ("branch policy", "governance", "protected branch", "branch naming")
+        )
+        docs_signal = any(keyword in task_text for keyword in SOURCECRAFT_DOCS_KEYWORDS)
+        verification_signal = any(keyword in task_text for keyword in SOURCECRAFT_VERIFICATION_KEYWORDS)
+
+        if repo_signal:
             return "repo_ops"
-        if any(keyword in task_text for keyword in SOURCECRAFT_PR_KEYWORDS):
+        if pr_signal and repo_signal:
             return "pr_flow"
-        if any(keyword in task_text for keyword in SOURCECRAFT_RELEASE_KEYWORDS):
+        if release_signal and repo_signal:
             return "release_flow"
-        if any(keyword in task_text for keyword in SOURCECRAFT_ISSUE_KEYWORDS):
+        if issue_signal and repo_signal:
             return "issue_flow"
-        if any(keyword in task_text for keyword in ("branch policy", "governance", "protected branch", "branch naming")):
+        if branch_governance_signal:
             return "branch_governance"
-        if any(keyword in task_text for keyword in SOURCECRAFT_DOCS_KEYWORDS):
+        if docs_signal and repo_signal:
             return "docs_workflow"
-        if any(keyword in task_text for keyword in SOURCECRAFT_VERIFICATION_KEYWORDS):
+        if verification_signal and repo_signal:
             return "verification"
         return "general"
 
@@ -668,7 +683,7 @@ class SourceCraftModule(KernelModule):
         task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))).lower()
         required_capability = str(getattr(task, "required_capability", "") or "").strip().lower()
         task_family = self._task_family(text, required_capability)
-        is_sourcecraft_task = required_capability in SOURCECRAFT_CAPABILITIES or task_family != "general" or task_type in {"plan", "docs", "research"}
+        is_sourcecraft_task = required_capability in SOURCECRAFT_CAPABILITIES or task_family != "general"
         should_delegate = task_family in {"repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance", "docs_workflow", "verification"} or required_capability in SOURCECRAFT_CAPABILITIES
         return {
             "enabled": self._status in {"ready", "degraded"},
@@ -685,12 +700,93 @@ class SourceCraftModule(KernelModule):
             "runtime_status": self._runtime_health.get("status", self._status),
         }
 
-    def build_execution_plan(self, task: Any, context: dict[str, Any] | None = None):
-        from .models import ExecutionPlan, Task, TaskInput, TaskType
+    def resolve_repo_action_for_task(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        hints = getattr(task, "routing_hints", {}) if isinstance(getattr(task, "routing_hints", {}), dict) else {}
+        hinted_action = str(
+            hints.get("sourcecraft_action")
+            or hints.get("repo_action")
+            or hints.get("action")
+            or ""
+        ).strip().lower()
+        if hinted_action in self._supported_actions():
+            return {
+                "action": hinted_action,
+                "branch": hints.get("branch") or hints.get("sourcecraft_branch"),
+                "target_branch": hints.get("target_branch"),
+                "repo_slug": hints.get("repo_slug"),
+                "title": hints.get("title"),
+                "description": hints.get("description"),
+                "pr_slug": hints.get("pr_slug"),
+                "reviewers": hints.get("reviewers"),
+            }
+
         text = self._task_text(task, context)
         required_capability = str(getattr(task, "required_capability", "") or "").strip().lower()
         task_family = self._task_family(text, required_capability)
-        if required_capability not in SOURCECRAFT_CAPABILITIES and task_family == "general":
+        branch = hints.get("branch") or hints.get("sourcecraft_branch")
+        target_branch = hints.get("target_branch")
+
+        if task_family == "branch_governance":
+            if "prepare" in text and "branch" in text:
+                return {"action": "prepare_feature_branch", "branch": branch, "target_branch": target_branch}
+            return {"action": "repo_governance_report"}
+        if task_family == "pr_flow":
+            if any(token in text for token in ("checks", "check status", "ci", "verification")):
+                return {"action": "pr_checks", "pr_slug": hints.get("pr_slug")}
+            if any(token in text for token in ("create", "open", "draft", "prepare")):
+                return {
+                    "action": "create_pr",
+                    "branch": branch,
+                    "target_branch": target_branch or "main",
+                    "repo_slug": hints.get("repo_slug"),
+                    "title": hints.get("title"),
+                    "description": hints.get("description"),
+                    "reviewers": hints.get("reviewers"),
+                }
+            return {"action": "repo_summary"}
+        if task_family == "release_flow":
+            return {"action": "release_prepare"}
+        if task_family == "repo_ops":
+            if any(token in text for token in ("pull request", "pr ", " pr", "merge request", "pr review", "reviewer", "reviewers", "codereview")):
+                if any(token in text for token in ("checks", "check status", "ci", "verification")):
+                    return {"action": "pr_checks", "pr_slug": hints.get("pr_slug")}
+                if any(token in text for token in ("create", "open", "draft", "prepare")):
+                    return {
+                        "action": "create_pr",
+                        "branch": branch,
+                        "target_branch": target_branch or "main",
+                        "repo_slug": hints.get("repo_slug"),
+                        "title": hints.get("title"),
+                        "description": hints.get("description"),
+                        "reviewers": hints.get("reviewers"),
+                    }
+            if any(token in text for token in SOURCECRAFT_RELEASE_KEYWORDS):
+                return {"action": "release_prepare"}
+            if "current branch" in text:
+                return {"action": "current_branch"}
+            if "list branches" in text or "local branches" in text:
+                return {"action": "list_branches"}
+            if "remote branches" in text:
+                return {"action": "remote_branches", "repo_slug": hints.get("repo_slug")}
+            if "sync" in text and "main" in text:
+                return {"action": "sync_with_main", "target_branch": target_branch or "main"}
+            if "push" in text and "branch" in text:
+                return {"action": "push_branch", "branch": branch}
+            if "prepare" in text and "branch" in text:
+                return {"action": "prepare_feature_branch", "branch": branch, "target_branch": target_branch or "main"}
+            if any(token in text for token in ("governance", "protected branch", "branch naming", "policy")):
+                return {"action": "repo_governance_report"}
+            return {"action": "repo_summary"}
+        if task_family in {"docs_workflow", "verification", "issue_flow"}:
+            return {"action": "repo_summary"}
+        return {"action": "status"}
+
+    def build_execution_plan(self, task: Any, context: dict[str, Any] | None = None):
+        from .models import ExecutionPlan, Task, TaskInput, TaskType
+        required_capability = str(getattr(task, "required_capability", "") or "").strip().lower()
+        delegation = self.build_delegation_profile(task, context)
+        task_family = str(delegation.get("task_family") or "general")
+        if required_capability not in SOURCECRAFT_CAPABILITIES and not bool(delegation.get("should_delegate")):
             return None
         root = Task(
             TaskType.PLAN,
@@ -1152,11 +1248,11 @@ class SourceCraftModule(KernelModule):
 
     def before_task(self, task: Any, context: dict[str, Any]) -> None:
         description = str(getattr(getattr(task, "input", None), "description", "") or context.get("description") or "").lower()
-        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))).lower()
+        required_capability = str(getattr(task, "required_capability", "") or "").strip().lower()
         likely_repo_work = any(
             keyword in description
             for keyword in ("repo", "repository", "pr", "pull request", "issue", "release", "clone", "branch", "status", "quota", "sourcecraft", "src")
-        ) or task_type in {"plan", "code", "fix", "review", "docs", "research"}
+        ) or required_capability in SOURCECRAFT_CAPABILITIES
 
         role_profile = self._role_profile()
         delegation = self.build_delegation_profile(task, context)

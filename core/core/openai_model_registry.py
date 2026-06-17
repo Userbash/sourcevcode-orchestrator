@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .openai_provider import build_openai_client_kwargs
+
 
 @dataclass(slots=True)
 class OpenAIModelCatalog:
@@ -51,10 +53,10 @@ class OpenAIModelRegistry:
             import logging
             logging.getLogger("httpx").setLevel(logging.WARNING)
             logging.getLogger("openai").setLevel(logging.WARNING)
-            
+
             from openai import OpenAI
 
-            client = OpenAI(api_key=key, max_retries=1)
+            client = OpenAI(**build_openai_client_kwargs(max_retries=1))
             models = client.models.list()
         except Exception as exc:
             self._last_diagnostics = OpenAIRegistryDiagnostics(

@@ -153,6 +153,8 @@ def test_director_loads_granular_profiles():
     assert "code_refactor" in director.task_profiles
     assert "review_security" in director.task_profiles
     assert "docs_api" in director.task_profiles
+    assert "test_critical" in director.task_profiles
+    assert "research_compare" in director.task_profiles
 
 
 def test_director_prefers_more_specific_profile_for_regression_fix():
@@ -160,7 +162,7 @@ def test_director_prefers_more_specific_profile_for_regression_fix():
     director.set_quality_source(type("Q", (), {"minimum_confidence": 0.8})())
     task = type("T", (), {"session_id": "s7", "task_id": "t7", "memory_scope": "task", "complexity": type("C", (), {"value": "high"})(), "type": DummyTaskType("test"), "input": type("I", (), {"description": "fix regression in api tests", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "high"})()})()
     ctx = director.build_selection_context("model-a", task, 4000.0, memory_context={})
-    assert ctx["task_profile"]["task_type"] in {"test", "test_regression"}
+    assert ctx["task_profile"]["task_type"] in {"test", "test_regression", "test_critical"}
     assert ctx["context_depth"] >= 3
     assert ctx["profile_weights"]["quality"] >= 1.0
 
@@ -169,7 +171,23 @@ def test_director_prefers_security_review_profile():
     director = MimoOrchestrationDirector()
     task = type("T", (), {"session_id": "s8", "task_id": "t8", "memory_scope": "task", "complexity": type("C", (), {"value": "high"})(), "type": DummyTaskType("review"), "input": type("I", (), {"description": "security review for auth and rbac changes", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "critical"})()})()
     ctx = director.build_selection_context("model-a", task, 1000.0, memory_context={})
-    assert ctx["task_profile"]["task_type"] in {"review", "review_security"}
+    assert ctx["task_profile"]["task_type"] == "review_security"
+    assert ctx["context_depth"] >= 5
+
+
+def test_director_prefers_critical_test_profile():
+    director = MimoOrchestrationDirector()
+    task = type("T", (), {"session_id": "s8b", "task_id": "t8b", "memory_scope": "task", "complexity": type("C", (), {"value": "high"})(), "type": DummyTaskType("test"), "input": type("I", (), {"description": "critical regression test coverage for release gate", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "critical"})()})()
+    ctx = director.build_selection_context("model-a", task, 1000.0, memory_context={})
+    assert ctx["task_profile"]["task_type"] == "test_critical"
+    assert ctx["context_depth"] >= 4
+
+
+def test_director_prefers_compare_research_profile():
+    director = MimoOrchestrationDirector()
+    task = type("T", (), {"session_id": "s8c", "task_id": "t8c", "memory_scope": "task", "complexity": type("C", (), {"value": "medium"})(), "type": DummyTaskType("research"), "input": type("I", (), {"description": "compare providers, benchmark options, and summarize tradeoffs", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "normal"})()})()
+    ctx = director.build_selection_context("model-a", task, 1000.0, memory_context={})
+    assert ctx["task_profile"]["task_type"] == "research_compare"
     assert ctx["context_depth"] >= 5
 
 
@@ -550,3 +568,35 @@ def test_director_resolve_candidate_models_prefers_better_value_over_local_bias(
     assert candidates[0]["model_name"] == "gpt-4o-mini"
     assert candidates[0]["value_score"] >= candidates[1]["value_score"]
     assert candidates[0]["value_diagnostics"]["observed_avg_cost_usd"] < candidates[1]["value_diagnostics"]["observed_avg_cost_usd"]
+
+
+
+def test_director_status_snapshot_exposes_working_and_failed_mimo_state(monkeypatch):
+    director = MimoOrchestrationDirector()
+    director.is_available = True
+    director.last_failure_reason = None
+    director.recovery_attempts = 2
+    director.last_sync_at = "2026-06-17T12:00:00+00:00"
+
+    monkeypatch.setattr("core.mimo.proxy.build_mimo_runtime_status", lambda **kwargs: {
+        "provider": "mimo",
+        "status": "degraded",
+        "ready": True,
+        "cli_available": True,
+        "report_present": True,
+        "usable_count": 24,
+        "failed_count": 158,
+        "usable_models_sample": ["mimo/mimo-auto"],
+        "failed_models_sample": [{"model": "github-copilot/claude-haiku-4.5", "error": "pat not supported"}],
+        "auth_categories": {"github_pat_not_supported": 25},
+        "provider_breakdown": {"github-copilot": {"total": 80, "ok": 0, "failed": 80}},
+    })
+
+    snap = director.status_snapshot()
+
+    assert snap["provider"] == "mimo"
+    assert snap["ready"] is True
+    assert snap["usable_count"] == 24
+    assert snap["failed_count"] == 158
+    assert snap["selection_mode"] == "mimo_control"
+    assert snap["auth_categories"]["github_pat_not_supported"] == 25

@@ -13,6 +13,7 @@ from core.core.mistral_governance import MistralGovernance
 from core.core.model_value import compute_model_value, context_fit_score, memory_efficiency_score
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.qwen_model_registry import QwenModelRegistry
+from core.core.mimo_status import build_mimo_runtime_status
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,20 @@ class MimoOrchestrationDirector:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
+    def status_snapshot(self) -> dict[str, Any]:
+        snapshot = build_mimo_runtime_status(
+            bridge=self.bridge,
+            status_source_configured=self._status_source is not None,
+            failure_reason=self.last_failure_reason,
+            recovery_attempts=self.recovery_attempts,
+            last_sync_at=self.last_sync_at,
+            profiles_loaded=len(self.task_profiles),
+        )
+        snapshot["mimo_available"] = bool(self.is_available)
+        snapshot["runtime_ready"] = bool(self._runtime_health().get("ready"))
+        snapshot["selection_mode"] = "mimo_control" if self.is_available else "safe_fallback"
+        return snapshot
+
     def _task_key(self, task: Any, model_name: str) -> tuple[str, str]:
         task_type = getattr(getattr(task, "type", None), "value", None) or str(getattr(task, "type", "unknown"))
         return task_type, model_name
@@ -145,10 +160,10 @@ class MimoOrchestrationDirector:
             if any(token in task_text for token in ("refactor", "rewrite", "cleanup", "moderniz")):
                 candidates.append("code_refactor")
         elif normalized == "test":
-            if any(token in task_text for token in ("regression", "flaky", "failure", "broken", "rerun")):
-                candidates.append("test_regression")
             if task_priority in {"high", "critical"}:
                 candidates.append("test_critical")
+            if any(token in task_text for token in ("regression", "flaky", "failure", "broken", "rerun")):
+                candidates.append("test_regression")
         elif normalized == "review":
             if any(token in task_text for token in ("security", "auth", "rbac", "audit", "compliance")):
                 candidates.append("review_security")
@@ -209,8 +224,8 @@ class MimoOrchestrationDirector:
         window.latencies = deque((value * decay for value in window.latencies), maxlen=window.latencies.maxlen)
         window.quality_scores = deque((min(1.0, value * decay + (1.0 - decay) * 0.5) for value in window.quality_scores), maxlen=window.quality_scores.maxlen)
 
-    def _profile_weights(self, task_type: str, provider: str, model_name: str, task: Any | None = None, context: dict[str, Any] | None = None) -> dict[str, float]:
-        profile = self._profile(task_type, task=task, context=context)
+    def _profile_weights(self, task_type: str, provider: str, model_name: str, task: Any | None = None, context: dict[str, Any] | None = None, profile: dict[str, Any] | None = None) -> dict[str, float]:
+        profile = profile if isinstance(profile, dict) else self._profile(task_type, task=task, context=context)
         weights = {"budget": 1.0, "quality": 1.0, "vfs": 1.0}
         provider_weights = profile.get("provider_weights") if isinstance(profile.get("provider_weights"), dict) else {}
         model_weights = profile.get("model_class_weights") if isinstance(profile.get("model_class_weights"), dict) else {}
@@ -239,16 +254,17 @@ class MimoOrchestrationDirector:
         snap["sample_size"] = float(len(window.latencies))
         return snap
 
-    def _context_depth_for(self, task: Any, context: dict[str, Any], model_name: str) -> int:
+    def _context_depth_for(self, task: Any, context: dict[str, Any], model_name: str, profile: dict[str, Any] | None = None) -> int:
         task_type = getattr(getattr(task, "type", None), "value", None) or str(getattr(task, "type", "unknown"))
-        profile = self._profile_weights(task_type, str(context.get("selected_provider") or "local"), model_name, task=task, context=context)
+        profile = profile if isinstance(profile, dict) else self._profile(task_type)
+        profile_weights = self._profile_weights(task_type, str(context.get("selected_provider") or "local"), model_name, task=task, context=context, profile=profile)
         budget_pressure = str(context.get("budget_pressure") or "normal")
         vfs_pressure = str(context.get("vfs_pressure") or "normal")
         quality_min = float(context.get("quality_min_confidence") or 0.0)
         task_priority = str(getattr(getattr(task, "priority", None), "value", None) or getattr(task, "priority", "normal")).lower()
         rolling = self._rolling_kpi(task, model_name)
-        depth = int(self._profile(task_type).get("default_context_depth") or 1)
-        depth += 1 if profile.get("quality", 1.0) > 1.1 else 0
+        depth = int(profile.get("default_context_depth") or 1)
+        depth += 1 if profile_weights.get("quality", 1.0) > 1.1 else 0
         depth -= 1 if budget_pressure == "high" else 0
         depth -= 1 if vfs_pressure in {"high", "medium"} else 0
         depth += 1 if rolling.get("success_rate", 0.5) < 0.65 and task_type in {"plan", "review"} else 0
@@ -740,6 +756,14 @@ class MimoOrchestrationDirector:
             logger.warning("MIMO director sync failed: %s", exc)
 
     def _runtime_health(self) -> dict[str, Any]:
+        snapshot = build_mimo_runtime_status(
+            bridge=self.bridge,
+            status_source_configured=self._status_source is not None,
+            failure_reason=self.last_failure_reason,
+            recovery_attempts=self.recovery_attempts,
+            last_sync_at=self.last_sync_at,
+            profiles_loaded=len(self.task_profiles),
+        )
         return {
             "ready": bool(self.is_available),
             "profiles_loaded": len(self.task_profiles),
@@ -749,6 +773,10 @@ class MimoOrchestrationDirector:
             "failure_reason": self.last_failure_reason,
             "recovery_attempts": self.recovery_attempts,
             "last_sync_at": self.last_sync_at,
+            "report_present": bool(snapshot.get("report_present")),
+            "usable_count": int(snapshot.get("usable_count") or 0),
+            "failed_count": int(snapshot.get("failed_count") or 0),
+            "auth_categories": snapshot.get("auth_categories", {}),
         }
 
     def build_selection_context(self, model_name: str, task: Any, current_budget: float, memory_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -804,10 +832,11 @@ class MimoOrchestrationDirector:
             current_budget=current_budget,
             provider_ready=bool((mistral_health or {}).get("ready", bool(context.get("mimo_available")))),
         )
-        context["task_profile"] = self._task_profile(task_type, task=task, context=context)
-        context["profile_weights"] = self._profile_weights(context["task_type"], str(context.get("selected_provider") or "local"), model_name, task=task, context=context)
+        task_profile = self._task_profile(task_type, task=task, context=context)
+        context["task_profile"] = task_profile
+        context["profile_weights"] = self._profile_weights(str(task_profile.get("task_type") or context["task_type"]), str(context.get("selected_provider") or "local"), model_name, task=task, context=context, profile=task_profile)
         context["rolling_kpi"] = self._rolling_kpi(task, model_name)
-        context["context_depth"] = self._context_depth_for(task, context, model_name)
+        context["context_depth"] = self._context_depth_for(task, context, model_name, profile=task_profile)
         context["selection_trace"] = [
             {
                 "event": "runtime_health",
@@ -817,7 +846,7 @@ class MimoOrchestrationDirector:
             {
                 "event": "profile_selected",
                 "task_type": task_type,
-                "profile_key": str(context["task_profile"].get("profile_key") or context["task_profile"].get("task_type") or task_type),
+                "profile_key": str(task_profile.get("profile_key") or task_profile.get("task_type") or task_type),
                 "requested_model": model_name,
                 "preferred_model": str(context.get("preferred_model") or model_name),
             },

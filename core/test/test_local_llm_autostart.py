@@ -219,19 +219,23 @@ def test_orchestrator_select_model_choice_returns_none_when_mimo_blocks(monkeypa
     assert recommendation.blocked_by == "health"
 
 
-def test_orchestrator_provider_health_snapshot_uses_availability_cache_and_antigravity_module():
+def test_orchestrator_provider_health_snapshot_uses_availability_cache_and_antigravity_module(monkeypatch):
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.availability = SimpleNamespace(cached_report=lambda: {
         "openai": {"provider": "openai", "status": "healthy", "latency_ms": 10.0, "error": None, "diagnostics": {}},
         "mistral": {"provider": "mistral", "status": "degraded", "latency_ms": 20.0, "error": "quota", "diagnostics": {}},
     })
     orchestrator.module_manager = SimpleNamespace(get_module=lambda name: SimpleNamespace(snapshot=lambda: {"ready": True, "status": "ready"}) if name == "antigravity_status" else None)
+    orchestrator.mimo_director = SimpleNamespace(status_snapshot=lambda: {"provider": "mimo", "status": "degraded", "ready": True, "usable_count": 24, "failed_count": 158})
+    monkeypatch.setattr(Orchestrator, "_testing_mode", staticmethod(lambda: False))
 
     snapshot = Orchestrator._provider_health_snapshot(orchestrator)
 
     assert snapshot["providers"]["openai"]["status"] == "healthy"
     assert snapshot["providers"]["mistral"]["error"] == "quota"
     assert snapshot["providers"]["antigravity"]["ready"] is True
+    assert snapshot["providers"]["mimo"]["usable_count"] == 24
+    assert snapshot["providers"]["mimo"]["ready"] is True
 
 
 def test_orchestrator_select_model_choice_uses_surrogate_controller_without_selector(monkeypatch):

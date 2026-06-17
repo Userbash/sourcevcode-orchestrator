@@ -534,3 +534,45 @@ def test_antigravity_session_control_exposes_active_bridge_metadata(monkeypatch,
     assert summary["interactive_session"]["session_id"] == "sess-3"
     assert summary["interactive_session"]["user_input_required"] is True
     assert summary["interactive_session"]["browser_url"] == "https://example.test/auth"
+
+
+def test_antigravity_status_reports_api_key_mode_on_api_probe_failure(monkeypatch):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+
+    monkeypatch.setattr(manager, "_run_agy", lambda args, timeout=None: {"ok": False, "stdout": "", "stderr": "not found"})
+    monkeypatch.setattr(
+        manager,
+        "probe_api_key_models",
+        lambda: {
+            "ok": False,
+            "models": [],
+            "error": "permission denied",
+            "status_code": 403,
+            "auth_mode": "api_key",
+        },
+    )
+
+    status = manager.status()
+
+    assert status["ready"] is False
+    assert status["auth_mode"] == "api_key"
+    assert status["api_probe"]["status_code"] == 403
+
+
+def test_antigravity_manager_prefers_local_gemini_cli_when_host_agy_missing(monkeypatch):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+
+    monkeypatch.setattr("core.core.integrations.antigravity_manager.ExternalAIBridge.resolve_antigravity_cli_command", staticmethod(lambda: ["/tmp/gemini"]))
+    monkeypatch.setattr("core.core.integrations.antigravity_manager.ExternalAIBridge._antigravity_runtime_env", staticmethod(lambda: {"PATH": "/tmp"}))
+
+    def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
+        return MagicMock(returncode=0, stdout="0.46.0\n", stderr="")
+
+    monkeypatch.setattr("core.core.integrations.antigravity_manager.subprocess.run", fake_run)
+
+    result = manager._run_agy(["models"])
+
+    assert result["ok"] is True
+    assert "gemini-cli" in result["stdout"]

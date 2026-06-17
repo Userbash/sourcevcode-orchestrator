@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ import httpx
 
 from core.core.env_loader import load_env_file
 from core.core.host_bridge import HostBridge
+from core.core.external_ai_bridge import ExternalAIBridge
 from .antigravity_session_store import AntigravitySessionStore
 
 logger = logging.getLogger("AntigravityManager")
@@ -136,6 +138,9 @@ class AntigravityManager:
     def _run_agy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
         if self.proxy_url:
             return self._run_agy_via_proxy(args, timeout=timeout)
+        local = self._run_local_cli(args, timeout=timeout)
+        if local.get("ok") or not self._cli_missing(local):
+            return local
         return self._run_host(["agy", *args], timeout=timeout)
 
     def _run_agy_via_proxy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
@@ -288,7 +293,41 @@ class AntigravityManager:
     @staticmethod
     def _cli_missing(probe: dict[str, Any]) -> bool:
         raw = f"{probe.get('stderr', '')} {probe.get('error', '')}".lower()
-        return "no such file or directory" in raw or "not found" in raw
+        return any(marker in raw for marker in ["no such file or directory", "not found", "node: command not found", "env: \"node\"", "antigravity_cli_not_found"])
+
+    def _run_local_cli(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
+        cmd_prefix = ExternalAIBridge.resolve_antigravity_cli_command()
+        if not cmd_prefix:
+            return {"ok": False, "stdout": "", "stderr": "antigravity_cli_not_found", "error": "antigravity_cli_not_found", "command": ["agy", *args]}
+
+        cli_name = Path(cmd_prefix[0]).name.lower()
+        env = ExternalAIBridge._antigravity_runtime_env()
+        repo_root = str(Path(__file__).resolve().parents[3])
+        if cli_name == "gemini":
+            if args[:1] == ["models"]:
+                cmd = [*cmd_prefix, "--version"]
+            elif args and args[0] == "-p":
+                prompt = args[1] if len(args) > 1 else ""
+                cmd = [*cmd_prefix, "-p", prompt, "--skip-trust"]
+            else:
+                cmd = [*cmd_prefix, *args]
+        else:
+            cmd = [*cmd_prefix, *args]
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or self.probe_timeout, env=env, cwd=repo_root)
+            stdout = proc.stdout or ""
+            if cli_name == "gemini" and args[:1] == ["models"] and proc.returncode == 0:
+                stdout = "antigravity-cli\ngemini-cli\n"
+            return {
+                "ok": proc.returncode == 0,
+                "stdout": stdout,
+                "stderr": proc.stderr or "",
+                "exit_code": proc.returncode,
+                "command": cmd,
+            }
+        except Exception as exc:
+            return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
 
     def probe_api_key_models(self) -> dict[str, Any]:
         if not self.api_key:
@@ -431,9 +470,10 @@ class AntigravityManager:
             probe_res = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"])
         else:
             api_res = self.probe_api_key_models()
+            if api_res:
+                auth_mode = str(api_res.get("auth_mode") or "api_key")
             if api_res.get("ok"):
                 models = list(api_res.get("models", []))
-                auth_mode = "api_key"
             elif self._cli_missing(models_res):
                 auth_res = {"ok": False, "skipped": True, "reason": "agy_cli_missing"}
             else:

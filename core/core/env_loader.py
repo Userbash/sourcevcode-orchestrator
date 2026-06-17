@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .provider_credentials import sync_provider_env_aliases
+
 
 def load_env_file(path: str = ".env", *, override: bool = False) -> None:
     env_path = Path(path)
     if not env_path.exists():
+        sync_provider_env_aliases(os.environ, override=override)
         return
 
     for raw in env_path.read_text(encoding="utf-8").splitlines():
@@ -18,3 +21,5 @@ def load_env_file(path: str = ".env", *, override: bool = False) -> None:
         value = value.strip().strip('"').strip("'")
         if key and (override or key not in os.environ):
             os.environ[key] = value
+
+    sync_provider_env_aliases(os.environ, override=override)

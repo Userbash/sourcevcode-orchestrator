@@ -95,24 +95,32 @@ class OrchestratorAgent(BaseAgent):
         if not sourcecraft_module:
             return self.result(task, "SourceCraft module is not registered", TaskStatus.FAILED, errors=["sourcecraft_module_missing"])
 
-        description = task.input.description.lower()
         repo_path = task.context.repo_path or "."
-
-        # Determine action based on task description or routing hints
-        action = "status"
-        if "pr" in description or "pull request" in description:
-            action = "create_pr"
-        elif "push" in description:
-            action = "push_branch"
-        elif "branch" in description and "prepare" in description:
-            action = "prepare_feature_branch"
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        resolution = {"action": "status"}
+        if hasattr(sourcecraft_module, "resolve_repo_action_for_task"):
+            resolution = sourcecraft_module.resolve_repo_action_for_task(
+                task,
+                {
+                    "description": task.input.description,
+                    "repo_path": repo_path,
+                    "branch": task.context.branch,
+                },
+            )
+        action = str(resolution.get("action") or "status")
 
         try:
             # Execute repo action using the module
             result_dict = sourcecraft_module.execute_repo_action(
                 action=action,
                 repo_path=repo_path,
-                branch=task.context.branch,
+                branch=resolution.get("branch"),
+                target_branch=resolution.get("target_branch") or hints.get("target_branch"),
+                repo_slug=resolution.get("repo_slug") or hints.get("repo_slug"),
+                title=resolution.get("title") or hints.get("title"),
+                description=resolution.get("description") or hints.get("description"),
+                pr_slug=resolution.get("pr_slug") or hints.get("pr_slug"),
+                reviewers=resolution.get("reviewers") or hints.get("reviewers"),
                 session_id=task.session_id or task.task_id,
                 dry_run=True, # Safety default
             )
@@ -380,6 +388,14 @@ class Orchestrator:
         antigravity = self._antigravity_status_snapshot()
         if isinstance(antigravity, dict) and antigravity:
             providers["antigravity"] = antigravity
+        mimo_director = getattr(self, "mimo_director", None)
+        if mimo_director is not None and hasattr(mimo_director, "status_snapshot"):
+            try:
+                mimo = mimo_director.status_snapshot()
+                if isinstance(mimo, dict) and mimo:
+                    providers["mimo"] = mimo
+            except Exception:
+                pass
         return {"providers": providers}
 
     def cache_guard_snapshot(self, session_id: str) -> dict[str, Any]:

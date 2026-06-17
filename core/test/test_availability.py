@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import socket
-import subprocess
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from core.core.availability import ModelAvailability, ProviderHealth, ProviderStatus
 
@@ -27,7 +24,7 @@ def test_availability_init() -> None:
     assert avail is not None
 
 
-@patch("core.core.antigravity_status_module.shared_antigravity_snapshot")
+@patch("core.core.availability.shared_antigravity_snapshot")
 @patch("socket.create_connection", side_effect=_ok_socket)
 def test_check_antigravity_success(mock_snapshot: MagicMock, _mock_socket: MagicMock) -> None:
     mock_snapshot.return_value = {
@@ -47,45 +44,36 @@ def test_check_antigravity_success(mock_snapshot: MagicMock, _mock_socket: Magic
 
     assert health.provider == "antigravity"
     assert health.status == ProviderStatus.HEALTHY
-
     assert health.latency_ms >= 0
 
 
-# @patch("core.core.availability.AntigravityManager")
-# @patch("socket.create_connection", side_effect=_ok_socket)
-# def test_check_antigravity_auth_fail(mock_manager: MagicMock, _mock_socket: MagicMock) -> None:
-#     instance = mock_manager.return_value
-#     instance.is_ready.return_value = False
-#     instance.list_models.return_value = []
-#     
-#     avail = ModelAvailability()
-#     health = avail.check_antigravity()
-#
-#     assert health.status == ProviderStatus.DEGRADED
-#
-# @patch("core.core.availability.AntigravityManager")
-# @patch("socket.create_connection", side_effect=_ok_socket)
-# def test_check_antigravity_quota_fail(mock_manager: MagicMock, _mock_socket: MagicMock) -> None:
-#     instance = mock_manager.return_value
-#     instance.is_ready.return_value = False
-#     instance.list_models.return_value = []
-#     
-#     avail = ModelAvailability()
-#     health = avail.check_antigravity()
-#
-#     assert health.status == ProviderStatus.DEGRADED
-def test_check_mistral_auth_missing() -> None:
-    with patch("os.getenv") as mock_env:
-        # Mock MISTRAL_API_KEY to return None, others to return default
-        def env_side_effect(key, default=None):
-            if key == "MISTRAL_API_KEY":
-                return None
-            return default
-        mock_env.side_effect = env_side_effect
-        
-        avail = ModelAvailability()
+def test_check_mistral_auth_missing_skips_tcp_probe(monkeypatch) -> None:
+    avail = ModelAvailability()
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+
+    with patch("socket.create_connection") as tcp_probe:
         health = avail.check_mistral()
-        assert health.status == ProviderStatus.DEGRADED
+
+    tcp_probe.assert_not_called()
+    assert health.status == ProviderStatus.AUTH_FAILED
+    assert health.error == "mistral_api_key_missing"
+
+
+def test_check_openai_placeholder_key_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)
+    monkeypatch.setattr("core.core.availability.load_env_file", lambda *args, **kwargs: None)
+    avail = ModelAvailability()
+
+    with patch("socket.create_connection") as tcp_probe:
+        health = avail.check_openai()
+
+    tcp_probe.assert_not_called()
+    assert health.status == ProviderStatus.AUTH_FAILED
+    assert health.error == "openai_api_key_placeholder"
+    assert health.diagnostics["credential"]["placeholder"] is True
 
 
 def test_is_provider_ready_cache() -> None:
@@ -114,3 +102,54 @@ def test_record_failure_updates_provider_cache() -> None:
     assert health.status == ProviderStatus.TIMEOUT
     assert avail.is_provider_ready("antigravity") is False
     assert health.diagnostics["error_type"] == "tcp_timeout"
+
+
+def test_openai_tcp_targets_follow_custom_base_url(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://codex.sale/v1")
+    monkeypatch.delenv("OPENAI_TCP_PROBE_HOSTS", raising=False)
+
+    assert ModelAvailability._tcp_targets("openai") == [("codex.sale", 443)]
+
+
+@patch("core.core.availability.build_mimo_runtime_status")
+def test_check_mimo_healthy_from_runtime_snapshot(mock_mimo: MagicMock) -> None:
+    mock_mimo.return_value = {
+        "ready": True,
+        "cli_available": True,
+        "report_present": True,
+        "usable_count": 24,
+        "failed_count": 0,
+        "usable_models_sample": ["mimo/mimo-auto"],
+        "failed_models_sample": [],
+        "auth_categories": {},
+        "provider_breakdown": {"mimo": {"total": 24, "ok": 24, "failed": 0}},
+    }
+
+    avail = ModelAvailability()
+    health = avail.check_mimo()
+
+    assert health.provider == "mimo"
+    assert health.status == ProviderStatus.HEALTHY
+    assert health.diagnostics["snapshot"]["usable_count"] == 24
+
+
+@patch("core.core.availability.build_mimo_runtime_status")
+def test_check_mimo_auth_failed_from_runtime_snapshot(mock_mimo: MagicMock) -> None:
+    mock_mimo.return_value = {
+        "ready": False,
+        "cli_available": True,
+        "report_present": True,
+        "usable_count": 0,
+        "failed_count": 12,
+        "usable_models_sample": [],
+        "failed_models_sample": [{"model": "github-copilot/claude-haiku-4.5", "error": "pat not supported"}],
+        "auth_categories": {"github_pat_not_supported": 12},
+        "provider_breakdown": {"github-copilot": {"total": 12, "ok": 0, "failed": 12}},
+    }
+
+    avail = ModelAvailability()
+    health = avail.check_mimo()
+
+    assert health.provider == "mimo"
+    assert health.status == ProviderStatus.AUTH_FAILED
+    assert health.error == "mimo_auth_degraded"

@@ -1,19 +1,33 @@
+from __future__ import annotations
+
+import json
+
+from core.core.env_loader import load_env_file
 from core.core.integrations.mistral_manager import MistralManager
-from dotenv import load_dotenv
-import os
-import httpx
+from core.core.provider_credentials import credential_snapshot
 
-# Explicitly load the bridge file
-load_dotenv(".env.bridge", override=True)
-key = os.getenv('MISTRAL_API_KEY')
-print(f"Loaded key from .env.bridge: {key[:5]}...{key[-5:] if key else 'None'}")
+load_env_file(".env")
+load_env_file(".env.bridge", override=True)
 
-manager = MistralManager(api_key=key)
-try:
-    # Детальная проверка через httpx напрямую для диагностики
-    response = httpx.get(f"{manager.base_url}/models", headers=manager._get_headers(), timeout=5.0)
-    print(f"API Response Code: {response.status_code}")
-    print(f"API Response Body: {response.text}")
-    print(f"Manager Status: {manager.status()}")
-except Exception as e:
-    print(f"Error: {e}")
+
+def main() -> None:
+    credential = credential_snapshot(("MISTRAL_API_KEY",))
+    manager = MistralManager()
+    probe = manager.probe_models()
+    summary = {
+        "provider": "mistral",
+        "configured": bool(credential.get("configured")),
+        "usable_by_policy": bool(credential.get("usable")),
+        "placeholder": bool(credential.get("placeholder")),
+        "auth_mode": "api_key",
+        "ready": bool(probe.get("ok")),
+        "status_code": probe.get("status_code"),
+        "model_count": len(probe.get("models", [])),
+        "error": probe.get("error"),
+    }
+    print(json.dumps(summary, ensure_ascii=True))
+    raise SystemExit(0 if summary["ready"] else 1)
+
+
+if __name__ == "__main__":
+    main()

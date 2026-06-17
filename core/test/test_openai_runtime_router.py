@@ -41,8 +41,9 @@ def test_openai_registry_uses_cached_text_models(tmp_path, monkeypatch):
 
 
 
-def test_openai_registry_exposes_fetch_error_diagnostics(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+def test_openai_registry_exposes_fetch_error_diagnostics(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-123456789")
+    monkeypatch.setenv("OPENAI_MODELS_CACHE_PATH", str(tmp_path / "openai_models.json"))
 
     def fake_fetch(self):
         self._last_diagnostics = type(self._last_diagnostics)(
@@ -77,6 +78,9 @@ def test_model_selector_openai_auto_is_opt_in(monkeypatch):
     task = _task(TaskType.REVIEW, Complexity.HIGH)
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "false")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("ANTIGRAVITY_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -86,7 +90,7 @@ def test_model_selector_openai_auto_is_opt_in(monkeypatch):
     assert legacy.model_name == "deepseek-r1:14b"
 
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-123456789")
     monkeypatch.setenv("OPENAI_HIGH_MODELS", "gpt-5-mini,gpt-5.1")
     auto = ModelSelector().select(task)
 
@@ -95,10 +99,26 @@ def test_model_selector_openai_auto_is_opt_in(monkeypatch):
     assert auto.reason.startswith("openai_auto_")
 
 
+def test_model_selector_auto_falls_back_when_openai_key_is_placeholder(monkeypatch):
+    task = _task(TaskType.REVIEW, Complexity.HIGH)
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral-live-key-123456789")
+
+    choice = ModelSelector().select(task)
+
+    assert choice.provider == "mistral"
+    assert choice.model_name == "mistral-large-latest"
+    assert choice.reason.startswith("openai_auto_no_key_mistral_fallback")
+
+
 def test_model_selector_auto_falls_back_when_openai_key_missing(monkeypatch):
     task = _task(TaskType.REVIEW, Complexity.HIGH)
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)
     monkeypatch.setenv("MISTRAL_API_KEY", "mistral-test")
 
     choice = ModelSelector().select(task)
@@ -115,6 +135,9 @@ def test_provider_budget_router_honors_critical_mistral_fallback(monkeypatch):
     task.priority = Priority.CRITICAL
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)
     monkeypatch.setenv("MISTRAL_API_KEY", "mistral-test")
     choice = ModelSelector().select(task)
 

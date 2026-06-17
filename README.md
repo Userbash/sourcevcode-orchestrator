@@ -56,31 +56,66 @@ The repository is meant to be the stable control plane for the workspace. It red
 
 ## Getting started
 
-1. Prepare environment
+1. Bootstrap the stack from zero
 ```bash
-cp .env.example .env
+bash scripts/bootstrap_ai_stack.sh
 ```
 
-2. Start the core stack
+2. Optional: complete Antigravity CLI auth if `agy` is installed
 ```bash
-bash scripts/start_core_stack.sh
+bash scripts/bootstrap_ai_stack.sh --agy-login
 ```
 
-3. Open the runtime
-- Orchestrator API: `http://localhost:8000`
-- Health: `http://localhost:8000/health`
+3. Optional: choose a different local model
+```bash
+bash scripts/bootstrap_ai_stack.sh --model qwen2.5:7b-instruct
+```
+
+The bootstrap script will:
+- create `.env`, `.env.bridge`, and `.env.gemini.local` from example files when missing
+- start `Postgres`, `RabbitMQ`, the orchestrator, and an `Ollama` container on `127.0.0.1:11434`
+- pull the configured local model
+- verify `Mistral` when `MISTRAL_API_KEY` is set
+- verify or launch `agy` authorization when requested
+
+## Runtime endpoints
+
+- Orchestrator API: `http://127.0.0.1:8000`
+- Health: `http://127.0.0.1:8000/health`
+- Full health: `http://127.0.0.1:8000/health/full`
+- RabbitMQ UI: `http://127.0.0.1:15672`
+- Local LLM: `http://127.0.0.1:11434`
+
+## Environment files
+
+- `.env.example`: local runtime defaults for the orchestrator container
+- `.env.bridge.example`: provider keys, OpenAI-compatible endpoint overrides, and bridge-specific runtime settings
+- `.env.gemini.local.example`: local model defaults
+
+Remote providers remain optional. Without `OPENAI_API_KEY`, `MISTRAL_API_KEY`, or a working `agy` login, the stack still starts and serves local orchestration, database, broker, and local-model routing. The default zero-to-working local model is `qwen2.5:0.5b` to keep first deployment fast; move to a larger Ollama model once the stack is healthy.
 
 ## Development commands
 
-AI Orchestrator:
+Bootstrap core stack:
+```bash
+bash scripts/bootstrap_ai_stack.sh
+```
+
+Legacy entrypoint kept for compatibility:
 ```bash
 ./core/scripts/start_core_stack.sh
 ```
 
 Tests:
 ```bash
-npm test
 python3 -m pytest core/test
+```
+
+Quick provider check:
+```bash
+python3 -m core.scripts.verify_openai_bridge
+python3 -m core.scripts.verify_provider_stack
+python3 -m core.scripts.verify_provider_stack --strict
 ```
 
 ## Documentation
@@ -95,32 +130,10 @@ MIT (see `LICENSE`).
 
 - GitHub CLI authentication is now bridged through the workspace token flow.
 - The orchestrator can automatically read `GITHUB_API_KEY` and reuse it for `gh` and Git operations.
+- The orchestrator also accepts the legacy alias `GITHUB_API` and syncs it to `GITHUB_TOKEN`/`GH_TOKEN` at runtime.
 - SourceCraft repository workflows are wired into the core routing and API bridge.
 - Host bridge diagnostics now allow common runtime checks such as `env`, `printenv`, `ps`, `df`, and `hostname`.
 - Task intake now normalizes noisy text, removes unsafe formatting artifacts, and preserves cleaner structured task input.
 - The routing stack now uses a normalized intake profile to choose safer providers, stronger review lanes, and parallel code fan-out when the request shape supports it.
 - Prompt optimization and memory context now surface intake-quality and risk hints so downstream agents act with clearer guardrails.
-
-## Project changes in plain English
-
-This project is the control plane for the workspace. It coordinates work, chooses the right execution path, and keeps the runtime observable.
-
-Recent work focused on making GitHub automation safer and more hands-off:
-
-- `gh` can now log in automatically from the workspace token.
-- The container environment keeps the token available at startup, so users do not need to repeat manual login steps.
-- SourceCraft is used as the repository-operation layer for repo status, PR, and release workflows.
-
-The result is a workflow where the orchestrator can manage repository tasks, authenticate to GitHub, and keep the experience mostly invisible to the user.
-
-## Publication summary
-
-The current publication centers on intake quality and execution safety.
-
-- User payloads are normalized before task creation, including Unicode cleanup, whitespace compaction, list normalization, and length trimming.
-- A new heuristic intake profile classifies intent, risk, scope, execution shape, input quality, and decision confidence.
-- That profile is propagated into task routing, provider prioritization, task decomposition, prompt optimization, and runtime memory context.
-- High-risk or low-quality requests now bias toward stronger providers and explicit validation paths instead of cheap-first routing.
-- Large multi-file code requests can opt into parallel fan-out earlier, while review and test work can force single-lane validation behavior.
-
-For the detailed publication report, see `docs/SOURCECRAFT_PUBLICATION_REPORT.md` and `docs/RELEASE_SUMMARY_LAYERED_RUNTIME_MEMORY_AND_MULTI_AGENT_ORCHESTRATION.md`.
+- Local bootstrap now provisions the minimal AI stack without requiring `podman compose` or manual env-file creation.

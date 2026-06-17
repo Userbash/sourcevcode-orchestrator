@@ -128,3 +128,4 @@ def test_model_selector_respects_local_llm_primary_owner_for_plan():
     assert choice.model_name == "qwen-2.5-7b-instruct"
     assert choice.provider == "local"
     assert choice.reason.startswith("local_llm_primary_owner_")
+

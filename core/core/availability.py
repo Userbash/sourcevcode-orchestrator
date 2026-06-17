@@ -20,10 +20,13 @@ from .gemini_model_registry import AntigravityModelRegistry
 from .gemini_runtime_router import AntigravityRuntimeRouter
 from .env_loader import load_env_file
 from .external_ai_bridge import ExternalAIBridge
+from .provider_credentials import credential_snapshot
 from .antigravity_status_module import shared_antigravity_snapshot
+from .mimo_status import build_mimo_runtime_status
 from .integrations.antigravity_manager import AntigravityManager
 from .integrations.mistral_manager import MistralManager
 from .openai_model_registry import OpenAIModelRegistry
+from .openai_provider import default_openai_tcp_probe_hosts
 
 
 class ProviderStatus(Enum):
@@ -67,6 +70,8 @@ class ModelAvailability:
             return "antigravity"
         if p in {"openai", "codex", "codex-main", "gpt"}:
             return "openai"
+        if p in {"mimo", "xiaomi", "mimo-cli"}:
+            return "mimo"
         return p
 
     def __init__(self) -> None:
@@ -103,7 +108,7 @@ class ModelAvailability:
         elif provider == "mistral":
             raw = os.getenv("MISTRAL_TCP_PROBE_HOSTS", "api.mistral.ai:443")
         elif provider == "openai":
-            raw = os.getenv("OPENAI_TCP_PROBE_HOSTS", "api.openai.com:443")
+            raw = os.getenv("OPENAI_TCP_PROBE_HOSTS", default_openai_tcp_probe_hosts())
         else:
             raw = ""
 
@@ -185,7 +190,7 @@ class ModelAvailability:
             if provider == "antigravity":
                 steps.append("Проверь, что Antigravity CLI (`agy`) установлен/доступен и может выполнить `agy -p`.")
             if provider == "openai":
-                steps.append("Проверь доступ к https://api.openai.com/v1/models и что выбранная Codex/OpenAI модель есть в live catalog.")
+                steps.append("Проверь доступ к настроенному OpenAI-compatible endpoint `/models` и что выбранная Codex/OpenAI модель есть в live catalog.")
         if tcp and not tcp.get("ok"):
             steps.append("TCP probe не открыл ни одного соединения; fallback до другого провайдера корректен до восстановления сети.")
         return steps
@@ -221,7 +226,11 @@ class ModelAvailability:
 
     def check_antigravity(self, *, live: bool | None = None) -> ProviderHealth:
         start = datetime.now(UTC)
-        diagnostics: dict[str, Any] = {"provider": "antigravity"}
+        diagnostics: dict[str, Any] = {
+            "provider": "antigravity",
+            "credential": credential_snapshot(("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")),
+            "cli_available": bool(self._resolve_antigravity_cli_command()),
+        }
         tcp = self._tcp_probe("antigravity")
         diagnostics["tcp"] = tcp
         
@@ -276,8 +285,17 @@ class ModelAvailability:
 
     def check_mistral(self, *, live: bool | None = None) -> ProviderHealth:
         start = datetime.now(UTC)
-        diagnostics: dict[str, Any] = {"provider": "mistral"}
-        
+        diagnostics: dict[str, Any] = {
+            "provider": "mistral",
+            "credential": credential_snapshot(("MISTRAL_API_KEY",)),
+        }
+        if not diagnostics["credential"].get("usable"):
+            latency = (datetime.now(UTC) - start).total_seconds() * 1000
+            error = "mistral_api_key_placeholder" if diagnostics["credential"].get("placeholder") else "mistral_api_key_missing"
+            health = ProviderHealth("mistral", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error=error, diagnostics=diagnostics)
+            diagnostics["remediation"] = self._remediation("mistral", health.status, diagnostics)
+            return self._cache(health)
+
         # 1. TCP connectivity probe
         tcp = self._tcp_probe("mistral")
         diagnostics["tcp"] = tcp
@@ -305,21 +323,69 @@ class ModelAvailability:
         return self._cache(health)
 
 
+    def check_mimo(self, *, live: bool | None = None) -> ProviderHealth:
+        start = datetime.now(UTC)
+        diagnostics: dict[str, Any] = {
+            "provider": "mimo",
+            "credential": credential_snapshot(("GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN")),
+        }
+        snapshot = build_mimo_runtime_status()
+        diagnostics["snapshot"] = snapshot
+        diagnostics["usable_models"] = snapshot.get("usable_models_sample", [])
+        diagnostics["failed_models"] = snapshot.get("failed_models_sample", [])
+        diagnostics["auth_categories"] = snapshot.get("auth_categories", {})
+        diagnostics["provider_breakdown"] = snapshot.get("provider_breakdown", {})
+        latency = (datetime.now(UTC) - start).total_seconds() * 1000
+
+        if not snapshot.get("cli_available") and not snapshot.get("report_present"):
+            health = ProviderHealth("mimo", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error="mimo_cli_missing", diagnostics=diagnostics)
+            return self._cache(health)
+
+        if snapshot.get("ready"):
+            status = ProviderStatus.HEALTHY if not snapshot.get("failed_count") else ProviderStatus.DEGRADED
+            health = ProviderHealth("mimo", status, latency, datetime.now(UTC), diagnostics=diagnostics)
+            if status != ProviderStatus.HEALTHY:
+                diagnostics["remediation"] = [
+                    "Часть MIMO моделей недоступна; используй usable_models_sample и auth_categories для routing policy.",
+                    "Для GitHub Copilot-backed моделей проверь тип токена: PAT часто не поддерживается для run endpoint.",
+                ]
+            return self._cache(health)
+
+        auth_categories = diagnostics.get("auth_categories") or {}
+        if isinstance(auth_categories, dict) and any(key in auth_categories for key in {"github_pat_not_supported", "gemini_api_key_missing", "invalid_api_key"}):
+            health = ProviderHealth("mimo", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error="mimo_auth_degraded", diagnostics=diagnostics)
+            diagnostics["remediation"] = [
+                "Проверь GitHub/MIMO auth mode: часть endpoints не принимает Personal Access Token.",
+                "Для Gemini-backed MIMO моделей проверь наличие совместимого Gemini credential в runtime.",
+            ]
+            return self._cache(health)
+
+        health = ProviderHealth("mimo", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="mimo_models_unavailable", diagnostics=diagnostics)
+        diagnostics["remediation"] = [
+            "Сними свежий sweep через core.scripts.ping_all_models и проверь failed_models_by_provider.json.",
+            "Используй mimo_usable_models.json для allowlist моделей до восстановления остальных routes.",
+        ]
+        return self._cache(health)
+
+
     def check_openai(self, *, live: bool | None = None) -> ProviderHealth:
         start = datetime.now(UTC)
-        diagnostics: dict[str, Any] = {"provider": "openai"}
+        diagnostics: dict[str, Any] = {
+            "provider": "openai",
+            "credential": credential_snapshot(("OPENAI_API_KEY",)),
+        }
+        if not diagnostics["credential"].get("usable"):
+            latency = (datetime.now(UTC) - start).total_seconds() * 1000
+            error = "openai_api_key_placeholder" if diagnostics["credential"].get("placeholder") else "openai_api_key_missing"
+            health = ProviderHealth("openai", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error=error, diagnostics=diagnostics)
+            diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
+            return self._cache(health)
+
         tcp = self._tcp_probe("openai")
         diagnostics["tcp"] = tcp
         if not tcp.get("ok"):
             latency = (datetime.now(UTC) - start).total_seconds() * 1000
             health = ProviderHealth("openai", ProviderStatus.TIMEOUT, latency, datetime.now(UTC), error="tcp_probe_failed", diagnostics=diagnostics)
-            diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
-            return self._cache(health)
-
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            latency = (datetime.now(UTC) - start).total_seconds() * 1000
-            health = ProviderHealth("openai", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error="openai_api_key_missing", diagnostics=diagnostics)
             diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
             return self._cache(health)
 
@@ -357,6 +423,8 @@ class ModelAvailability:
             return self.check_mistral(live=live)
         if normalized == "openai":
             return self.check_openai(live=live)
+        if normalized == "mimo":
+            return self.check_mimo(live=live)
         health = ProviderHealth(normalized, ProviderStatus.HEALTHY, 0.0, datetime.now(UTC), diagnostics={"provider": normalized, "probe": "local_provider_assumed_ready"})
         return self._cache(health)
 
@@ -365,6 +433,7 @@ class ModelAvailability:
             "antigravity": self.check_antigravity(),
             "mistral": self.check_mistral(),
             "openai": self.check_openai(),
+            "mimo": self.check_mimo(),
         }
 
     def cached_report(self) -> dict[str, dict]:

@@ -8,6 +8,7 @@ from typing import Any, Optional, Type, TypeVar
 from pydantic import BaseModel
 
 from .kernel_protocol import KernelAPI
+from .openai_provider import build_openai_client_kwargs
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -52,8 +53,8 @@ class ReasoningModule:
 
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY", "").strip()
-            base_url = None
-            model = "gpt-4o"
+            base_url = build_openai_client_kwargs(max_retries=1).get("base_url")
+            model = os.getenv("CODEX_OPENAI_MODEL", "gpt-4o")
             provider = "openai"
 
         if api_key:
@@ -61,7 +62,10 @@ class ReasoningModule:
                 import instructor
                 from openai import OpenAI
 
-                self._client = instructor.from_openai(OpenAI(api_key=api_key, base_url=base_url))
+                kwargs = {"api_key": api_key}
+                if base_url:
+                    kwargs["base_url"] = base_url
+                self._client = instructor.from_openai(OpenAI(**kwargs))
                 self._default_model = model
                 self._provider = provider
                 self._api.log("info", f"[REASONING] Module loaded using {model} (provider={provider}, base_url={base_url})")

@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+.env.*
 
 # Node modules
 node_modules/
@@ -118,3 +119,4 @@ Neko_Throne_work/
 .agents/
 .codex/
 backups/
+reports/

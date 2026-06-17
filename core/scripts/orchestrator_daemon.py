@@ -33,6 +33,7 @@ from core.agents.tester_agent import TesterAgent
 from core.agents.local_llm_agent import LocalLLMAgent
 from core.core.orchestration_config import OrchestrationConfig
 from core.core.security import SecurityManager, SecurityPolicy
+from core.core.provider_credentials import has_usable_credential
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("orchestrator_daemon")
@@ -57,7 +58,7 @@ def _start_http_server(orchestrator: Orchestrator) -> None:
 
     @app.get("/health")
     def health():
-        return {"status": "ok"}
+        return {"status": "ok", "service": "orchestrator", "ts": datetime.now(UTC).isoformat()}
 
     @app.get("/health/full")
     def health_full():
@@ -239,8 +240,8 @@ async def main():
 
     security_manager = SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=["agy -p", "antigravity -p"]))
 
-    mistral_key = (os.getenv("MISTRAL_API_KEY") or "").strip()
-    openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    mistral_key = has_usable_credential("MISTRAL_API_KEY")
+    openai_key = has_usable_credential("OPENAI_API_KEY")
     codex_preference = (os.getenv("AI_BRIDGE_CODEX_PROVIDER") or os.getenv("CODEX_PROVIDER") or "auto").strip().lower()
     if codex_preference == "mistral" and mistral_key:
         codex_provider = "mistral"

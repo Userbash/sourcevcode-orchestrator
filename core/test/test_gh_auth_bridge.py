@@ -29,3 +29,14 @@ def test_ensure_authenticated_fails_without_token(monkeypatch):
         assert "auto-login failed" in str(exc)
     else:
         raise AssertionError("Expected GhAuthBridgeError")
+
+
+def test_read_token_accepts_github_api_alias(monkeypatch):
+    auth = GhAuthBridge()
+    monkeypatch.delenv("HOST_BRIDGE_GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_API", "github_pat_test_token")
+
+    assert auth._read_token() == "github_pat_test_token"

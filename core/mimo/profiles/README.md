@@ -12,7 +12,7 @@ Each JSON file may define:
 Supported profiles now include base task types and more granular variants such as:
 - `plan_high`, `plan_critical`, `plan_research`
 - `code_fast`, `code_senior`, `code_fix`, `code_refactor`
-- `test_regression`
+- `test_regression`, `test_critical`
 - `review_senior`, `review_security`
 - `docs_light`, `docs_api`, `docs_release`
 - `fix`, `fix_regression`

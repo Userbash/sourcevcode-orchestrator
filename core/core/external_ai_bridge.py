@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ except Exception:  # pragma: no cover
 from core.core.gemini_runtime_router import AntigravityRuntimeRouter
 from core.core.host_bridge import HostBridge
 from core.core.models import Task
+from core.core.provider_credentials import sync_provider_env_aliases
 
 
 @dataclass(slots=True)
@@ -49,14 +51,27 @@ class ExternalAIBridge:
                 return [resolved]
 
         candidate_paths: list[str] = []
-        for candidate in ("agy", "antigravity"):
+        home = Path.home()
+        search_roots = [home]
+        var_home = Path("/var/home")
+        if var_home.is_dir():
+            for user_home in var_home.glob("*"):
+                if user_home.is_dir() and user_home not in search_roots:
+                    search_roots.append(user_home)
+        for candidate in ("agy", "antigravity", "gemini"):
             resolved = shutil.which(candidate)
             if resolved:
                 candidate_paths.append(resolved)
+            for search_root in search_roots:
+                candidate_paths.extend([
+                    str(search_root / ".npm-packages" / "bin" / candidate),
+                    str(search_root / ".local" / "bin" / candidate),
+                ])
         candidate_paths.extend([
             "/usr/local/bin/agy",
+            "/usr/local/bin/gemini",
             "/app/core/bin/agy",
-            str(Path.home() / ".local" / "bin" / "agy"),
+            "/app/core/bin/gemini",
         ])
         for resolved in candidate_paths:
             if resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK):
@@ -69,17 +84,37 @@ class ExternalAIBridge:
         return ExternalAIBridge.resolve_antigravity_cli_command()
 
     @staticmethod
+    def _prefer_oauth_cli() -> bool:
+        return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
     def _antigravity_runtime_env() -> dict[str, str]:
-        env = os.environ.copy()
+        env = dict(sync_provider_env_aliases(os.environ.copy()))
         home_dir = env.get("HOME", "")
+        extra_bins: list[str] = []
         if home_dir:
-            local_bin = os.path.join(home_dir, ".local", "bin")
-            current_path = env.get("PATH", "")
-            if local_bin and local_bin not in current_path.split(os.pathsep):
-                env["PATH"] = f"{local_bin}{os.pathsep}{current_path}" if current_path else local_bin
-        antigravity_key = env.get("GEMINI_API_KEY", "").strip()
-        if antigravity_key and not env.get("GOOGLE_API_KEY", "").strip():
-            env["GOOGLE_API_KEY"] = antigravity_key
+            extra_bins.extend([
+                os.path.join(home_dir, ".npm-packages", "bin"),
+                os.path.join(home_dir, ".local", "bin"),
+            ])
+        var_home = Path("/var/home")
+        if var_home.is_dir():
+            for user_home in var_home.glob("*"):
+                if user_home.is_dir():
+                    extra_bins.extend([
+                        str(user_home / ".npm-packages" / "bin"),
+                        str(user_home / ".local" / "bin"),
+                    ])
+        current_path = env.get("PATH", "")
+        parts = [part for part in current_path.split(os.pathsep) if part]
+        merged: list[str] = []
+        for part in [*extra_bins, *parts]:
+            if part and part not in merged:
+                merged.append(part)
+        env["PATH"] = os.pathsep.join(merged)
+        if ExternalAIBridge._prefer_oauth_cli():
+            for key in ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                env.pop(key, None)
         return env
 
     @staticmethod
@@ -194,7 +229,11 @@ class ExternalAIBridge:
                 return BridgeExecResult(False, "", "antigravity_cli_not_found", "antigravity-cli", model, attempts, error_type="unknown")
 
             repo_path = getattr(getattr(task, "context", None), "repo_path", "") or os.getcwd()
-            cmd = [*cmd_prefix, "-p", prompt]
+            cli_name = Path(cmd_prefix[0]).name.lower()
+            if cli_name == "gemini":
+                cmd = [*cmd_prefix, "-p", prompt, "--skip-trust"]
+            else:
+                cmd = [*cmd_prefix, "-p", prompt]
 
             def _run_once() -> subprocess.CompletedProcess[str]:
                 if self.host_bridge is not None:
