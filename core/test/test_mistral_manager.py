@@ -8,7 +8,7 @@ def test_mistral_manager_checks_readiness_success():
         # Имитируем успешный ответ API Mistral
         mock_get.return_value = MagicMock(status_code=200, json=lambda: {"data": [{"id": "mistral-tiny"}, {"id": "mistral-small"}]})
         
-        manager = MistralManager(api_key="fake-key")
+        manager = MistralManager(api_key="mistral_nonsecret_key_value_1234567890")
         
         # Test readiness check
         assert manager.is_ready() is True
@@ -23,7 +23,7 @@ def test_mistral_manager_handles_auth_failure():
         # Имитируем ошибку авторизации
         mock_get.return_value = MagicMock(status_code=401)
         
-        manager = MistralManager(api_key="wrong-key")
+        manager = MistralManager(api_key="mistral_invalid_key_value_1234567890")
         
         # Test readiness check
         assert manager.is_ready() is False

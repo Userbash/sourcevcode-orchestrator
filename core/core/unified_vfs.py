@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import uuid
 import json
@@ -13,7 +12,6 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Optional
 
-import asyncpg
 
 from .kernel_api import KernelAPI
 from .models import AgentResult, Task
@@ -61,10 +59,9 @@ class UnifiedVFSModule:
         self._api: KernelAPI | None = None
         self._nodes: Dict[str, VFSNode] = {}
         self._memory_lock = Lock()
-        self._db_pool: asyncpg.Pool | None = None
         self._database_url: str = ""
         self._pg_enabled: bool = False
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._db_io_lock = Lock()
         self.storage_root: str = "memory_store/vfs"
         self._root_path = Path(self.storage_root)
         self._artifacts_path = self._root_path / "artifacts"
@@ -73,21 +70,14 @@ class UnifiedVFSModule:
 
     async def on_load(self, api: KernelAPI | None) -> None:
         self._api = api
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._loop = None
         self._database_url = os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip()
         self._pg_enabled = bool(self._database_url)
-        if self._pg_enabled:
-            self._db_pool = await asyncpg.create_pool(dsn=normalize_database_url(self._database_url))
         if self._api:
             self._api.log("info", f"[VFS] {self.name} initialized. PostgreSQL: {self._pg_enabled}")
         self._recover_all_states()
 
     async def on_unload(self) -> None:
-        if self._db_pool:
-            await self._db_pool.close()
+        return None
 
     def _calculate_checksum(self, content: Any) -> str:
         data = json.dumps(content, sort_keys=True, default=str).encode("utf-8")
@@ -98,6 +88,18 @@ class UnifiedVFSModule:
 
     def _artifact_path(self, path: str) -> Path:
         return self._artifacts_path / f"{path.replace('/', '_')}.{uuid.uuid4().hex}.json"
+
+    def _connect_sync(self):
+        import psycopg2  # type: ignore
+
+        return psycopg2.connect(normalize_database_url(self._database_url))
+
+    def _decode_json_payload(self, payload: Any) -> Any:
+        if isinstance(payload, memoryview):
+            payload = payload.tobytes()
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+        return json.loads(payload)
 
     def _stabilize_content(self, content: Any) -> tuple[Any, dict[str, Any]]:
         artifacts: dict[str, Any] = {}
@@ -128,109 +130,106 @@ class UnifiedVFSModule:
         return content
 
     def _db_write(self, path: str, content: Any, checksum: str, now: datetime, agent_id: str, metadata: Dict[str, Any]) -> None:
-        if not self._db_pool:
+        if not self._pg_enabled:
             return
 
-        async def _write() -> None:
-            async with self._db_pool.acquire() as conn:
-                await conn.execute(
-                    f"""
-                    INSERT INTO {AI_BRIDGE_SCHEMA}.vfs_files (
-                        file_path, content, checksum, last_updated, owner_agent, integrity, metadata
+        with self._db_io_lock:
+            with self._connect_sync() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {AI_BRIDGE_SCHEMA}.vfs_files (
+                            file_path, content, checksum, last_updated, owner_agent, integrity, metadata
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (file_path) DO UPDATE SET
+                            content = EXCLUDED.content,
+                            checksum = EXCLUDED.checksum,
+                            last_updated = EXCLUDED.last_updated,
+                            owner_agent = EXCLUDED.owner_agent,
+                            integrity = EXCLUDED.integrity,
+                            metadata = EXCLUDED.metadata,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            path,
+                            json.dumps(content).encode("utf-8"),
+                            checksum,
+                            now,
+                            agent_id,
+                            StateIntegrity.VALID.value,
+                            json.dumps(metadata),
+                        ),
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                    ON CONFLICT (file_path) DO UPDATE SET
-                        content = EXCLUDED.content,
-                        checksum = EXCLUDED.checksum,
-                        last_updated = EXCLUDED.last_updated,
-                        owner_agent = EXCLUDED.owner_agent,
-                        integrity = EXCLUDED.integrity,
-                        metadata = EXCLUDED.metadata,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    path,
-                    json.dumps(content).encode("utf-8"),
-                    checksum,
-                    now,
-                    agent_id,
-                    StateIntegrity.VALID.value,
-                    json.dumps(metadata),
-                )
-
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(_write(), self._loop).result(timeout=5)
-        else:
-            asyncio.run(_write())
 
     def _db_read(self, path: str) -> dict[str, Any] | None:
-        if not self._db_pool:
+        if not self._pg_enabled:
             return None
 
-        async def _read() -> dict[str, Any] | None:
-            async with self._db_pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    f"""
-                    SELECT content, checksum, last_updated, owner_agent, integrity, metadata
-                    FROM {AI_BRIDGE_SCHEMA}.vfs_files
-                    WHERE file_path = $1
-                    """,
-                    path,
-                )
-                if not row:
-                    return None
-                return dict(row)
-
-        if self._loop and self._loop.is_running():
-            return asyncio.run_coroutine_threadsafe(_read(), self._loop).result(timeout=5)
-        return asyncio.run(_read())
+        with self._db_io_lock:
+            with self._connect_sync() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT content, checksum, last_updated, owner_agent, integrity, metadata
+                        FROM {AI_BRIDGE_SCHEMA}.vfs_files
+                        WHERE file_path = %s
+                        """,
+                        (path,),
+                    )
+                    row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "content": row[0],
+            "checksum": row[1],
+            "last_updated": row[2],
+            "owner_agent": row[3],
+            "integrity": row[4],
+            "metadata": row[5],
+        }
 
     def _db_mark_corrupted(self, path: str) -> None:
-        if not self._db_pool:
+        if not self._pg_enabled:
             return
 
-        async def _mark() -> None:
-            async with self._db_pool.acquire() as conn:
-                await conn.execute(
-                    f"UPDATE {AI_BRIDGE_SCHEMA}.vfs_files SET integrity = $1 WHERE file_path = $2",
-                    StateIntegrity.CORRUPTED.value,
-                    path,
-                )
-
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(_mark(), self._loop).result(timeout=5)
-        else:
-            asyncio.run(_mark())
+        with self._db_io_lock:
+            with self._connect_sync() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {AI_BRIDGE_SCHEMA}.vfs_files SET integrity = %s WHERE file_path = %s",
+                        (StateIntegrity.CORRUPTED.value, path),
+                    )
 
     def _recover_all_states(self) -> None:
-        if not self._db_pool:
+        if not self._pg_enabled:
             return
 
-        async def _recover() -> list[dict[str, Any]]:
-            async with self._db_pool.acquire() as conn:
-                rows = await conn.fetch(
-                    f"""
-                    SELECT file_path, content, checksum, last_updated, owner_agent, integrity, metadata
-                    FROM {AI_BRIDGE_SCHEMA}.vfs_files
-                    """
-                )
-                return [dict(row) for row in rows]
-
         try:
-            rows = asyncio.run_coroutine_threadsafe(_recover(), self._loop).result(timeout=10) if self._loop and self._loop.is_running() else asyncio.run(_recover())
+            with self._db_io_lock:
+                with self._connect_sync() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            SELECT file_path, content, checksum, last_updated, owner_agent, integrity, metadata
+                            FROM {AI_BRIDGE_SCHEMA}.vfs_files
+                            """
+                        )
+                        rows = cur.fetchall()
         except Exception as exc:
             if self._api:
                 self._api.log("warning", f"[VFS] State recovery skipped during load: {exc}")
             rows = []
         with self._memory_lock:
             for row in rows:
-                self._nodes[row["file_path"]] = VFSNode(
-                    path=row["file_path"],
-                    content=json.loads(row["content"].decode("utf-8")),
-                    checksum=row["checksum"],
-                    last_updated=row["last_updated"],
-                    owner_agent=row["owner_agent"],
-                    integrity=StateIntegrity(row["integrity"]),
-                    metadata=row["metadata"],
+                self._nodes[row[0]] = VFSNode(
+                    path=row[0],
+                    content=self._decode_json_payload(row[1]),
+                    checksum=row[2],
+                    last_updated=row[3],
+                    owner_agent=row[4],
+                    integrity=StateIntegrity(row[5]),
+                    metadata=row[6],
                 )
 
     def write_state(self, path: str, content: Any, agent_id: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
@@ -253,7 +252,7 @@ class UnifiedVFSModule:
             self._root_path.mkdir(parents=True, exist_ok=True)
             self._artifacts_path.mkdir(parents=True, exist_ok=True)
             safe_file = self._safe_path(path)
-            if self._db_pool:
+            if self._pg_enabled:
                 self._db_write(path, content, checksum, now, agent_id, metadata)
             else:
                 safe_file.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
@@ -288,7 +287,7 @@ class UnifiedVFSModule:
                 self._nodes.pop(path, None)
 
         safe_file = self._safe_path(path)
-        if safe_file.exists() and not self._db_pool:
+        if safe_file.exists() and not self._pg_enabled:
             try:
                 data = json.loads(safe_file.read_text(encoding="utf-8"))
                 content = data["content"]
@@ -320,12 +319,12 @@ class UnifiedVFSModule:
                 logger.error(f"VFS file read failed: {path} -> {e}")
                 return None
 
-        if self._db_pool:
+        if self._pg_enabled:
             try:
                 row = self._db_read(path)
                 if not row:
                     return None
-                content = json.loads(row["content"].decode("utf-8"))
+                content = self._decode_json_payload(row["content"])
                 restored_content = self._restore_content(content)
                 node = VFSNode(
                     path=path,
@@ -371,6 +370,6 @@ class UnifiedVFSModule:
     def finalize(self) -> Dict[str, Any]:
         return {
             "node_count": len(self._nodes),
-            "storage": f"postgresql:{AI_BRIDGE_SCHEMA}.vfs_files",
+            "storage": f"postgresql:{AI_BRIDGE_SCHEMA}.vfs_files" if self._pg_enabled else "filesystem",
             "integrity": "healthy",
         }

@@ -84,7 +84,7 @@ def test_memory_redacts_secrets_before_write():
         "session-1",
         "env",
         {
-            "OPENAI_API_KEY": "sk-test-secret",
+            "OPENAI_API_KEY": "openai_nonsecret_value_1234567890",
             "normal_value": "safe",
         },
     )
@@ -92,8 +92,8 @@ def test_memory_redacts_secrets_before_write():
     stored = memory.get("session-1", "env")
 
     assert stored["normal_value"] == "safe"
-    assert stored["OPENAI_API_KEY"] != "sk-test-secret"
-    assert "sk-test-secret" not in str(stored)
+    assert stored["OPENAI_API_KEY"] != "openai_nonsecret_value_1234567890"
+    assert "openai_nonsecret_value_1234567890" not in str(stored)
 
 
 def test_base_agent_run_accepts_memory_context():

@@ -1,23 +1,24 @@
 /**
- * Nginx Port Detection and External Nginx Handling Tests
- * Runs on project launch to check for external nginx on standard ports
+ * Detects whether ports 80/443 are already occupied by an external reverse proxy.
  *
- * Ports checked:
- * - 80 (HTTP)
- * - 443 (HTTPS)
+ * This is informational for the current orchestrator stack, which exposes its
+ * own API on port 8000 and can optionally sit behind host-level Nginx.
  */
 
 import { promises as fs } from 'fs';
+import { join } from 'path';
 import { spawn } from 'child_process';
 
 class NginxDetectionTest {
     constructor() {
+        this.projectRoot = process.cwd();
         this.ports = [80, 443];
         this.results = {
             nginx_found: false,
             external_nginx: false,
             ports_in_use: [],
-            recommendations: []
+            recommendations: [],
+            config_file: 'docker-compose.ai.yml'
         };
         this.colors = {
             reset: '\x1b[0m',
@@ -34,51 +35,20 @@ class NginxDetectionTest {
         console.log(`${c}${message}${this.colors.reset}`);
     }
 
-    async checkPort(port) {
+    async checkPortWithSs(port) {
         return new Promise((resolve) => {
-            const nc = spawn('nc', ['-zv', 'localhost', String(port)], {
-                timeout: 2000,
-                stdio: 'pipe'
-            });
-
-            let timeout = setTimeout(() => {
-                nc.kill();
-                resolve(false);
-            }, 2000);
-
-            nc.on('close', (code) => {
-                clearTimeout(timeout);
-                // nc returns 0 if port is open, non-zero if closed
-                resolve(code === 0);
-            });
-
-            nc.on('error', () => {
-                clearTimeout(timeout);
-                resolve(false);
-            });
-        });
-    }
-
-    async checkPortWithNetstat(port) {
-        return new Promise((resolve) => {
-            const netstat = spawn('ss', ['-tuln'], { stdio: 'pipe' });
+            const probe = spawn('ss', ['-tuln'], { stdio: 'pipe' });
             let output = '';
 
-            netstat.stdout.on('data', (data) => {
+            probe.stdout.on('data', (data) => {
                 output += data.toString();
             });
 
-            netstat.on('close', () => {
-                const portInUse = output.includes(`:${port}`);
-                resolve(portInUse);
-            });
-
-            netstat.on('error', () => {
-                resolve(false);
-            });
+            probe.on('close', () => resolve(output.includes(`:${port}`)));
+            probe.on('error', () => resolve(false));
 
             setTimeout(() => {
-                netstat.kill();
+                probe.kill();
                 resolve(false);
             }, 3000);
         });
@@ -93,23 +63,16 @@ class NginxDetectionTest {
                 output += data.toString();
             });
 
-            ps.on('close', () => {
-                const hasNginx = output.includes('nginx');
-                resolve(hasNginx);
-            });
-
-            ps.on('error', () => {
-                resolve(false);
-            });
+            ps.on('close', () => resolve(output.includes('nginx')));
+            ps.on('error', () => resolve(false));
         });
     }
 
     async runTests() {
         this.log('\n' + '═'.repeat(70), 'cyan');
-        this.log('  NGINX DETECTION AND EXTERNAL NGINX CHECK', 'cyan');
+        this.log('  HOST REVERSE PROXY DETECTION', 'cyan');
         this.log('═'.repeat(70) + '\n', 'cyan');
 
-        // Check for running nginx process
         this.log('1. Checking for running Nginx process...', 'bright');
         const nginxRunning = await this.detectNginxProcess();
         if (nginxRunning) {
@@ -119,12 +82,9 @@ class NginxDetectionTest {
             this.log('   ✗ No Nginx process detected', 'yellow');
         }
 
-        // Check standard ports
         this.log('\n2. Checking standard HTTP/HTTPS ports...', 'bright');
         for (const port of this.ports) {
-            this.log(`   Checking port ${port}...`, 'cyan');
-            const portInUse = await this.checkPortWithNetstat(port);
-
+            const portInUse = await this.checkPortWithSs(port);
             if (portInUse) {
                 this.log(`   ✓ Port ${port} is in use`, 'yellow');
                 this.results.ports_in_use.push(port);
@@ -134,76 +94,35 @@ class NginxDetectionTest {
             }
         }
 
-        // Generate recommendations
         this.log('\n3. Recommendations:', 'bright');
         if (this.results.external_nginx) {
-            this.log('   ⚠  EXTERNAL NGINX DETECTED!', 'red');
-            this.log('   Ports in use: ' + this.results.ports_in_use.join(', '), 'yellow');
             this.results.recommendations = [
-                '✓ External Nginx detected on ports: ' + this.results.ports_in_use.join(', '),
-                '✓ Docker-Compose will run WITHOUT internal Nginx',
-                '✓ Configure external Nginx to proxy to Docker containers:',
-                '  - Backend API: http://localhost:3001',
-                '  - Frontend: http://localhost:3000',
-                '',
-                'Example Nginx configuration:',
-                '  upstream backend { server localhost:3001; }',
-                '  upstream frontend { server localhost:3000; }',
-                '',
-                '  server {',
-                '    listen 80;',
-                '    server_name _;',
-                '',
-                '    location /api/ {',
-                '      proxy_pass http://backend;',
-                '      proxy_set_header Host $host;',
-                '      proxy_set_header X-Real-IP $remote_addr;',
-                '    }',
-                '',
-                '    location / {',
-                '      proxy_pass http://frontend;',
-                '      proxy_set_header Host $host;',
-                '    }',
-                '  }'
+                `External reverse proxy ports are in use: ${this.results.ports_in_use.join(', ')}`,
+                'Keep the orchestrator stack on its native ports.',
+                'If Nginx is used, proxy traffic to http://127.0.0.1:8000 for the API.',
+                'RabbitMQ UI remains on http://127.0.0.1:15672 and Ollama on http://127.0.0.1:11434.'
             ];
         } else {
             this.results.recommendations = [
-                '✓ No external Nginx detected',
-                '✓ Docker-Compose will run WITH internal Nginx',
-                '✓ All services will be available through Nginx reverse proxy',
-                '✓ Access application at: http://localhost'
+                'Ports 80/443 are free on the host.',
+                'The orchestrator stack still uses docker-compose.ai.yml and its native ports by default.',
+                'Expose http://127.0.0.1:8000 directly or place a reverse proxy in front later if needed.'
             ];
         }
 
-        this.results.recommendations.forEach(rec => {
-            const color = rec.includes('⚠') ? 'red' : rec.includes('✓') ? 'green' : 'cyan';
-            this.log('   ' + rec, color);
-        });
+        for (const rec of this.results.recommendations) {
+            this.log(`   - ${rec}`, 'cyan');
+        }
 
-        // Configuration decision
-        this.log('\n4. Configuration Decision:', 'bright');
-        const configFile = this.results.external_nginx
-            ? 'docker-compose.minimal.yml'
-            : 'docker-compose.yml';
-
-        this.log(`   Using: ${configFile}`, 'green');
-        this.results.config_file = configFile;
-
-        // Save results
         await this.saveResults();
-
         this.log('\n' + '═'.repeat(70) + '\n', 'cyan');
-
         return this.results;
     }
 
     async saveResults() {
-        const resultsFile = '/var/home/sanya/Hebrew-web/tests/.nginx-detection-results.json';
+        const resultsFile = join(this.projectRoot, 'tests', '.nginx-detection-results.json');
         try {
-            await fs.writeFile(
-                resultsFile,
-                JSON.stringify(this.results, null, 2)
-            );
+            await fs.writeFile(resultsFile, JSON.stringify(this.results, null, 2));
             this.log(`Results saved to: ${resultsFile}`, 'cyan');
         } catch (error) {
             this.log(`Warning: Could not save results - ${error.message}`, 'yellow');
@@ -211,11 +130,10 @@ class NginxDetectionTest {
     }
 }
 
-// Run tests if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
     const test = new NginxDetectionTest();
-    const results = await test.runTests();
-    process.exit(results.external_nginx ? 1 : 0);
+    await test.runTests();
+    process.exit(0);
 }
 
 export default NginxDetectionTest;

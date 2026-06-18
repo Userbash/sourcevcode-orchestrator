@@ -107,6 +107,58 @@ def test_concurrent_agent_write(tmp_path):
     assert node is not None
     assert node.integrity == StateIntegrity.VALID
 
+def test_decode_json_payload_accepts_memoryview():
+    vfs = UnifiedVFSModule()
+
+    payload = memoryview(b'{"status": "ok"}')
+
+    assert vfs._decode_json_payload(payload) == {"status": "ok"}
+
+
+def test_recover_all_states_accepts_memoryview_rows():
+    vfs = UnifiedVFSModule()
+    vfs._pg_enabled = True
+    vfs._database_url = 'postgresql://example'
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=None):
+            return None
+
+        def fetchall(self):
+            return [(
+                'test/path',
+                memoryview(b'{"status": "ok"}'),
+                vfs._calculate_checksum({"status": "ok"}),
+                '2026-06-18T00:00:00+00:00',
+                'agent-test',
+                StateIntegrity.VALID.value,
+                {},
+            )]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    vfs._connect_sync = lambda: _Conn()
+
+    vfs._recover_all_states()
+
+    node = vfs.read_state('test/path')
+    assert node is not None
+    assert node.content == {"status": "ok"}
+
 def test_message_bus_unacked_replay():
     bus = MessageBus()
     

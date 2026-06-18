@@ -204,3 +204,23 @@ def test_seed_default_admin_user_skips_when_users_exist(monkeypatch):
 def test_postgres_operator_hint_matches_recovery_code():
     assert 'Set AI_BRIDGE_MEMORY_DATABASE_URL' in dpm.postgres_operator_hint('POSTGRES_MISSING_DSN')
     assert 'Restart RabbitMQ' in dpm.postgres_operator_hint('RABBITMQ_UNAVAILABLE')
+
+
+def test_data_plane_snapshot_as_dict_serializes_slot_tables():
+    snapshot = dpm.DataPlaneSnapshot(
+        ok=True,
+        postgres_state="healthy",
+        tables=[dpm.TableSnapshot(table="memories", row_count=3, last_updated="2026-06-18T00:00:00Z", latest_marker="2026-06-18T00:00:00Z")],
+        details="ok",
+    )
+
+    payload = snapshot.as_dict()
+
+    assert payload["tables"] == [
+        {
+            "table": "memories",
+            "row_count": 3,
+            "last_updated": "2026-06-18T00:00:00Z",
+            "latest_marker": "2026-06-18T00:00:00Z",
+        }
+    ]

@@ -60,7 +60,7 @@ def test_check_mistral_auth_missing_skips_tcp_probe(monkeypatch) -> None:
 
 
 def test_check_openai_placeholder_key_is_rejected(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_API_KEY", "example_openai_key")
     monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)

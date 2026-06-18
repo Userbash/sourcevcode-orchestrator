@@ -301,7 +301,7 @@ class AntigravityManager:
             return {"ok": False, "stdout": "", "stderr": "antigravity_cli_not_found", "error": "antigravity_cli_not_found", "command": ["agy", *args]}
 
         cli_name = Path(cmd_prefix[0]).name.lower()
-        env = ExternalAIBridge._antigravity_runtime_env()
+        env = ExternalAIBridge._antigravity_runtime_env(cli_name)
         repo_root = str(Path(__file__).resolve().parents[3])
         if cli_name == "gemini":
             if args[:1] == ["models"]:
@@ -468,6 +468,11 @@ class AntigravityManager:
 
         if models_res.get("ok"):
             probe_res = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"])
+            if not probe_res.get("ok") and self.api_key:
+                api_res = self.probe_api_key_models()
+                auth_mode = str(api_res.get("auth_mode") or "api_key")
+                if api_res.get("ok"):
+                    models = list(api_res.get("models", [])) or models
         else:
             api_res = self.probe_api_key_models()
             if api_res:

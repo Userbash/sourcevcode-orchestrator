@@ -37,6 +37,6 @@ def test_read_token_accepts_github_api_alias(monkeypatch):
     monkeypatch.delenv("GITHUB_API_KEY", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
-    monkeypatch.setenv("GITHUB_API", "github_pat_test_token")
+    monkeypatch.setenv("GITHUB_API", "github_nonsecret_token_value_1234567890")
 
-    assert auth._read_token() == "github_pat_test_token"
+    assert auth._read_token() == "github_nonsecret_token_value_1234567890"

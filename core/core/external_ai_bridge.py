@@ -88,7 +88,7 @@ class ExternalAIBridge:
         return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
-    def _antigravity_runtime_env() -> dict[str, str]:
+    def _antigravity_runtime_env(command_name: str | None = None) -> dict[str, str]:
         env = dict(sync_provider_env_aliases(os.environ.copy()))
         home_dir = env.get("HOME", "")
         extra_bins: list[str] = []
@@ -112,7 +112,8 @@ class ExternalAIBridge:
             if part and part not in merged:
                 merged.append(part)
         env["PATH"] = os.pathsep.join(merged)
-        if ExternalAIBridge._prefer_oauth_cli():
+        normalized_command = (command_name or "").strip().lower()
+        if ExternalAIBridge._prefer_oauth_cli() and normalized_command != "gemini":
             for key in ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
                 env.pop(key, None)
         return env
@@ -240,11 +241,11 @@ class ExternalAIBridge:
                     try:
                         res = self.host_bridge.execute(cmd, timeout=timeout_sec, capture_output=True, text=True, check=False)
                         if res.returncode in (1, 127) and any(marker in (res.stderr or "").lower() for marker in ["нет такого файла", "no such file", "not found", "failed to start command"]):
-                            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, env=self._antigravity_runtime_env(), cwd=repo_path)
+                            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, env=self._antigravity_runtime_env(cli_name), cwd=repo_path)
                         return res
                     except Exception:
-                        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, env=self._antigravity_runtime_env(), cwd=repo_path)
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, env=self._antigravity_runtime_env(), cwd=repo_path)
+                        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, env=self._antigravity_runtime_env(cli_name), cwd=repo_path)
+                return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec, env=self._antigravity_runtime_env(cli_name), cwd=repo_path)
 
             if Retrying is not None:
                 try:

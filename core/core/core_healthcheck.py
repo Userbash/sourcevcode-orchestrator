@@ -63,9 +63,9 @@ def _check_memory_plane() -> CheckResult:
 
 def _check_secret_redaction() -> CheckResult:
     memory = SessionMemory(policy=MemoryPolicy())
-    memory.set("health-session", "secret", {"OPENAI_API_KEY": "sk-demo", "safe": "ok"})
+    memory.set("health-session", "secret", {"OPENAI_API_KEY": "openai_demo_value_1234567890", "safe": "ok"})
     stored = memory.get("health-session", "secret")
-    ok = stored["safe"] == "ok" and stored["OPENAI_API_KEY"] != "sk-demo"
+    ok = stored["safe"] == "ok" and stored["OPENAI_API_KEY"] != "openai_demo_value_1234567890"
     return CheckResult("secret_redaction", ok, "memory write path redacts sensitive keys")
 
 

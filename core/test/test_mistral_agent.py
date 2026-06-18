@@ -14,7 +14,7 @@ def _task(task_type: TaskType, description: str):
 
 
 def test_mistral_agent_routes_code_to_codestral(monkeypatch):
-    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
     captured = {}
 
     def fake_post(url, headers=None, json=None, timeout=None):
@@ -34,7 +34,7 @@ def test_mistral_agent_routes_code_to_codestral(monkeypatch):
 
 
 def test_mistral_agent_routes_review_to_large(monkeypatch):
-    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
     captured = {}
 
     def fake_post(url, headers=None, json=None, timeout=None):

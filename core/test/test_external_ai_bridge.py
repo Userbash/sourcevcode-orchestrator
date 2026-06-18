@@ -18,6 +18,7 @@ def test_bridge_fallbacks_to_next_model_on_capacity_error(monkeypatch):
     bridge = ExternalAIBridge()
     calls: list[list[str]] = []
     monkeypatch.setattr(ExternalAIBridge, "resolve_antigravity_cli_command", staticmethod(lambda: ["agy"]))
+    monkeypatch.setattr(bridge.router, "build_plan", lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite", "antigravity-flash"]))
 
     def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
         calls.append(cmd)
@@ -78,3 +79,17 @@ def test_antigravity_runtime_env_prefers_oauth_and_preserves_bin_paths(monkeypat
     assert "ANTIGRAVITY_API_KEY" not in env
     assert "GEMINI_API_KEY" not in env
     assert "GOOGLE_API_KEY" not in env
+
+
+def test_antigravity_runtime_env_keeps_api_keys_for_gemini_cli(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/tester")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("ANTIGRAVITY_API_KEY", "token-a")
+    monkeypatch.setenv("GEMINI_API_KEY", "token-b")
+    monkeypatch.setenv("GOOGLE_API_KEY", "token-c")
+
+    env = ExternalAIBridge._antigravity_runtime_env("gemini")
+
+    assert env["ANTIGRAVITY_API_KEY"] == "token-a"
+    assert env["GEMINI_API_KEY"] == "token-b"
+    assert env["GOOGLE_API_KEY"] == "token-c"

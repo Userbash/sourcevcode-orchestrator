@@ -11,7 +11,7 @@ def test_shell_command_allowlist_and_blocklist():
 
 def test_secret_redaction_and_external_context_filtering():
     security = SecurityManager()
-    context = {"project": "demo", "api_key": "abc", "note": "token=secret123"}
+    context = {"project": "demo", "api_key": "abc", "note": "token=redactme123"}
 
     safe = security.safe_context_for_external_ai(context)
 

@@ -39,10 +39,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("orchestrator_daemon")
 
 
-def _start_http_server(orchestrator: Orchestrator) -> None:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+def _build_http_app(orchestrator: Orchestrator):
+    from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
-    import uvicorn
 
     app = FastAPI(title="AI Orchestrator Kernel API")
     _orch = orchestrator
@@ -165,6 +164,51 @@ def _start_http_server(orchestrator: Orchestrator) -> None:
         except Exception as exc:
             return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
 
+    @app.get("/diagnostics")
+    async def diagnostics(layer: list[str] | None = Query(default=None), matrix_only: bool = False):
+        try:
+            diag_module = _orch.get_module("self_diagnostic") if hasattr(_orch, "get_module") else None
+            if not diag_module:
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "error": "self_diagnostic module not found",
+                        "failure_code": "SELF_DIAGNOSTIC_MODULE_UNAVAILABLE",
+                    },
+                    status_code=503,
+                )
+            payload = await diag_module.run_diagnostics(layers=layer or None, matrix_only=matrix_only)
+            if not isinstance(payload, dict):
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "error": "diagnostics payload is not a JSON object",
+                        "failure_code": "HTTP_DIAGNOSTICS_PAYLOAD_INVALID",
+                    },
+                    status_code=500,
+                )
+            required = {"schema_version", "layers", "matrix"} if matrix_only else {"schema_version"}
+            missing = sorted(field for field in required if field not in payload)
+            if missing:
+                return JSONResponse(
+                    {
+                        "status": "error",
+                        "error": f"diagnostics payload missing required fields: {', '.join(missing)}",
+                        "failure_code": "HTTP_DIAGNOSTICS_PAYLOAD_INVALID",
+                    },
+                    status_code=500,
+                )
+            return JSONResponse(payload)
+        except Exception as exc:
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "error": str(exc),
+                    "failure_code": "HTTP_DIAGNOSTICS_PAYLOAD_INVALID",
+                },
+                status_code=500,
+            )
+
     @app.websocket("/chat/ws")
     async def chat_ws(websocket: WebSocket):
         connection_session_id = f"ws-{uuid4().hex}"
@@ -224,6 +268,13 @@ def _start_http_server(orchestrator: Orchestrator) -> None:
         finally:
             logger.info("[WS] Client disconnected")
 
+    return app
+
+
+def _start_http_server(orchestrator: Orchestrator) -> None:
+    import uvicorn
+
+    app = _build_http_app(orchestrator)
     port = int(os.getenv("ORCHESTRATOR_PORT", "8000"))
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)

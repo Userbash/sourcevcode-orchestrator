@@ -713,7 +713,7 @@ class Orchestrator:
                         "ok": snapshot.ok,
                         "details": snapshot.details,
                         "probe": snapshot.probe,
-                        "tables": [item.__dict__ for item in snapshot.tables],
+                        "tables": snapshot.as_dict().get("tables", []),
                     }
                     self.kpi_events.write(payload)
                     if not snapshot.ok and self.console:

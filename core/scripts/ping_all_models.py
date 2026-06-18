@@ -166,6 +166,17 @@ def build_artifacts(report: dict[str, Any], mimo_report: dict[str, Any]) -> tupl
     return failed, usable
 
 
+def provider_error_result(provider: str, error: Exception | str) -> dict[str, Any]:
+    return {
+        'provider': provider,
+        'models': [],
+        'ok': 0,
+        'failed': 1,
+        'skipped': False,
+        'error': str(error),
+    }
+
+
 async def ping_openai_models(prompt: str) -> dict[str, Any]:
     config = resolve_openai_provider_config()
     result = {'provider': 'openai', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False}
@@ -263,8 +274,24 @@ async def ping_mistral_models(prompt: str, *, skip_non_chat: bool = True) -> dic
 async def ping_local_llm_models(prompt: str) -> dict[str, Any]:
     base = os.getenv('AI_BRIDGE_LOCAL_LLM_ENDPOINT', 'http://host.containers.internal:11434').rstrip('/')
     result = {'provider': 'local_llm', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False}
+    probe_bases = [base]
+    if 'host.containers.internal' in base:
+        probe_bases.append(base.replace('host.containers.internal', '127.0.0.1'))
+    elif '127.0.0.1' in base or 'localhost' in base:
+        probe_bases.append(base.replace('127.0.0.1', 'host.containers.internal').replace('localhost', 'host.containers.internal'))
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-        resp = await client.get(f'{base}/api/tags')
+        resp = None
+        last_error = ''
+        for candidate in probe_bases:
+            try:
+                resp = await client.get(f'{candidate}/api/tags')
+                base = candidate
+                break
+            except Exception as exc:
+                last_error = str(exc)
+        if resp is None:
+            result.update({'failed': 1, 'error': last_error or 'local_llm_inventory_unavailable'})
+            return result
         models = [str(item.get('name', '')).strip() for item in (resp.json().get('models') or []) if str(item.get('name', '')).strip()]
         print(f'[local_llm] discovered {len(models)} models', flush=True)
         for model in models:
@@ -410,11 +437,26 @@ async def ping_antigravity(prompt: str) -> dict[str, Any]:
 
 async def run_all_models(prompt: str, output_dir: Path, *, skip_mistral_non_chat: bool = True) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     report: dict[str, Any] = {}
-    report['openai'] = await ping_openai_models(prompt)
-    report['mistral'] = await ping_mistral_models(prompt, skip_non_chat=skip_mistral_non_chat)
-    report['local_llm'] = await ping_local_llm_models(prompt)
-    mimo_report = await ping_mimo_models(prompt, output_dir)
-    report['antigravity'] = await ping_antigravity(prompt)
+    try:
+        report['openai'] = await ping_openai_models(prompt)
+    except Exception as exc:
+        report['openai'] = provider_error_result('openai', exc)
+    try:
+        report['mistral'] = await ping_mistral_models(prompt, skip_non_chat=skip_mistral_non_chat)
+    except Exception as exc:
+        report['mistral'] = provider_error_result('mistral', exc)
+    try:
+        report['local_llm'] = await ping_local_llm_models(prompt)
+    except Exception as exc:
+        report['local_llm'] = provider_error_result('local_llm', exc)
+    try:
+        mimo_report = await ping_mimo_models(prompt, output_dir)
+    except Exception as exc:
+        mimo_report = provider_error_result('mimo', exc)
+    try:
+        report['antigravity'] = await ping_antigravity(prompt)
+    except Exception as exc:
+        report['antigravity'] = provider_error_result('antigravity', exc)
     failed, usable = build_artifacts(report, mimo_report)
     return report, mimo_report, {'failed': failed, 'mimo_usable': usable}
 

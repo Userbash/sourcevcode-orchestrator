@@ -4,6 +4,8 @@ orjson>=3.10
 tenacity>=8.2
 requests>=2.32
 setuptools>=70.0,<81
+PyYAML>=6.0
+pytest>=8.2
 
 # LLM provider SDKs
 openai>=1.30
