@@ -6,9 +6,25 @@ from pathlib import Path
 from .provider_credentials import sync_provider_env_aliases
 
 
+def _resolve_env_path(path: str) -> Path | None:
+    candidate = Path(path)
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    search_roots = [
+        Path.cwd(),
+        Path(__file__).resolve().parents[2],
+        Path(__file__).resolve().parents[3],
+    ]
+    for root in search_roots:
+        resolved = (root / path).resolve() if not candidate.is_absolute() else candidate
+        if resolved.exists():
+            return resolved
+    return None
+
+
 def load_env_file(path: str = ".env", *, override: bool = False) -> None:
-    env_path = Path(path)
-    if not env_path.exists():
+    env_path = _resolve_env_path(path)
+    if env_path is None:
         sync_provider_env_aliases(os.environ, override=override)
         return
 

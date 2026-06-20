@@ -110,7 +110,7 @@ def test_director_rolling_kpi_window_tracks_task_model():
 
 def test_director_profile_weights_reflect_provider_and_model():
     director = MimoOrchestrationDirector()
-    weights = director._profile_weights("code", "openai", "deepseek-r1:14b")
+    weights = director._profile_weights("code", "openai", "qwen2.5:32b-instruct-q4_k_m")
     assert weights["quality"] > 1.0
     assert weights["budget"] < 1.3
 
@@ -324,7 +324,9 @@ def test_director_recommend_model_prefers_local_llm_owner_for_low_medium_docs():
 
 
 
-def test_director_resolve_candidate_models_filters_blocked_and_unhealthy_provider():
+def test_director_resolve_candidate_models_filters_blocked_and_unhealthy_provider(monkeypatch):
+    monkeypatch.setattr("core.mimo.proxy.load_mimo_ping_report", lambda *args, **kwargs: {"models": []})
+    monkeypatch.setattr("core.mimo.proxy.load_mimo_usable_report", lambda *args, **kwargs: {"models": []})
     director = MimoOrchestrationDirector()
     director.is_available = True
     director.bridge._cached_models = [
@@ -547,7 +549,9 @@ def test_director_prefers_mistral_gateway_when_local_llm_needs_supervision():
 
 
 
-def test_director_resolve_candidate_models_prefers_better_value_over_local_bias():
+def test_director_resolve_candidate_models_prefers_better_value_over_local_bias(monkeypatch):
+    monkeypatch.setattr("core.mimo.proxy.load_mimo_ping_report", lambda *args, **kwargs: {"models": []})
+    monkeypatch.setattr("core.mimo.proxy.load_mimo_usable_report", lambda *args, **kwargs: {"models": []})
     director = MimoOrchestrationDirector()
     director.bridge.get_cached_models = lambda: [
         type("Model", (), {"provider": "local", "id": "local-small", "full_id": "local/local-small", "context_window": 64000, "capability_tags": ["docs"], "cost_class": "medium", "blocked": False, "ready": True, "status": "ready"})(),
@@ -600,3 +604,19 @@ def test_director_status_snapshot_exposes_working_and_failed_mimo_state(monkeypa
     assert snap["failed_count"] == 158
     assert snap["selection_mode"] == "mimo_control"
     assert snap["auth_categories"]["github_pat_not_supported"] == 25
+
+
+def test_director_filters_candidates_using_last_known_good_mimo_reports(monkeypatch):
+    director = MimoOrchestrationDirector()
+    director.bridge._cached_models = [
+        MimoModelSnapshot(full_id="github-copilot/gpt-5.2", id="gpt-5.2", provider="github-copilot", status="ready", context_window=128000, capability_tags=["code"], cost_class="medium", ready=True, blocked=False),
+        MimoModelSnapshot(full_id="mistral/mistral-large-latest", id="mistral-large-latest", provider="mistral", status="ready", context_window=131072, capability_tags=["code"], cost_class="high", ready=True, blocked=False),
+    ]
+    monkeypatch.setattr('core.mimo.proxy.build_mimo_runtime_status', lambda bridge=None, **kwargs: {"auth_categories": {"github_pat_not_supported": 10}})
+    monkeypatch.setattr('core.mimo.proxy.load_mimo_ping_report', lambda *args, **kwargs: {"models": [{"model": "github-copilot/gpt-5.2", "ok": False, "error": "Personal Access Tokens are not supported for this endpoint"}, {"model": "mistral/mistral-large-latest", "ok": True}]})
+    monkeypatch.setattr('core.mimo.proxy.load_mimo_usable_report', lambda *args, **kwargs: {"models": [{"model": "mistral/mistral-large-latest", "ok": True}]})
+    task = type("T", (), {"type": DummyTaskType("code"), "complexity": type("C", (), {"value": "medium"})(), "input": type("I", (), {"description": "code task", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "normal"})()})()
+
+    candidates = director.resolve_candidate_models(task, {"local_llm": {"ready": True}})
+
+    assert [item["full_id"] for item in candidates] == ["mistral/mistral-large-latest"]

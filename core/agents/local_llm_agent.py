@@ -39,8 +39,9 @@ class LocalLLMAgent(BaseAgent):
             "Do not claim file edits or commands you did not perform."
         )
         prompt = "\n".join(prompt_parts)
-        self._record_execution_prompt(task, prompt, memory_context, provider="local", model_name=getattr(local_llm, "model_name", self._model))
-        response = local_llm.query(prompt, model_name=getattr(local_llm, "model_name", self._model), system=system)
+        target_model = str(getattr(task, 'assigned_model', '') or getattr(local_llm, 'model_name', self._model) or self._model).strip()
+        self._record_execution_prompt(task, prompt, memory_context, provider="local", model_name=target_model)
+        response = local_llm.query(prompt, model_name=target_model, system=system)
         if not response:
             return self.result(task, "Local LLM returned no output", TaskStatus.FAILED, errors=["empty_local_llm_response"])
         local_usage = dict(getattr(local_llm, "last_query_metrics", {}) or {})
@@ -49,6 +50,6 @@ class LocalLLMAgent(BaseAgent):
             response,
             TaskStatus.DONE,
             provider="local",
-            model_name=getattr(local_llm, "model_name", self._model),
+            model_name=target_model,
             output={"summary": response, "local_usage": local_usage},
         )

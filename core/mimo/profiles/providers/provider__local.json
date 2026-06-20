@@ -23,10 +23,6 @@
       "quality": 1.0,
       "budget": 0.98
     },
-    "deepseek": {
-      "quality": 1.02,
-      "budget": 0.99
-    },
     "qwen": {
       "quality": 1.02,
       "budget": 1.08

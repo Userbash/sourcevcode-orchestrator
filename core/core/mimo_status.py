@@ -127,6 +127,21 @@ def build_mimo_runtime_status(
     report = load_mimo_ping_report(report_dir)
     usable_artifact = load_mimo_usable_report(report_dir)
     rows = list(report.get('models') or [])
+    live_inventory: list[str] = []
+    live_inventory_error: str | None = None
+    if cli_path:
+        try:
+            import subprocess
+            proc = subprocess.run([cli_path, 'models', '--verbose'], capture_output=True, text=True, timeout=30, check=False)
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    stripped = line.strip()
+                    if stripped and '/' in stripped and ' ' not in stripped and ':' not in stripped and not stripped.startswith('{'):
+                        live_inventory.append(stripped)
+            else:
+                live_inventory_error = (proc.stderr or proc.stdout or f'exit_{proc.returncode}').strip() or None
+        except Exception as exc:
+            live_inventory_error = str(exc)
     if not rows:
         usable_rows = []
         for row in list(usable_artifact.get('models') or []):
@@ -167,14 +182,31 @@ def build_mimo_runtime_status(
         model_name = str(getattr(item, 'full_id', '') or getattr(item, 'id', '')).strip()
         if model_name:
             cached_names.append(model_name)
+    from .provider_inventory_service import ProviderInventoryService
+
+    inventory_snapshot = ProviderInventoryService().provider_snapshot('mimo')
+    snapshot_models = []
+    if isinstance(inventory_snapshot, dict):
+        snapshot_models = [str(item).strip() for item in inventory_snapshot.get('models', []) if str(item).strip()]
+        for model_name in snapshot_models:
+            if model_name not in cached_names:
+                cached_names.append(model_name)
 
     cli_alive = bool(getattr(bridge, 'is_cli_alive', False)) if bridge is not None else bool(cli_path)
     usable_count = len(usable_rows)
     failed_count = len(failed_rows)
-    inventory_count = len(rows) or len(cached_names)
+    inventory_count = len(rows) or len(cached_names) or len(live_inventory)
+
+    if live_inventory:
+        for model_name in live_inventory:
+            if model_name not in cached_names:
+                cached_names.append(model_name)
 
     if usable_count > 0:
         status = 'degraded' if failed_count > 0 else 'ready'
+        ready = True
+    elif live_inventory and not live_inventory_error:
+        status = 'ready'
         ready = True
     elif inventory_count > 0 or report.get('_report_present'):
         status = 'degraded'
@@ -216,4 +248,9 @@ def build_mimo_runtime_status(
         'provider_breakdown': provider_breakdown,
         'cached_models_count': len(cached_names),
         'cached_models_sample': cached_names[:12],
+        'inventory_snapshot_present': bool(snapshot_models),
+        'inventory_snapshot_models_sample': snapshot_models[:12],
+        'live_inventory_count': len(live_inventory),
+        'live_inventory_sample': live_inventory[:12],
+        'live_inventory_error': live_inventory_error,
     }

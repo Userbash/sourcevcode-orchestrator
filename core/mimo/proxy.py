@@ -13,7 +13,7 @@ from core.core.mistral_governance import MistralGovernance
 from core.core.model_value import compute_model_value, context_fit_score, memory_efficiency_score
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.qwen_model_registry import QwenModelRegistry
-from core.core.mimo_status import build_mimo_runtime_status
+from core.core.mimo_status import build_mimo_runtime_status, load_mimo_ping_report, load_mimo_usable_report
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,7 @@ class MimoOrchestrationDirector:
                 weights["quality"] *= float(pw.get("quality", 1.0))
                 weights["budget"] *= float(pw.get("budget", 1.0))
                 weights["vfs"] *= float(pw.get("vfs", 1.0))
-        for token, key in (("qwen", "qwen"), ("deepseek", "deepseek"), ("gpt", "gpt")):
+        for token, key in (("qwen", "qwen"), ("gpt", "gpt")):
             if token in model_norm and key in model_weights:
                 mw = model_weights[key]
                 if isinstance(mw, dict):
@@ -529,6 +529,34 @@ class MimoOrchestrationDirector:
         provider_health = self._provider_health(advisory_context)
         capability_tags = self._capability_tags_for_task(task)
         cached_models = list(self.bridge.get_cached_models()) if hasattr(self.bridge, "get_cached_models") else []
+        runtime = build_mimo_runtime_status(bridge=self.bridge)
+        auth_categories = runtime.get("auth_categories", {}) if isinstance(runtime.get("auth_categories"), dict) else {}
+        report = load_mimo_ping_report()
+        usable = load_mimo_usable_report()
+        allowed_names: set[str] = set()
+        blocked_names: set[str] = set()
+        for row in usable.get("models", []):
+            if isinstance(row, dict):
+                model_name = str(row.get("model") or "").strip()
+                if model_name:
+                    allowed_names.add(model_name)
+                    if "/" in model_name:
+                        allowed_names.add(model_name.split("/", 1)[1])
+        if not allowed_names:
+            for row in report.get("models", []):
+                if not isinstance(row, dict):
+                    continue
+                model_name = str(row.get("model") or "").strip()
+                if not model_name:
+                    continue
+                if row.get("ok"):
+                    allowed_names.add(model_name)
+                    if "/" in model_name:
+                        allowed_names.add(model_name.split("/", 1)[1])
+                else:
+                    blocked_names.add(model_name)
+                    if "/" in model_name:
+                        blocked_names.add(model_name.split("/", 1)[1])
         candidates: list[dict[str, Any]] = []
         for model in cached_models:
             provider = self._normalize_provider_name(getattr(model, "provider", "local"))
@@ -538,6 +566,8 @@ class MimoOrchestrationDirector:
             health = provider_health.get(provider)
             health_ready = True if not isinstance(health, dict) or not health else bool(health.get("ready", False))
             tags = {str(item).strip().lower() for item in (getattr(model, "capability_tags", None) or []) if str(item).strip()}
+            full_id = str(getattr(model, "full_id", "")).strip()
+            short_id = str(getattr(model, "id", "") or full_id).strip()
             if blocked:
                 continue
             if ready is False or status in {"offline", "error", "disabled"}:
@@ -546,10 +576,16 @@ class MimoOrchestrationDirector:
                 continue
             if tags and capability_tags.isdisjoint(tags):
                 continue
+            if auth_categories.get("github_pat_not_supported") and provider == "github-copilot":
+                continue
+            if blocked_names and (full_id in blocked_names or short_id in blocked_names):
+                continue
+            if allowed_names and not ({full_id, short_id} & allowed_names):
+                continue
             candidate = {
                 "provider": provider,
-                "model_name": str(getattr(model, "id", "") or getattr(model, "full_id", "")).strip(),
-                "full_id": str(getattr(model, "full_id", "")).strip(),
+                "model_name": short_id,
+                "full_id": full_id,
                 "context_window": getattr(model, "context_window", None),
                 "capability_tags": sorted(tags),
                 "cost_class": getattr(model, "cost_class", None),
@@ -568,7 +604,17 @@ class MimoOrchestrationDirector:
     def _default_local_model(task_type: str) -> str:
         if task_type in {"docs", "research", "review", "plan"}:
             return "qwen-2.5-7b-instruct"
+        if os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            return "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"
         return "qwen2.5:32b-instruct-q4_k_m"
+
+    @staticmethod
+    def _default_local_provider(task_type: str) -> str:
+        if task_type in {"docs", "research", "review", "plan"}:
+            return "local"
+        if os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            return "ai_kernel"
+        return "local"
 
     @staticmethod
     def _unavailable_decision_event(*, mode: str, allow: bool, reason: str, provider: str, model_name: str) -> dict[str, Any]:
@@ -587,7 +633,7 @@ class MimoOrchestrationDirector:
         task_type = getattr(getattr(task, "type", None), "value", None) or str(getattr(task, "type", "unknown"))
         local = advisory_context.get("local_llm") if isinstance(advisory_context.get("local_llm"), dict) else {}
         preferred_local = str((local or {}).get("recommended_model") or self._default_local_model(str(task_type).lower())).strip()
-        options = [{"provider": "local", "model_name": preferred_local}]
+        options = [{"provider": self._default_local_provider(str(task_type).lower()), "model_name": preferred_local}]
         if str(task_type).lower() in {"plan", "review", "research"}:
             options.append({"provider": "openai", "model_name": "gpt-4o"})
         return options
@@ -602,13 +648,14 @@ class MimoOrchestrationDirector:
         is_high_risk = complexity in {"high", "critical"} or any(token in task_text for token in high_risk_tokens)
         if is_high_risk:
             model_name = self._default_local_model(task_type)
+            provider_name = self._default_local_provider(task_type)
             return MimoRecommendation(
-                provider="local",
+                provider=provider_name,
                 model_name=model_name,
                 confidence=0.1,
                 allow=False,
                 reason="mimo_unavailable_requires_escalation",
-                selection_trace=[self._unavailable_decision_event(mode="safe_fallback", allow=False, reason="mimo_unavailable_requires_escalation", provider="local", model_name=model_name)],
+                selection_trace=[self._unavailable_decision_event(mode="safe_fallback", allow=False, reason="mimo_unavailable_requires_escalation", provider=provider_name, model_name=model_name)],
                 requires_escalation=True,
                 escalation_reason="mimo_unavailable_high_risk",
                 blocked_by="policy",
@@ -628,13 +675,14 @@ class MimoOrchestrationDirector:
                 decision_mode="surrogate_controller",
             )
         model_name = self._default_local_model(task_type)
+        provider_name = self._default_local_provider(task_type)
         return MimoRecommendation(
-            provider="local",
+            provider=provider_name,
             model_name=model_name,
             confidence=0.45,
             allow=True,
             reason="mimo_unavailable_safe_fallback",
-            selection_trace=[self._unavailable_decision_event(mode="safe_fallback", allow=True, reason="mimo_unavailable_safe_fallback", provider="local", model_name=model_name)],
+            selection_trace=[self._unavailable_decision_event(mode="safe_fallback", allow=True, reason="mimo_unavailable_safe_fallback", provider=provider_name, model_name=model_name)],
             fallback_options=self._fallback_options(task, advisory_context),
             decision_mode="safe_fallback",
         )
@@ -1042,9 +1090,9 @@ class MimoOrchestrationDirector:
 
         fallback_models: list[tuple[str, str, int | None, str, list[str]]] = [
             ("local", "qwen-2.5-7b-instruct", 131072, "low", ["docs", "research", "review"]),
+            ("ai_kernel", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m", 65536, "medium", ["code", "review", "fix", "test"]),
             ("local", "qwen2.5:32b-instruct-q4_k_m", 65536, "medium", ["code", "review", "fix"]),
-            ("local", "deepseek-r1:14b", 65536, "medium", ["code", "review", "research"]),
-            ("mistral", "mistral-medium-latest", 131072, "medium", ["docs", "research", "review"]),
+                        ("mistral", "mistral-medium-latest", 131072, "medium", ["docs", "research", "review"]),
             ("mistral", "mistral-large-latest", 131072, "high", ["code", "review", "research"]),
             ("mistral", "codestral-latest", 131072, "medium", ["code", "fix", "test"]),
             ("mistral", "devstral-latest", 131072, "medium", ["code", "fix", "review"]),

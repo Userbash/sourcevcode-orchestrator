@@ -23,10 +23,6 @@
       "quality": 1.0,
       "budget": 0.98
     },
-    "deepseek": {
-      "quality": 1.1,
-      "budget": 0.95
-    },
     "gpt": {
       "quality": 1.24,
       "budget": 0.88

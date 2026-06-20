@@ -290,6 +290,25 @@ def test_ping_antigravity_marks_all_status_models_from_single_probe(monkeypatch)
     assert all(row["response_sample"] == "pong" for row in report["models"])
 
 
+def test_run_all_models_only_provider_mistral_marks_others_not_selected(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        ping_all_models,
+        "ping_mistral_models",
+        lambda prompt, skip_non_chat=True: asyncio.sleep(0, result={"provider": "mistral", "models": [{"model": "mistral-large-latest", "ok": True}], "ok": 1, "failed": 0, "skipped": False, "skipped_non_chat": 0}),
+    )
+
+    report, mimo_report, artifacts = asyncio.run(
+        ping_all_models.run_all_models("reply with pong only", tmp_path, only_provider="mistral")
+    )
+
+    assert report["mistral"]["ok"] == 1
+    assert report["openai"]["skipped"] is True
+    assert report["local_llm"]["skipped"] is True
+    assert report["antigravity"]["skipped"] is True
+    assert mimo_report["skipped"] is True
+    assert artifacts["failed"]["mistral"]["failed_count"] == 0
+
+
 def test_main_async_writes_reports_for_all_provider_sweeps(monkeypatch, tmp_path):
     report = {
         "openai": {"provider": "openai", "ok": 1, "failed": 0, "models": [{"model": "gpt-ok", "ok": True}]},
@@ -316,13 +335,14 @@ def test_main_async_writes_reports_for_all_provider_sweeps(monkeypatch, tmp_path
     monkeypatch.setattr(
         ping_all_models,
         "run_all_models",
-        lambda prompt, output_dir, skip_mistral_non_chat=True: asyncio.sleep(0, result=(report, mimo_report, artifacts)),
+        lambda prompt, output_dir, skip_mistral_non_chat=True, only_provider=None: asyncio.sleep(0, result=(report, mimo_report, artifacts)),
     )
 
     args = argparse.Namespace(
         prompt="reply with pong only",
         output_dir=str(tmp_path),
         include_mistral_non_chat=False,
+        only_provider=None,
     )
 
     exit_code = asyncio.run(ping_all_models.main_async(args))

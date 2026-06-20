@@ -3,13 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from .kernel_protocol import KernelAPI, KernelModule
+from .local_model_runtime import LocalModelRuntime, LocalModelRuntimeConfig, LocalPromptBuilder
 
 logger = logging.getLogger("local_llm_module")
 
@@ -41,27 +39,17 @@ class LocalLLMModule(KernelModule):
     ) -> None:
         self.name = "local_llm"
         self._api: KernelAPI | None = None
-        self.endpoint = (endpoint or os.getenv("AI_BRIDGE_LOCAL_LLM_ENDPOINT") or "http://host.containers.internal:11434").rstrip("/")
-
-        self.model_name = model_name or os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL") or "qwen2.5:32b-instruct-q4_k_m"
-        raw_timeout = os.getenv("AI_BRIDGE_LOCAL_LLM_HEALTH_TIMEOUT_SEC")
-        raw_generate_timeout = os.getenv("AI_BRIDGE_LOCAL_LLM_GENERATE_TIMEOUT_SEC")
-        if timeout_sec is not None:
-            self.timeout_sec = max(0.2, timeout_sec)
-        elif raw_timeout:
-            try:
-                self.timeout_sec = max(0.2, float(raw_timeout))
-            except ValueError:
-                self.timeout_sec = 1.0
-        else:
-            self.timeout_sec = 1.0
-        if raw_generate_timeout:
-            try:
-                self.generate_timeout_sec = max(5.0, float(raw_generate_timeout))
-            except ValueError:
-                self.generate_timeout_sec = 60.0
-        else:
-            self.generate_timeout_sec = max(60.0, self.timeout_sec * 30)
+        self.runtime = LocalModelRuntime(
+            LocalModelRuntimeConfig.from_env(
+                endpoint=endpoint,
+                model_name=model_name,
+                timeout_sec=timeout_sec,
+            )
+        )
+        self.endpoint = self.runtime.current_endpoint
+        self.model_name = self.runtime.config.default_model
+        self.timeout_sec = self.runtime.config.health_timeout_sec
+        self.generate_timeout_sec = self.runtime.config.generate_timeout_sec
         self.last_probe: dict[str, Any] = {}
         self.last_advisory: dict[str, Any] = {}
         self.last_query_metrics: dict[str, Any] = {}
@@ -69,9 +57,16 @@ class LocalLLMModule(KernelModule):
         self._adapter_state_mtime_ns: int | None = None
         self._adapter_state_cache: dict[str, Any] = {}
 
+    def _refresh_runtime_model(self, model_name: str | None = None) -> str:
+        target_model = (model_name or self.model_name).strip() or self.runtime.config.default_model
+        if target_model != self.runtime.config.default_model:
+            self.runtime.config.default_model = target_model
+        self.model_name = target_model
+        return target_model
+
     def can_use_model(self, model_name: str | None = None) -> dict[str, Any]:
-        target_model = (model_name or self.model_name).strip()
-        probe = self._probe()
+        target_model = self._refresh_runtime_model(model_name)
+        probe = self._probe(target_model)
         model_present = bool(probe.get("model_present"))
         return {
             "ok": bool(probe.get("ok")) and model_present,
@@ -85,9 +80,7 @@ class LocalLLMModule(KernelModule):
 
     @staticmethod
     def _model_matches(expected: str, candidate: str) -> bool:
-        expected_base = expected.split(":", 1)[0]
-        candidate_base = candidate.split(":", 1)[0]
-        return candidate == expected or candidate_base == expected_base
+        return LocalModelRuntime._model_matches(expected, candidate)
 
     @staticmethod
     def _task_text(task: Any, context: dict[str, Any] | None = None) -> str:
@@ -231,52 +224,10 @@ class LocalLLMModule(KernelModule):
             },
         }
 
-    def _probe(self) -> dict[str, Any]:
-        endpoints = [self.endpoint]
-        if "host.containers.internal" in self.endpoint:
-            endpoints.append(self.endpoint.replace("host.containers.internal", "127.0.0.1"))
-        elif "127.0.0.1" in self.endpoint or "localhost" in self.endpoint:
-            endpoints.append(self.endpoint.replace("127.0.0.1", "host.containers.internal").replace("localhost", "host.containers.internal"))
-
-        last_exc = "no endpoints tried"
-        for url in endpoints:
-            try:
-                response = requests.get(f"{url}/api/tags", timeout=self.timeout_sec)
-                response.raise_for_status()
-                payload = response.json() if response.content else {}
-                models = payload.get("models", []) if isinstance(payload, dict) else []
-                available_models: list[str] = []
-                if isinstance(models, list):
-                    for item in models:
-                        if isinstance(item, dict):
-                            name = item.get("name")
-                            if isinstance(name, str) and name.strip():
-                                available_models.append(name.strip())
-                model_present = any(self._model_matches(self.model_name, candidate) for candidate in available_models)
-                
-                # If we successfully probed an alternative endpoint, update self.endpoint
-                if url != self.endpoint:
-                    logger.info(f"[LOCAL_LLM] Switching endpoint to {url} after successful probe")
-                    self.endpoint = url
-
-                return {
-                    "ok": True,
-                    "status_code": response.status_code,
-                    "available_models": available_models,
-                    "model_present": model_present,
-                    "error": None,
-                }
-            except Exception as exc:
-                last_exc = str(exc)
-                continue
-
-        return {
-            "ok": False,
-            "status_code": None,
-            "available_models": [],
-            "model_present": False,
-            "error": last_exc,
-        }
+    def _probe(self, model_name: str | None = None) -> dict[str, Any]:
+        health = self.runtime.check_health_sync(model_name or self.model_name)
+        self.endpoint = health.endpoint
+        return health.as_dict()
 
     def _query_model(
         self,
@@ -294,65 +245,16 @@ class LocalLLMModule(KernelModule):
                 f"local LLM is not ready: service_reachable={readiness['service_reachable']}, model_present={readiness['model_present']} (endpoint={self.endpoint})"
             )
 
-        start_time = time.perf_counter()
-        try:
-            response = requests.post(
-                f"{self.endpoint}/api/generate",
-                json={
-                    "model": target_model,
-                    "prompt": prompt,
-                    "system": system or "You are a specialized AI Kernel Optimizer.",
-                    "stream": False,
-                    "options": options or {
-                        "temperature": 0.2,
-                        "top_p": 0.9,
-                    },
-                },
-                timeout=timeout_sec or self.generate_timeout_sec,
-            )
-            response.raise_for_status()
-            duration = time.perf_counter() - start_time
-            logger.info(f"[LLM_TELEMETRY] Query to {target_model} at {self.endpoint} took {duration:.3f}s")
-        except Exception as exc:
-            logger.error(f"[LLM_ERROR] Query to {target_model} at {self.endpoint} failed: {exc}")
-            raise
-
-        payload = response.json() if response.content else {}
-        response_text = ""
-        if isinstance(payload, dict):
-            text_value = payload.get("response")
-            if isinstance(text_value, str):
-                response_text = text_value.strip()
-            prompt_eval_count = int(payload.get("prompt_eval_count") or 0)
-            eval_count = int(payload.get("eval_count") or 0)
-            total_duration_ns = int(payload.get("total_duration") or 0)
-            load_duration_ns = int(payload.get("load_duration") or 0)
-            prompt_eval_duration_ns = int(payload.get("prompt_eval_duration") or 0)
-            eval_duration_ns = int(payload.get("eval_duration") or 0)
-        else:
-            prompt_eval_count = 0
-            eval_count = 0
-            total_duration_ns = 0
-            load_duration_ns = 0
-            prompt_eval_duration_ns = 0
-            eval_duration_ns = 0
-        latency_sec = float(total_duration_ns) / 1_000_000_000.0 if total_duration_ns > 0 else float(duration)
-        self.last_query_metrics = {
-            "provider": "local",
-            "model": target_model,
-            "endpoint": self.endpoint,
-            "latency_sec": round(latency_sec, 6),
-            "latency_ms": round(latency_sec * 1000.0, 3),
-            "wall_time_sec": round(float(duration), 6),
-            "prompt_eval_count": prompt_eval_count,
-            "eval_count": eval_count,
-            "prompt_eval_duration_sec": round(float(prompt_eval_duration_ns) / 1_000_000_000.0, 6) if prompt_eval_duration_ns > 0 else 0.0,
-            "eval_duration_sec": round(float(eval_duration_ns) / 1_000_000_000.0, 6) if eval_duration_ns > 0 else 0.0,
-            "load_duration_sec": round(float(load_duration_ns) / 1_000_000_000.0, 6) if load_duration_ns > 0 else 0.0,
-            "input_chars": len(prompt),
-            "output_chars": len(response_text),
-        }
-        return response_text
+        result = self.runtime.generate_sync(
+            prompt,
+            target_model,
+            system=system,
+            options=options,
+            timeout_sec=timeout_sec,
+        )
+        self.endpoint = result.endpoint
+        self.last_query_metrics = {"provider": "local", "model": target_model, **result.metrics.as_dict()}
+        return result.text
 
     def _advisory_base(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
         probe = self.can_use_model(self.model_name)
@@ -573,10 +475,13 @@ class LocalLLMModule(KernelModule):
         }
 
         if should_delegate:
-            prompt = (
-                "You are assisting an orchestrator. Return one short JSON object with keys summary, "
-                "context_digest, next_steps, and model_hint. Keep it concise. Task: "
-                f"{task_text}"
+            prompt = LocalPromptBuilder.compose(
+                "You are assisting an orchestrator. Return one short JSON object with keys summary, context_digest, next_steps, and model_hint. Keep it concise.",
+                sections={
+                    "task": task_text,
+                    "task_family": task_family,
+                    "recommended_actions": advisory["actions"],
+                },
             )
             try:
                 response = self.query(prompt, self.model_name)
@@ -603,21 +508,15 @@ class LocalLLMModule(KernelModule):
         target_model = (model_name or self.model_name).strip()
         if self._api:
             self._api.log("info", f"[LOCAL_LLM] Pulling model {target_model}... This may take a while.")
-        
+
         try:
-            resp = requests.post(
-                f"{self.endpoint}/api/pull",
-                json={"name": target_model, "stream": False},
-                timeout=600 # 10 minute timeout for large models
-            )
-            if resp.status_code == 200:
+            if self.runtime.pull_model_sync(target_model, timeout_sec=600.0):
                 if self._api:
                     self._api.log("info", f"[LOCAL_LLM] Model {target_model} successfully PULLED.")
                 return True
-            else:
-                if self._api:
-                    self._api.log("error", f"[LOCAL_LLM] Pull failed with status {resp.status_code}: {resp.text}")
-                return False
+            if self._api:
+                self._api.log("error", f"[LOCAL_LLM] Pull failed for model {target_model}.")
+            return False
         except Exception as e:
             logger.error(f"Failed to pull local model {target_model}: {e}")
             return False
@@ -644,18 +543,8 @@ class LocalLLMModule(KernelModule):
         """Gracefully unloads the model from VRAM (Ollama specific)."""
         target_model = (model_name or self.model_name).strip()
         try:
-            # Ollama: keep_alive: 0 in a generation request unloads the model
-            requests.post(
-                f"{self.endpoint}/api/generate",
-                json={
-                    "model": target_model,
-                    "prompt": "",
-                    "template": "",
-                    "stream": False,
-                    "keep_alive": 0
-                },
-                timeout=5
-            )
+            if not self.runtime.unload_model_sync(target_model):
+                return False
             if self._api:
                 self._api.log("info", f"[LOCAL_LLM] Model {target_model} successfully UNLOADED from VRAM.")
             return True
@@ -672,7 +561,8 @@ class LocalLLMModule(KernelModule):
         self.unload_model()
         
         # Update model name
-        self.model_name = new_model_name
+        self._refresh_runtime_model(new_model_name)
+        self.runtime.config.default_model = new_model_name
         
         # Re-probe and pull if needed
         self.last_probe = self.check_health()
@@ -685,8 +575,7 @@ class LocalLLMModule(KernelModule):
         return True
 
     def on_unload(self) -> None:
-
-
+        self.runtime.close()
         self.last_probe = {}
         self.last_advisory = {}
 

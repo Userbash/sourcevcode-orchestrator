@@ -41,6 +41,11 @@ services:
       AI_BRIDGE_LOCAL_LLM_ENDPOINT: http://host.containers.internal:11434
       AI_BRIDGE_LOCAL_LLM_PORT: "11434"
       AI_BRIDGE_LOCAL_LLM_MODEL: ${AI_BRIDGE_LOCAL_LLM_MODEL:-qwen2.5:32b-instruct-q4_k_m}
+      AI_KERNEL_ENABLED: ${AI_KERNEL_ENABLED:-true}
+      AI_KERNEL_BASE_URL: ${AI_KERNEL_BASE_URL:-http://host.containers.internal:8012/v1}
+      AI_KERNEL_API_KEY: ${AI_KERNEL_API_KEY:-local}
+      AI_KERNEL_MODEL_ALIAS: ${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}
+      AI_KERNEL_TCP_PROBE_HOSTS: ${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}
       AI_BRIDGE_WORKSPACE_ROOT: ${AI_BRIDGE_WORKSPACE_ROOT:-/workspace}
       AI_BRIDGE_EASY_DIFFUSION_START_ENABLED: ${AI_BRIDGE_EASY_DIFFUSION_START_ENABLED:-true}
       AI_BRIDGE_EASY_DIFFUSION_URL: ${AI_BRIDGE_EASY_DIFFUSION_URL:-http://host.containers.internal:9000}

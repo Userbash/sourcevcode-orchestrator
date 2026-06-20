@@ -25,8 +25,8 @@ class DummyPersistent:
 
 def test_experience_training_pipeline_writes_dataset_and_adapter_state(tmp_path):
     records = [
-        DummyRecord(task_type="code", memory_domain="prompt:code", summary="prefer smaller safe refactors with tests", model_name="deepseek-r1:14b", provider="local", quality_score=0.96),
-        DummyRecord(task_type="code", memory_domain="prompt:code", summary="update tests after refactor", model_name="deepseek-r1:14b", provider="local", quality_score=0.93),
+        DummyRecord(task_type="code", memory_domain="prompt:code", summary="prefer smaller safe refactors with tests", model_name="qwen2.5:32b-instruct-q4_k_m", provider="local", quality_score=0.96),
+        DummyRecord(task_type="code", memory_domain="prompt:code", summary="update tests after refactor", model_name="qwen2.5:32b-instruct-q4_k_m", provider="local", quality_score=0.93),
         DummyRecord(task_type="docs", memory_domain="prompt:docs", summary="keep the summary concise and user-facing", model_name="qwen-2.5-7b-instruct", provider="local", quality_score=0.91),
     ]
     pipeline = ExperienceTrainingPipeline(
@@ -42,7 +42,7 @@ def test_experience_training_pipeline_writes_dataset_and_adapter_state(tmp_path)
     rows = (tmp_path / "experience_sft_dataset.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 3
     adapter = json.loads((tmp_path / "experience_adapter_state.json").read_text(encoding="utf-8"))
-    assert adapter["task_profiles"]["code"]["preferred_model"] == "deepseek-r1:14b"
+    assert adapter["task_profiles"]["code"]["preferred_model"] == "qwen2.5:32b-instruct-q4_k_m"
     assert adapter["task_profiles"]["docs"]["task_family"] == "docs_workflow"
 
 
@@ -51,8 +51,8 @@ def test_local_llm_module_uses_experience_adapter_state(tmp_path):
     adapter_path.write_text(json.dumps({
         "task_profiles": {
             "code": {
-                "preferred_model": "deepseek-r1:14b",
-                "recommended_model": "deepseek-r1:14b",
+                "preferred_model": "qwen2.5:32b-instruct-q4_k_m",
+                "recommended_model": "qwen2.5:32b-instruct-q4_k_m",
                 "delegate": True,
                 "context_depth": 4,
                 "profile_weights": {"quality": 1.3},
@@ -73,7 +73,7 @@ def test_local_llm_module_uses_experience_adapter_state(tmp_path):
 
     advisory = module.build_decomposition_draft(task, {"description": "refactor parser"})
 
-    assert advisory["preferred_model"] == "deepseek-r1:14b"
+    assert advisory["preferred_model"] == "qwen2.5:32b-instruct-q4_k_m"
     assert advisory["context_depth"] == 4
     assert advisory["profile_weights"]["quality"] == 1.3
     assert "always preserve tests" in advisory["actions"]

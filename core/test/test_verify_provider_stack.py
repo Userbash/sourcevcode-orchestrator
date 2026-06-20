@@ -9,7 +9,7 @@ def test_local_llm_summary_uses_configured_local_llm_module(monkeypatch):
             return {
                 "ok": True,
                 "status_code": 200,
-                "available_models": ["qwen2.5:0.5b", "deepseek-r1:14b"],
+                "available_models": ["qwen2.5:0.5b", "qwen2.5:32b-instruct-q4_k_m"],
                 "model_present": True,
                 "error": None,
             }
@@ -23,7 +23,7 @@ def test_local_llm_summary_uses_configured_local_llm_module(monkeypatch):
         "ready": True,
         "error": None,
         "model_count": 2,
-        "sample_models": ["qwen2.5:0.5b", "deepseek-r1:14b"],
+        "sample_models": ["qwen2.5:0.5b", "qwen2.5:32b-instruct-q4_k_m"],
         "model_present": True,
         "status_code": 200,
     }
@@ -62,3 +62,33 @@ openai/gpt-5.4
     assert summary["run_response_sample"] == "ok"
     assert summary["attempted_models"] == ["openai/gpt-5.4-mini", "openai/gpt-5.4"]
     assert calls[0] == ["/usr/bin/mimo", "models", "--verbose"]
+
+
+def test_verify_provider_stack_reports_inventory_snapshot(monkeypatch, capsys):
+    class _Inventory:
+        def read_snapshot(self):
+            return {"updated_at": 123, "providers": {"mistral": {"models": ["mistral-large-latest"], "source": "cache"}, "antigravity": {"models": ["antigravity-flash"], "source": "registry"}}}
+
+    class _Mistral:
+        def probe_models(self):
+            return {"ok": True, "status_code": 200, "models": ["mistral-large-latest"], "error": None, "inventory_source": "live"}
+
+    class _Antigravity:
+        def status(self):
+            return {"ready": True, "auth_mode": "api_key", "inventory_ok": True, "inventory_source": "registry", "inventory_probe_kind": "inventory", "failure_kind": "", "models": ["antigravity-flash"], "api_probe": {"status_code": 200}, "generation_probe": {}, "models_probe": {}, "auth_probe": {}}
+
+    monkeypatch.setattr(verify_provider_stack, "ProviderInventoryService", _Inventory)
+    monkeypatch.setattr(verify_provider_stack, "MistralManager", _Mistral)
+    monkeypatch.setattr(verify_provider_stack, "AntigravityManager", _Antigravity)
+    monkeypatch.setattr(verify_provider_stack, "build_openai_summary", lambda: {"ready": True, "usable_by_policy": True})
+    monkeypatch.setattr(verify_provider_stack, "_mimo_summary", lambda: {"ready": False})
+    monkeypatch.setattr(verify_provider_stack, "_mimo_run_summary", lambda: {"run_ready": False, "attempted_models": []})
+    monkeypatch.setattr(verify_provider_stack, "_local_llm_summary", lambda: {"ready": True, "model_count": 1})
+    monkeypatch.setattr(verify_provider_stack, "credential_snapshot", lambda envs: {"configured": True, "usable": True, "placeholder": False, "env_var": envs[0]})
+
+    monkeypatch.setattr("sys.argv", ["verify_provider_stack.py"])
+    verify_provider_stack.main()
+    output = capsys.readouterr().out
+
+    assert '"inventory_snapshot"' in output
+    assert '"snapshot_model_count": 1' in output

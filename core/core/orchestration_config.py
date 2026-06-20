@@ -138,6 +138,7 @@ class OrchestrationConfig:
     })
     kpi_rejection_summary_path: str = ""
     kpi_dashboard_interval_sec: int = 3600
+    provider_inventory_refresh_interval_sec: int = 1800
     kpi_dashboard_output_path: str = "memory_store/kpi_dashboard_24h.json"
     confirmation_policy: ConfirmationPolicy = field(default_factory=ConfirmationPolicy)
     safety_guards: SafetyGuards = field(default_factory=SafetyGuards)
@@ -190,6 +191,7 @@ class OrchestrationConfig:
             },
             kpi_rejection_summary_path=(os.getenv("AI_BRIDGE_KPI_REJECTION_SUMMARY_PATH") or "").strip(),
             kpi_dashboard_interval_sec=_env_int("AI_BRIDGE_KPI_DASHBOARD_INTERVAL_SEC", 3600),
+            provider_inventory_refresh_interval_sec=_env_int("AI_BRIDGE_PROVIDER_INVENTORY_REFRESH_INTERVAL_SEC", 1800),
             kpi_dashboard_output_path=(os.getenv("AI_BRIDGE_KPI_DASHBOARD_OUTPUT_PATH") or "memory_store/kpi_dashboard_24h.json").strip(),
             require_confirmation_for_destructive=selected_profile.require_confirmation_for_destructive,
             blocked_risk_levels=list(selected_profile.blocked_risk_levels),
@@ -282,6 +284,7 @@ class OrchestrationConfig:
             "kpi_routing_floor_by_task": self.kpi_routing_floor_by_task,
             "kpi_rejection_summary_path": self.kpi_rejection_summary_path,
             "kpi_dashboard_interval_sec": self.kpi_dashboard_interval_sec,
+            "provider_inventory_refresh_interval_sec": self.provider_inventory_refresh_interval_sec,
             "kpi_dashboard_output_path": self.kpi_dashboard_output_path,
         }
 

@@ -84,7 +84,7 @@ class MistralAgent(ExternalAIAgent):
             
         max_retries = 3
         last_exc = None
-        model_name = self._select_model_for_task(task)
+        model_name = str(getattr(task, 'assigned_model', '') or self._select_model_for_task(task)).strip()
         self._record_execution_prompt(task, prompt_content, memory_context, provider=self.provider, model_name=model_name)
         
         for attempt in range(max_retries):
@@ -134,4 +134,7 @@ class MistralAgent(ExternalAIAgent):
         content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         if not content:
             return self.result(task, "Empty response", TaskStatus.FAILED, 0.0, ["Model returned empty content"])
-        return self.result(task, content, TaskStatus.DONE, 0.85, [])
+        result = self.result(task, content, TaskStatus.DONE, 0.85, [])
+        result.provider = self.provider
+        result.model_name = str(getattr(task, 'assigned_model', '') or self._select_model_for_task(task)).strip()
+        return result

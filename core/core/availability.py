@@ -11,6 +11,8 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
+import requests
+
 try:
     import httpx
 except Exception:  # pragma: no cover - optional in minimal test envs
@@ -26,6 +28,7 @@ from .mimo_status import build_mimo_runtime_status
 from .integrations.antigravity_manager import AntigravityManager
 from .integrations.mistral_manager import MistralManager
 from .openai_model_registry import OpenAIModelRegistry
+from .provider_inventory_service import ProviderInventoryService
 from .openai_provider import default_openai_tcp_probe_hosts
 
 
@@ -72,6 +75,8 @@ class ModelAvailability:
             return "openai"
         if p in {"mimo", "xiaomi", "mimo-cli"}:
             return "mimo"
+        if p in {"ai_kernel", "ai-kernel", "llama_cpp", "llama-cpp"}:
+            return "ai_kernel"
         return p
 
     def __init__(self) -> None:
@@ -80,6 +85,11 @@ class ModelAvailability:
         load_env_file(".env.gemini.local", override=True)
         self._health_cache: dict[str, ProviderHealth] = {}
         self._failure_cache: dict[str, ProviderHealth] = {}
+        self.inventory = ProviderInventoryService()
+
+    def _snapshot_inventory(self, provider: str) -> dict[str, Any]:
+        snapshot = self.inventory.provider_snapshot(provider)
+        return snapshot if isinstance(snapshot, dict) else {}
 
     @staticmethod
     def _probe_timeout_sec() -> float:
@@ -109,6 +119,8 @@ class ModelAvailability:
             raw = os.getenv("MISTRAL_TCP_PROBE_HOSTS", "api.mistral.ai:443")
         elif provider == "openai":
             raw = os.getenv("OPENAI_TCP_PROBE_HOSTS", default_openai_tcp_probe_hosts())
+        elif provider == "ai_kernel":
+            raw = os.getenv("AI_KERNEL_TCP_PROBE_HOSTS", "127.0.0.1:8012")
         else:
             raw = ""
 
@@ -313,16 +325,27 @@ class ModelAvailability:
         status = manager.status()
         diagnostics["models"] = status.get("models", [])
         diagnostics["api_probe"] = status.get("api_probe", {})
-        
+        diagnostics["registry"] = status.get("registry", {})
+        diagnostics["inventory_source"] = status.get("inventory_source", "live")
+
+        if not diagnostics["models"]:
+            snapshot = self._snapshot_inventory("mistral")
+            snap_models = [str(item).strip() for item in snapshot.get("models", []) if str(item).strip()] if isinstance(snapshot, dict) else []
+            if snap_models:
+                diagnostics["models"] = snap_models
+                diagnostics["inventory_snapshot"] = snapshot
+                diagnostics["inventory_source"] = "snapshot"
+
         latency = (datetime.now(UTC) - start).total_seconds() * 1000
-        
-        if status.get("ready"):
-            health = ProviderHealth("mistral", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics)
+
+        if status.get("ready") or diagnostics["models"]:
+            provider_status = ProviderStatus.HEALTHY if status.get("ready") else ProviderStatus.DEGRADED
+            health = ProviderHealth("mistral", provider_status, latency, datetime.now(UTC), diagnostics=diagnostics)
         else:
             error = "mistral_auth_failed" if not manager.api_key or diagnostics.get("api_probe", {}).get("status_code") in {401, 403} else "mistral_not_ready"
             health = ProviderHealth("mistral", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error=error, diagnostics=diagnostics)
             diagnostics["remediation"] = self._remediation("mistral", health.status, diagnostics)
-            
+
         return self._cache(health)
 
 
@@ -334,6 +357,9 @@ class ModelAvailability:
         }
         snapshot = build_mimo_runtime_status()
         diagnostics["snapshot"] = snapshot
+        inventory_snapshot = self._snapshot_inventory("mimo")
+        if inventory_snapshot:
+            diagnostics["inventory_snapshot"] = inventory_snapshot
         diagnostics["usable_models"] = snapshot.get("usable_models_sample", [])
         diagnostics["failed_models"] = snapshot.get("failed_models_sample", [])
         diagnostics["auth_categories"] = snapshot.get("auth_categories", {})
@@ -396,6 +422,7 @@ class ModelAvailability:
         models = registry.get_models(force_refresh=bool(live if live is not None else self._live_probe_enabled()))
         diagnostics["models"] = models
         diagnostics["registry"] = registry.diagnostics()
+        diagnostics["inventory_source"] = str((diagnostics.get("registry") or {}).get("source") or "live")
         configured = [
             os.getenv("CODEX_OPENAI_MODEL", "").strip(),
             *self._env_models("OPENAI_HIGH_MODELS"),
@@ -408,12 +435,48 @@ class ModelAvailability:
             diagnostics["configured_models_available"] = [item for item in configured if item in set(models)]
 
         latency = (datetime.now(UTC) - start).total_seconds() * 1000
+        if not models:
+            snapshot = self._snapshot_inventory("openai")
+            snap_models = [str(item).strip() for item in snapshot.get("models", []) if str(item).strip()] if isinstance(snapshot, dict) else []
+            if snap_models:
+                models = snap_models
+                diagnostics["models"] = models
+                diagnostics["inventory_snapshot"] = snapshot
+                diagnostics["inventory_source"] = "snapshot"
         if models:
             health = ProviderHealth("openai", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics)
         else:
             health = ProviderHealth("openai", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="openai_models_unavailable", diagnostics=diagnostics)
             diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
         return self._cache(health)
+
+    def check_ai_kernel(self, *, live: bool | None = None) -> ProviderHealth:
+        start = datetime.now(UTC)
+        diagnostics: dict[str, Any] = {
+            "provider": "ai_kernel",
+            "base_url": (os.getenv("AI_KERNEL_BASE_URL") or "http://127.0.0.1:8012/v1").rstrip('/'),
+            "model_alias": (os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip(),
+        }
+        tcp = self._tcp_probe("ai_kernel")
+        diagnostics["tcp"] = tcp
+        latency = (datetime.now(UTC) - start).total_seconds() * 1000
+        if not tcp.get("ok"):
+            health = ProviderHealth("ai_kernel", ProviderStatus.TIMEOUT, latency, datetime.now(UTC), error="tcp_probe_failed", diagnostics=diagnostics)
+            return self._cache(health)
+        import requests
+        try:
+            response = requests.get(f"{diagnostics['base_url']}/models", headers={"Authorization": f"Bearer {os.getenv('AI_KERNEL_API_KEY', 'local')}"}, timeout=5.0)
+            diagnostics["status_code"] = response.status_code
+            payload = response.json() if response.content else {}
+            models = [str(item.get("id") or "").strip() for item in (payload.get("data") or []) if str(item.get("id") or "").strip()] if isinstance(payload, dict) else []
+            diagnostics["models"] = models
+            latency = (datetime.now(UTC) - start).total_seconds() * 1000
+            if response.status_code == 200 and models:
+                return self._cache(ProviderHealth("ai_kernel", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics))
+            return self._cache(ProviderHealth("ai_kernel", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="ai_kernel_models_unavailable", diagnostics=diagnostics))
+        except Exception as exc:
+            latency = (datetime.now(UTC) - start).total_seconds() * 1000
+            return self._cache(ProviderHealth("ai_kernel", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error=str(exc), diagnostics=diagnostics))
 
     def check_codex(self, *, live: bool | None = None) -> ProviderHealth:
         return self.check_openai(live=live)
@@ -428,6 +491,8 @@ class ModelAvailability:
             return self.check_openai(live=live)
         if normalized == "mimo":
             return self.check_mimo(live=live)
+        if normalized == "ai_kernel":
+            return self.check_ai_kernel(live=live)
         health = ProviderHealth(normalized, ProviderStatus.HEALTHY, 0.0, datetime.now(UTC), diagnostics={"provider": normalized, "probe": "local_provider_assumed_ready"})
         return self._cache(health)
 
@@ -437,6 +502,7 @@ class ModelAvailability:
             "mistral": self.check_mistral(),
             "openai": self.check_openai(),
             "mimo": self.check_mimo(),
+            "ai_kernel": self.check_ai_kernel(),
         }
 
     def cached_report(self) -> dict[str, dict]:

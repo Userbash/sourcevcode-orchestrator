@@ -30,7 +30,7 @@ def test_experience_policy_recommends_best_local_model_from_kpi_and_memory(tmp_p
                     "latencies": [1.2, 1.1, 1.3],
                     "quality_scores": [0.84, 0.86, 0.52],
                 },
-                "code::deepseek-r1:14b": {
+                "code::qwen2.5:32b-instruct-q4_k_m": {
                     "successes": [True, True, True],
                     "latencies": [0.9, 1.0, 0.8],
                     "quality_scores": [0.93, 0.95, 0.94],
@@ -44,7 +44,7 @@ def test_experience_policy_recommends_best_local_model_from_kpi_and_memory(tmp_p
     persistent = DummyPersistent(
         [
             DummyRecord(
-                metadata={"model_name": "deepseek-r1:14b", "provider": "local"},
+                metadata={"model_name": "qwen2.5:32b-instruct-q4_k_m", "provider": "local"},
                 content={"task_type": "code"},
                 quality_score=0.97,
             )
@@ -55,7 +55,7 @@ def test_experience_policy_recommends_best_local_model_from_kpi_and_memory(tmp_p
     recommendation = learner.recommend_model(task_type="code", allowed_providers={"local"})
 
     assert recommendation is not None
-    assert recommendation["model_name"] == "deepseek-r1:14b"
+    assert recommendation["model_name"] == "qwen2.5:32b-instruct-q4_k_m"
     assert recommendation["provider"] == "local"
     assert recommendation["samples"] >= 4
     assert recommendation["score"] >= 0.65

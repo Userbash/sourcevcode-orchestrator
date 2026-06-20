@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+PROVIDER_CHOICES = ('openai', 'mistral', 'local_llm', 'mimo', 'antigravity', 'ai_kernel')
+
 import httpx
 
 from core.core.env_loader import load_env_file
@@ -177,6 +179,38 @@ def provider_error_result(provider: str, error: Exception | str) -> dict[str, An
     }
 
 
+
+
+async def ping_ai_kernel_models(prompt: str) -> dict[str, Any]:
+    base_url = (os.getenv('AI_KERNEL_BASE_URL') or 'http://127.0.0.1:8012/v1').rstrip('/')
+    api_key = os.getenv('AI_KERNEL_API_KEY') or 'local'
+    result = {'provider': 'ai_kernel', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        try:
+            resp = await client.get(f'{base_url}/models', headers=auth_headers(api_key))
+        except Exception as exc:
+            return provider_error_result('ai_kernel', exc)
+        payload = resp.json() if resp.status_code == 200 else {}
+        models = [str(item.get('id') or '').strip() for item in (payload.get('data') or []) if str(item.get('id') or '').strip()] if isinstance(payload, dict) else []
+        for model in models:
+            row = {'model': model}
+            try:
+                response = await client.post(f'{base_url}/chat/completions', headers=auth_headers(api_key), json={'model': model, 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': 8})
+                row['status_code'] = response.status_code
+                if response.status_code < 400:
+                    row['ok'] = True
+                    row['response_sample'] = extract_text(response.json())[:120]
+                    result['ok'] += 1
+                else:
+                    row['ok'] = False
+                    row['error'] = response.text[:240]
+                    result['failed'] += 1
+            except Exception as exc:
+                row['ok'] = False
+                row['error'] = str(exc)
+                result['failed'] += 1
+            result['models'].append(row)
+    return result
 async def ping_openai_models(prompt: str) -> dict[str, Any]:
     config = resolve_openai_provider_config()
     result = {'provider': 'openai', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False}
@@ -435,45 +469,77 @@ async def ping_antigravity(prompt: str) -> dict[str, Any]:
     return result
 
 
-async def run_all_models(prompt: str, output_dir: Path, *, skip_mistral_non_chat: bool = True) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+async def run_all_models(prompt: str, output_dir: Path, *, skip_mistral_non_chat: bool = True, only_provider: str | None = None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     report: dict[str, Any] = {}
-    try:
-        report['openai'] = await ping_openai_models(prompt)
-    except Exception as exc:
-        report['openai'] = provider_error_result('openai', exc)
-    try:
-        report['mistral'] = await ping_mistral_models(prompt, skip_non_chat=skip_mistral_non_chat)
-    except Exception as exc:
-        report['mistral'] = provider_error_result('mistral', exc)
-    try:
-        report['local_llm'] = await ping_local_llm_models(prompt)
-    except Exception as exc:
-        report['local_llm'] = provider_error_result('local_llm', exc)
-    try:
-        mimo_report = await ping_mimo_models(prompt, output_dir)
-    except Exception as exc:
-        mimo_report = provider_error_result('mimo', exc)
-    try:
-        report['antigravity'] = await ping_antigravity(prompt)
-    except Exception as exc:
-        report['antigravity'] = provider_error_result('antigravity', exc)
+    selected = str(only_provider or '').strip() or None
+
+    if selected in {None, 'openai'}:
+        try:
+            report['openai'] = await ping_openai_models(prompt)
+        except Exception as exc:
+            report['openai'] = provider_error_result('openai', exc)
+    else:
+        report['openai'] = {'provider': 'openai', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+
+    if selected in {None, 'mistral'}:
+        try:
+            report['mistral'] = await ping_mistral_models(prompt, skip_non_chat=skip_mistral_non_chat)
+        except Exception as exc:
+            report['mistral'] = provider_error_result('mistral', exc)
+    else:
+        report['mistral'] = {'provider': 'mistral', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+
+    if selected in {None, 'local_llm'}:
+        try:
+            report['local_llm'] = await ping_local_llm_models(prompt)
+        except Exception as exc:
+            report['local_llm'] = provider_error_result('local_llm', exc)
+    else:
+        report['local_llm'] = {'provider': 'local_llm', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+
+    if selected in {None, 'mimo'}:
+        try:
+            mimo_report = await ping_mimo_models(prompt, output_dir)
+        except Exception as exc:
+            mimo_report = provider_error_result('mimo', exc)
+    else:
+        mimo_report = {'provider': 'mimo', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+
+    if selected in {None, 'antigravity'}:
+        try:
+            report['antigravity'] = await ping_antigravity(prompt)
+        except Exception as exc:
+            report['antigravity'] = provider_error_result('antigravity', exc)
+    else:
+        report['antigravity'] = {'provider': 'antigravity', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+
+    if selected in {None, 'ai_kernel'}:
+        try:
+            report['ai_kernel'] = await ping_ai_kernel_models(prompt)
+        except Exception as exc:
+            report['ai_kernel'] = provider_error_result('ai_kernel', exc)
+    else:
+        report['ai_kernel'] = {'provider': 'ai_kernel', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+
     failed, usable = build_artifacts(report, mimo_report)
     return report, mimo_report, {'failed': failed, 'mimo_usable': usable}
 
 
 async def main_async(args: argparse.Namespace) -> int:
     output_dir = resolve_output_dir(args.output_dir)
-    report, mimo_report, artifacts = await run_all_models(args.prompt, output_dir, skip_mistral_non_chat=not args.include_mistral_non_chat)
+    report, mimo_report, artifacts = await run_all_models(args.prompt, output_dir, skip_mistral_non_chat=not args.include_mistral_non_chat, only_provider=args.only_provider)
     write_json(output_dir / 'model_ping_report.json', report)
     write_json(output_dir / 'mimo_model_ping_report.json', mimo_report)
     write_json(output_dir / 'failed_models_by_provider.json', artifacts['failed'])
     write_json(output_dir / 'mimo_usable_models.json', artifacts['mimo_usable'])
+    ai_kernel_report = report.get('ai_kernel') or {'ok': 0, 'failed': 0, 'models': []}
     summary = {
         'openai': {'ok': report['openai']['ok'], 'failed': report['openai']['failed'], 'total': len(report['openai']['models'])},
         'mistral': {'ok': report['mistral']['ok'], 'failed': report['mistral']['failed'], 'total': len(report['mistral']['models']), 'skipped_non_chat': report['mistral'].get('skipped_non_chat', 0)},
         'local_llm': {'ok': report['local_llm']['ok'], 'failed': report['local_llm']['failed'], 'total': len(report['local_llm']['models'])},
         'mimo': {'ok': mimo_report['ok'], 'failed': mimo_report['failed'], 'total': len(mimo_report['models'])},
         'antigravity': {'ok': report['antigravity']['ok'], 'failed': report['antigravity']['failed'], 'total': len(report['antigravity']['models'])},
+        'ai_kernel': {'ok': ai_kernel_report['ok'], 'failed': ai_kernel_report['failed'], 'total': len(ai_kernel_report['models'])},
     }
     print(json.dumps({'summary': summary, 'output_dir': str(output_dir)}, ensure_ascii=True, indent=2))
     return 0
@@ -484,6 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--prompt', default=PROMPT, help='Prompt to send to each model.')
     parser.add_argument('--output-dir', default=None, help='Directory for JSON reports.')
     parser.add_argument('--include-mistral-non-chat', action='store_true', help='Do not skip known non-chat Mistral models.')
+    parser.add_argument('--only-provider', choices=PROVIDER_CHOICES, default=None, help='Run the sweep only for one provider, for example mistral.')
     return parser
 
 

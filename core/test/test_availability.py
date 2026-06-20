@@ -153,3 +153,44 @@ def test_check_mimo_auth_failed_from_runtime_snapshot(mock_mimo: MagicMock) -> N
     assert health.provider == "mimo"
     assert health.status == ProviderStatus.AUTH_FAILED
     assert health.error == "mimo_auth_degraded"
+
+
+def test_check_mistral_uses_snapshot_models_when_live_probe_fails(monkeypatch) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: _FakeSocket())
+
+    class _Manager:
+        api_key = "mistral_nonsecret_key_value_1234567890"
+        def status(self):
+            return {"ready": False, "models": [], "api_probe": {"status_code": 500}, "inventory_source": "live_error", "registry": {"source": "cache"}}
+
+    monkeypatch.setattr("core.core.availability.MistralManager", _Manager)
+    avail = ModelAvailability()
+    monkeypatch.setattr(avail.inventory, "provider_snapshot", lambda provider: {"provider": provider, "models": ["mistral-large-latest"], "source": "snapshot"})
+
+    health = avail.check_mistral()
+
+    assert health.status == ProviderStatus.DEGRADED
+    assert health.diagnostics["models"] == ["mistral-large-latest"]
+    assert health.diagnostics["inventory_source"] == "snapshot"
+
+
+def test_check_openai_uses_snapshot_models_when_registry_empty(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: _FakeSocket())
+
+    class _Registry:
+        def get_models(self, force_refresh=False):
+            return []
+        def diagnostics(self):
+            return {"ok": False, "error_type": "RuntimeError", "error_message": "empty"}
+
+    monkeypatch.setattr("core.core.availability.OpenAIModelRegistry", _Registry)
+    avail = ModelAvailability()
+    monkeypatch.setattr(avail.inventory, "provider_snapshot", lambda provider: {"provider": provider, "models": ["gpt-5-mini"], "source": "snapshot"})
+
+    health = avail.check_openai()
+
+    assert health.status == ProviderStatus.HEALTHY
+    assert health.diagnostics["models"] == ["gpt-5-mini"]
+    assert health.diagnostics["inventory_source"] == "snapshot"

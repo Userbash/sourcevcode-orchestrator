@@ -58,7 +58,7 @@ class ExternalAIBridge:
             for user_home in var_home.glob("*"):
                 if user_home.is_dir() and user_home not in search_roots:
                     search_roots.append(user_home)
-        for candidate in ("agy", "antigravity"):
+        for candidate in ("agy", "antigravity", "gemini"):
             resolved = shutil.which(candidate)
             if resolved:
                 candidate_paths.append(resolved)
@@ -69,6 +69,7 @@ class ExternalAIBridge:
                 ])
         candidate_paths.extend([
             "/usr/local/bin/agy",
+            "/usr/local/bin/gemini",
             "/app/core/bin/agy",
         ])
         for resolved in candidate_paths:

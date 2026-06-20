@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Model Definitions
 MODEL_QWEN_CODER = "qwen2.5:32b-instruct-q4_k_m"
-MODEL_DEEPSEEK_R1 = "deepseek-r1:14b"
 MODEL_LOCAL_SMALL = "qwen-2.5-7b-instruct"
+MODEL_AI_KERNEL_QWEN36 = os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"
 
 BASE_HIGH_RISK_KEYWORDS = ["security", "auth", "rbac", "payment", "secret", "production", "migration", "destructive"]
 
@@ -114,7 +114,20 @@ class ModelSelector:
         return complexity in {Complexity.CRITICAL, Complexity.HIGH} or task.priority == Priority.CRITICAL or risk.high_risk
 
     @staticmethod
+    def _ai_kernel_enabled() -> bool:
+        return os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
     def _local_code_choice(complexity: Complexity) -> ModelChoice:
+        if ModelSelector._ai_kernel_enabled():
+            return ModelChoice(
+                MODEL_AI_KERNEL_QWEN36,
+                "ai_kernel",
+                complexity,
+                params=ModelParams(temperature=0.15, context_depth=4),
+                requires_secondary_review=False,
+                reason="standard_code_ai_kernel_qwen36",
+            )
         return ModelChoice(
             MODEL_QWEN_CODER,
             "local",
@@ -128,21 +141,21 @@ class ModelSelector:
     def _local_planning_choice(task: Task, complexity: Complexity) -> ModelChoice:
         if task.type == TaskType.REVIEW:
             return ModelChoice(
-                MODEL_DEEPSEEK_R1,
+                MODEL_LOCAL_SMALL,
                 "local",
                 complexity,
                 params=ModelParams(temperature=0.2, context_depth=4),
                 requires_secondary_review=True,
-                reason="review_deepseek_local",
+                reason="review_qwen_local",
             )
 
         return ModelChoice(
-            MODEL_DEEPSEEK_R1,
+            MODEL_LOCAL_SMALL,
             "local",
             complexity,
             params=ModelParams(temperature=0.6, context_depth=3),
             requires_secondary_review=False,
-            reason="planning_docs_deepseek_local",
+            reason="planning_docs_qwen_local",
         )
 
     def _local_policy_choice(self, task: Task, complexity: Complexity, advisory_context: dict[str, Any] | None) -> ModelChoice | None:

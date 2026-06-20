@@ -62,7 +62,7 @@ def _resolve_cli_command() -> list[str] | None:
         for user_home in var_home.glob("*"):
             if user_home.is_dir() and user_home not in search_roots:
                 search_roots.append(user_home)
-    for candidate in ("agy", "antigravity"):
+    for candidate in ("agy", "antigravity", "gemini"):
         resolved = shutil.which(candidate)
         if resolved:
             candidate_paths.append(resolved)

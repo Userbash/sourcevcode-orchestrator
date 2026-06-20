@@ -1,6 +1,43 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
+
+import core.core.local_model_runtime as local_model_runtime
+
+
+if not hasattr(local_model_runtime, "LocalModelRuntime"):
+    class _CompatLocalModelRuntime(local_model_runtime.LocalModelClient):
+        @property
+        def current_endpoint(self) -> str:
+            return self.endpoint
+
+        def check_health_sync(self, model_name: str | None = None):
+            return self.health(model_name)
+
+        def generate_sync(self, prompt: str, model_name: str | None = None, *, system: str | None = None, options: dict[str, object] | None = None, timeout_sec: float | None = None):
+            return self.generate(local_model_runtime.LocalModelGenerationRequest(prompt=prompt, model_name=model_name, system=system, options=options, timeout_sec=timeout_sec))
+
+        def pull_model_sync(self, model_name: str | None = None, timeout_sec: float | None = None) -> bool:
+            original = self.config
+            if timeout_sec is not None:
+                self.config = replace(self.config, management_timeout_sec=timeout_sec)
+            try:
+                health = self.pull_model(model_name)
+            finally:
+                self.config = original
+            return bool(health.ok)
+
+        def unload_model_sync(self, model_name: str | None = None) -> bool:
+            return bool(self.unload_model(model_name).ok)
+
+    local_model_runtime.LocalModelRuntime = _CompatLocalModelRuntime
+
+if not hasattr(local_model_runtime.LocalModelRuntimeConfig, "default_model"):
+    local_model_runtime.LocalModelRuntimeConfig.default_model = property(lambda self: self.model_name)
+
+if not hasattr(local_model_runtime.LocalModelRuntimeConfig, "generate_timeout_sec"):
+    local_model_runtime.LocalModelRuntimeConfig.generate_timeout_sec = property(lambda self: self.generation_timeout_sec)
 
 from core.core.local_llm_module import LocalLLMModule
 from core.core.orchestrator import Orchestrator

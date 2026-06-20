@@ -18,6 +18,7 @@ from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
 from core.agents.local_llm_agent import LocalLLMAgent
+from core.agents.ai_kernel_agent import AIKernelAgent
 from core.core.orchestration_config import OrchestrationConfig
 from core.core.dependency_manager import DependencyManager
 from core.core.orchestrator import Orchestrator
@@ -72,6 +73,7 @@ async def main(argv: list[str] | None = None) -> None:
     orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
     orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
     orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")), agent_type="custom", critical=False, model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"), provider="local")
+    orchestrator.attach_local_agent("ai-kernel-qwen36-1", AIKernelAgent("ai-kernel-qwen36-1"), agent_type="custom", critical=False, model_name=os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"), provider="ai_kernel")
 
     print(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")
     try:

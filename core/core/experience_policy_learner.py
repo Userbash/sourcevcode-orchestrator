@@ -37,7 +37,7 @@ class ExperiencePolicyLearner:
             return 'mistral'
         if normalized.startswith('claude'):
             return 'anthropic'
-        if any(token in normalized for token in ('qwen', 'deepseek', 'llama', 'gemma')):
+        if any(token in normalized for token in ('qwen', 'llama', 'gemma')):
             return 'local'
         return 'local'
 

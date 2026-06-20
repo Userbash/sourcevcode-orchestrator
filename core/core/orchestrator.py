@@ -46,7 +46,10 @@ from .kernel_module_manager import KernelModuleManager
 from .orchestrator_control_module import OrchestratorControlModule
 from .qt_dev_box_module import QtDevBoxModule
 from .model_usage_module import ModelUsageModule
+from .local_model_manager_module import LocalModelManagerModule
 from .provider_budget_router import ProviderBudgetRouter
+from .provider_inventory_service import ProviderInventoryService
+from .model_replacement_policy import ModelReplacementPolicy
 from .cold_boot_module import ColdBootModule
 from .voice_listener_module import VoiceListenerModule
 from .kpi_event_logger import KPIEventLogger
@@ -153,7 +156,9 @@ class Orchestrator:
         self.console.emit(event_name, str(payload))
 
     def module_state(self) -> dict[str, Any]:
-        return self.module_manager.finalize()
+        state = self.module_manager.finalize()
+        state["provider_inventory"] = self._provider_inventory_snapshot if isinstance(self._provider_inventory_snapshot, dict) else {"updated_at": None, "providers": {}}
+        return state
 
     def query_state(self, module_name: str, key: str) -> Any:
         return self.module_state().get(module_name, {}).get(key)
@@ -545,6 +550,9 @@ class Orchestrator:
         if hasattr(self.healthcheck, "set_module_state_source"):
             self.healthcheck.set_module_state_source(self.module_state)
         self.availability = ModelAvailability()
+        self.provider_inventory = ProviderInventoryService()
+        self.model_replacement_policy = ModelReplacementPolicy()
+        self._provider_inventory_snapshot: dict[str, Any] = self.provider_inventory.read_snapshot()
         self.feedback = components.feedback
         self.metrics = components.metrics
         self.kpi = components.kpi
@@ -590,8 +598,11 @@ class Orchestrator:
         self._training_consolidation_queue: list[dict[str, Any]] = []
         self._training_consolidation_task: asyncio.Task[None] | None = None
         self._kpi_dashboard_task: asyncio.Task[None] | None = None
+        self._provider_inventory_task: asyncio.Task[None] | None = None
+        self._provider_inventory_stop = threading.Event()
         self._training_consolidation_interval_sec = max(60, int(self.orchestration_config.training_consolidation_interval_sec))
         self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
+        self._provider_inventory_refresh_interval_sec = max(60, int(getattr(self.orchestration_config, "provider_inventory_refresh_interval_sec", 1800)))
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
         self.mimo_director = MimoOrchestrationDirector()
         self.experience_policy_learner = ExperiencePolicyLearner()
@@ -611,6 +622,7 @@ class Orchestrator:
         self.module_manager.register(OrchestratorControlModule())
         self.module_manager.register(MemoryControlModule())
         self.module_manager.register(ModelUsageModule())
+        self.module_manager.register(LocalModelManagerModule())
         self.module_manager.register(ModelAvailabilityModule())
         self.module_manager.register(AntigravityStatusModule())
         self.mimo_director.set_status_source(self._provider_health_snapshot)
@@ -642,10 +654,15 @@ class Orchestrator:
         self.module_manager.load("orchestrator_control")
         self.module_manager.load("memory_control")
         self.module_manager.load("model_usage")
+        self.module_manager.load("local_model_manager")
         self.mimo_director.set_budget_module(self.module_manager.get_module("model_usage"))
         self.module_manager.load("unified_vfs")
         self.mimo_director.set_vfs_source(self.module_manager.get_module("unified_vfs"))
         self.mimo_director.safe_sync()
+        try:
+            self._refresh_provider_inventory_snapshot(force_refresh=False)
+        except Exception as exc:
+            self.console.emit("INVENTORY", f"initial provider inventory refresh failed: {exc}")
         self.module_manager.load("model_availability")
         self.module_manager.load("smart_decomposer")
         self.module_manager.load("prompt_optimizer")
@@ -811,6 +828,86 @@ class Orchestrator:
             await asyncio.sleep(self._training_consolidation_interval_sec)
             self._flush_training_consolidation_queue()
 
+    def _update_model_replacement_snapshot(self) -> dict[str, Any]:
+        participation = self._provider_inventory_snapshot.get("participation", {}) if isinstance(self._provider_inventory_snapshot, dict) else {}
+        replacement = self.model_replacement_policy.build_snapshot(participation if isinstance(participation, dict) else {})
+        if not isinstance(self._provider_inventory_snapshot, dict):
+            self._provider_inventory_snapshot = {"updated_at": int(__import__("time").time()), "providers": {}, "participation": {}}
+        self._provider_inventory_snapshot["replacement_policy"] = replacement
+        return replacement
+
+    def _refresh_provider_inventory_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        payload = self.provider_inventory.refresh(force_refresh=force_refresh)
+        participation = self.provider_inventory.build_participation_snapshot(self.registry.list_agents())
+        self._provider_inventory_snapshot = {"updated_at": int(__import__("time").time()), "providers": payload, "participation": participation}
+        self._update_model_replacement_snapshot()
+        return self._provider_inventory_snapshot
+
+    def _apply_model_replacement_policy(
+        self,
+        task: Task,
+        capability: str,
+        choice: Any,
+        agent_id: str,
+        agent_record: Any,
+        module_context: dict[str, object],
+        *,
+        failure_reason: str | None = None,
+        exclude_agents: set[str] | None = None,
+        allow_same_agent: bool = True,
+    ) -> tuple[str, Any, dict[str, Any] | None]:
+        participation = self._provider_inventory_snapshot.get("participation", {}) if isinstance(self._provider_inventory_snapshot, dict) else {}
+        current_provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
+        current_model = str(getattr(task, "assigned_model", "") or (agent_record.model_name if agent_record else choice.model_name) or "").strip()
+        recommendation = self.model_replacement_policy.recommend_replacement(
+            task,
+            current_provider,
+            current_model,
+            participation if isinstance(participation, dict) else {},
+            failure_reason=failure_reason,
+        )
+        if not recommendation:
+            return agent_id, agent_record, None
+
+        target_provider = self._normalize_provider(str(recommendation.get("provider") or current_provider))
+        target_model = str(recommendation.get("model_name") or "").strip()
+        if not target_model:
+            return agent_id, agent_record, None
+
+        target_agent_id = agent_id
+        target_agent_record = agent_record
+        exclude = set(exclude_agents or set())
+        if allow_same_agent and agent_id in exclude:
+            exclude.remove(agent_id)
+        if target_provider != current_provider:
+            candidate_id = self._select_agent_by_provider_preference(capability, [target_provider], exclude=exclude, priority=task.priority)
+            if not candidate_id:
+                return agent_id, agent_record, None
+            target_agent_id = candidate_id
+            target_agent_record = self.registry.get(candidate_id)
+            if target_agent_record is None:
+                return agent_id, agent_record, None
+
+        task.assigned_model = target_model
+        module_context["assigned_model"] = target_model
+        module_context["replacement_policy"] = recommendation
+        module_context["model"] = target_model
+        module_context["provider"] = target_agent_record.provider if target_agent_record else target_provider
+        module_context["agent_id"] = target_agent_id
+        self.console.emit(
+            "MODEL_REPLACEMENT",
+            f"task_id={task.task_id} from={current_provider}/{current_model} to={target_provider}/{target_model} reason={recommendation.get('reason') or 'replacement_due'}",
+        )
+        return target_agent_id, target_agent_record, recommendation
+
+    async def _provider_inventory_loop(self) -> None:
+        while not self._provider_inventory_stop.is_set():
+            try:
+                self._refresh_provider_inventory_snapshot(force_refresh=True)
+            except Exception as exc:
+                self.log("warning", f"[INVENTORY] provider refresh failed: {exc}")
+            await asyncio.sleep(self._provider_inventory_refresh_interval_sec)
+
     def _refresh_kpi_dashboard(self) -> dict[str, Any]:
         kpi_log = Path(getattr(self.kpi_events, "file_path", "memory_store/kpi_events.jsonl"))
         rolling = Path("core/mimo/profiles/rolling_kpi_store.json")
@@ -913,6 +1010,12 @@ class Orchestrator:
     def _memory_control_module(self) -> MemoryControlModule | None:
         module = self.module_manager.get_module("memory_control")
         if isinstance(module, MemoryControlModule):
+            return module
+        return None
+
+    def _local_model_manager_module(self) -> LocalModelManagerModule | None:
+        module = self.module_manager.get_module("local_model_manager")
+        if isinstance(module, LocalModelManagerModule):
             return module
         return None
 
@@ -1707,6 +1810,19 @@ class Orchestrator:
         module_context["model"] = agent_record.model_name if agent_record else choice.model_name
         module_context["fallback"] = fallback
 
+        agent_id, agent_record, replacement = self._apply_model_replacement_policy(
+            task,
+            capability,
+            choice,
+            agent_id,
+            agent_record,
+            module_context,
+            allow_same_agent=True,
+        )
+        if replacement is not None:
+            fallback = True
+            fallback_count += 1
+
         self.console.emit(
             "ROUTING",
             f"task_id={task.task_id} router_agent={agent_id} router_provider={agent_record.provider if agent_record else '-'} "
@@ -1853,9 +1969,18 @@ class Orchestrator:
 
             if result.status == TaskStatus.FAILED:
                 source_provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
+                failed_model_name = str(result.model_name or getattr(task, 'assigned_model', '') or module_context.get("model") or choice.model_name or "")
                 if classified:
-                    self.provider_budget_router.mark_failure(task, source_provider, classified, detail="; ".join(result_errors), model_name=str(result.model_name or module_context.get("model") or choice.model_name or ""))
+                    self.provider_budget_router.mark_failure(task, source_provider, classified, detail="; ".join(result_errors), model_name=failed_model_name)
                     self.availability.record_failure(source_provider, classified, result_errors)
+                    self.model_replacement_policy.register_failure(source_provider, failed_model_name, classified)
+                    manager = self._local_model_manager_module()
+                    if manager is not None:
+                        try:
+                            manager.handle_failure(source_provider, failed_model_name, result_errors, task_id=task.task_id)
+                        except Exception as exc:
+                            self.log("warning", f"[LOCAL_MODEL_MANAGER] failure hook failed: {exc}")
+                    self._update_model_replacement_snapshot()
 
                 # Proactive Soft Fallback for all critical/high failures or quota issues
                 should_fallback = (
@@ -1865,16 +1990,30 @@ class Orchestrator:
                 )
 
                 if should_fallback:
-                    fallback_chain = self.provider_budget_router.preferred_providers(task, choice)
-                    # Exclude the failed agent
-                    fallback_agent_id = self._select_agent_by_provider_preference(capability, fallback_chain, exclude={agent_id}, priority=task.priority)
-                    if fallback_agent_id:
-                        self.console.emit("FALLBACK", f"task_id={task.task_id} from={agent_id} to={fallback_agent_id} reason={classified or 'failure'}")
+                    retry_agent_id, retry_agent_record, replacement = self._apply_model_replacement_policy(
+                        task,
+                        capability,
+                        choice,
+                        agent_id,
+                        agent_record,
+                        module_context,
+                        failure_reason=classified or 'probe_failed',
+                        exclude_agents=set(),
+                        allow_same_agent=True,
+                    )
+                    if replacement is None:
+                        fallback_chain = self.provider_budget_router.preferred_providers(task, choice)
+                        fallback_agent_id = self._select_agent_by_provider_preference(capability, fallback_chain, exclude={agent_id}, priority=task.priority)
+                        retry_agent_id = fallback_agent_id or agent_id
+                        retry_agent_record = self.registry.get(retry_agent_id) if fallback_agent_id else agent_record
+                    if retry_agent_id:
+                        self.console.emit("FALLBACK", f"task_id={task.task_id} from={agent_id} to={retry_agent_id} reason={classified or 'failure'}")
                         fallback_count += 1
-                        fallback_agent = self.local_agents.get(fallback_agent_id)
+                        fallback_agent = self.local_agents.get(retry_agent_id)
                         if fallback_agent:
+                            agent_id = retry_agent_id
+                            agent_record = retry_agent_record or agent_record
                             result = fallback_agent.run(task, memory_context=memory_context)
-                            # Classify again for metrics
                             result_errors = " ".join(result.errors or [])
                             if result_errors:
                                 try:
@@ -1885,6 +2024,8 @@ class Orchestrator:
             else:
                 success_provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
                 self.provider_budget_router.register_success(task, success_provider)
+                self.model_replacement_policy.register_success(success_provider, str(result.model_name or getattr(task, 'assigned_model', '') or module_context.get("model") or choice.model_name or ""))
+                self._update_model_replacement_snapshot()
             quality = self.quality.analyze(task, result)
             if agent_record:
                 agent_record.metrics.quality_score = quality.score
@@ -2227,12 +2368,20 @@ class Orchestrator:
             except Exception as exc:
                 self.log("warning", f"[KPI] initial dashboard refresh failed: {exc}")
             self._kpi_dashboard_task = asyncio.create_task(self._kpi_dashboard_loop())
+        if self._provider_inventory_task is None or self._provider_inventory_task.done():
+            self._provider_inventory_stop.clear()
+            try:
+                self._refresh_provider_inventory_snapshot(force_refresh=True)
+            except Exception as exc:
+                self.log("warning", f"[INVENTORY] initial provider refresh failed: {exc}")
+            self._provider_inventory_task = asyncio.create_task(self._provider_inventory_loop())
         listener = TaskListener(self)
         try:
             await listener.start()
         finally:
             self._training_consolidation_stop.set()
             self._kpi_dashboard_stop.set()
+            self._provider_inventory_stop.set()
             if self._training_consolidation_task is not None:
                 self._training_consolidation_task.cancel()
                 try:
@@ -2245,6 +2394,14 @@ class Orchestrator:
                 self._kpi_dashboard_task.cancel()
                 try:
                     await self._kpi_dashboard_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            if self._provider_inventory_task is not None:
+                self._provider_inventory_task.cancel()
+                try:
+                    await self._provider_inventory_task
                 except asyncio.CancelledError:
                     pass
                 except Exception:

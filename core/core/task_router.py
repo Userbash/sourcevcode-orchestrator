@@ -281,7 +281,7 @@ class TaskRouter:
         def _hint(agent: AgentRecord) -> str:
             return f"{agent.id} {agent.model_name} {agent.provider}".lower()
 
-        antigravity_agents = [agent for agent in candidates if any(token in _hint(agent) for token in ("antigravity", "deepseek"))]
+        antigravity_agents = [agent for agent in candidates if "antigravity" in _hint(agent)]
         mistral_agents = [agent for agent in candidates if "mistral" in _hint(agent)]
         local_agents = [
             agent

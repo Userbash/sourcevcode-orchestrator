@@ -87,7 +87,7 @@ def test_model_selector_openai_auto_is_opt_in(monkeypatch):
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     legacy = ModelSelector().select(task)
     assert legacy.provider == "local"
-    assert legacy.model_name == "deepseek-r1:14b"
+    assert legacy.model_name == "qwen-2.5-7b-instruct"
 
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")

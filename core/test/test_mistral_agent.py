@@ -51,3 +51,27 @@ def test_mistral_agent_routes_review_to_large(monkeypatch):
 
     assert result.status.value == "done"
     assert captured["model"] == "mistral-large-latest"
+
+
+
+def test_mistral_agent_prefers_assigned_model_override(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["model"] = json["model"]
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        response.raise_for_status.return_value = None
+        return response
+
+    monkeypatch.setattr("core.agents.mistral_agent.httpx.post", fake_post)
+    agent = MistralAgent("mistral-1", _Security())
+    task = _task(TaskType.CODE, "implement backend api client")
+    task.assigned_model = "mistral-medium-latest"
+
+    result = agent.run(task)
+
+    assert result.status.value == "done"
+    assert captured["model"] == "mistral-medium-latest"
+    assert result.model_name == "mistral-medium-latest"

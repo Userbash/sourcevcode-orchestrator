@@ -5,7 +5,7 @@ import asyncio
 from pydantic import BaseModel
 
 from core.core.kernel_module_manager import KernelModuleManager
-from core.core.model_selector import MODEL_DEEPSEEK_R1, ModelSelector
+from core.core.model_selector import MODEL_LOCAL_SMALL, ModelSelector
 from core.core.models import Complexity, Task, TaskContext, TaskInput, TaskType
 from core.core.reasoning_module import ReasoningModule
 from core.core.risk_advisor_module import RiskAssessment
@@ -99,6 +99,9 @@ def test_kernel_module_manager_waits_for_async_lifecycle_hooks():
 
 def test_reasoning_local_fallback_strips_markdown_json(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("ANTIGRAVITY_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -134,6 +137,9 @@ def test_reasoning_local_fallback_normalizes_risk_assessment_payload(monkeypatch
 def test_model_selector_does_not_route_to_openai_without_any_cloud_keys(monkeypatch):
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "false")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CODEX_SALE_BASE_URL", raising=False)
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("ANTIGRAVITY_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -142,4 +148,4 @@ def test_model_selector_does_not_route_to_openai_without_any_cloud_keys(monkeypa
     choice = ModelSelector().select(_task())
 
     assert choice.provider == "local"
-    assert choice.model_name == MODEL_DEEPSEEK_R1
+    assert choice.model_name == MODEL_LOCAL_SMALL

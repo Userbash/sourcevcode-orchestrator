@@ -20,7 +20,7 @@ VISION_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".svg")
 class CodexAgent(BaseAgent):
     """
     CodexAgent: specialized for high-quality code generation and refactoring.
-    Can use OpenAI-compatible, Mistral (Codestral), or DeepSeek based on available API keys.
+    Can use OpenAI-compatible or Mistral (Codestral) based on available API keys.
     """
 
     def __init__(self, agent_id: str = "codexagent") -> None:
@@ -30,7 +30,6 @@ class CodexAgent(BaseAgent):
         load_env_file(".env.gemini.local", override=True)
         self.openai_key = os.getenv("OPENAI_API_KEY")
         self.mistral_key = os.getenv("MISTRAL_API_KEY")
-        self.deepseek_key = os.getenv("DEEPSEEK_API_KEY")
         self._provider = "unknown"
         self._model = "unknown"
         self._provider_preference = (os.getenv("AI_BRIDGE_CODEX_PROVIDER") or os.getenv("CODEX_PROVIDER") or "auto").strip().lower()
@@ -47,15 +46,7 @@ class CodexAgent(BaseAgent):
             self._provider = "openai"
             self._model = os.getenv("CODEX_OPENAI_MODEL", "gpt-5-mini")
             return
-        if preference == "deepseek" and self.deepseek_key:
-            self._provider = "deepseek"
-            self._model = os.getenv("CODEX_DEEPSEEK_MODEL", "deepseek-coder")
-            return
-
-        if self.deepseek_key and preference == "auto":
-            self._provider = "deepseek"
-            self._model = os.getenv("CODEX_DEEPSEEK_MODEL", "deepseek-coder")
-        elif self.mistral_key:
+        if self.mistral_key:
             self._provider = "mistral"
             self._model = os.getenv("CODEX_MISTRAL_MODEL", os.getenv("MISTRAL_MODEL", "codestral-latest"))
         elif self.openai_key:
@@ -85,7 +76,7 @@ class CodexAgent(BaseAgent):
             return result
 
         if self._provider == "none":
-            return self.result(task, "No API key (OpenAI-compatible, Mistral, or DeepSeek) for Codex", TaskStatus.FAILED, errors=["OPENAI_API_KEY, MISTRAL_API_KEY or DEEPSEEK_API_KEY missing"])
+            return self.result(task, "No API key (OpenAI-compatible or Mistral) for Codex", TaskStatus.FAILED, errors=["OPENAI_API_KEY or MISTRAL_API_KEY missing"])
 
         self.active_tasks += 1
         try:
@@ -93,8 +84,6 @@ class CodexAgent(BaseAgent):
 
             if self._provider == "openai":
                 return self._run_openai(task, prompt)
-            if self._provider == "deepseek":
-                return self._run_deepseek(task, prompt)
             return self._run_mistral(task, prompt)
         except Exception as e:
             self.last_error = str(e)
@@ -177,19 +166,3 @@ class CodexAgent(BaseAgent):
             content = data["choices"][0]["message"]["content"] or ""
             return self.result(task, content, TaskStatus.DONE, 0.88)
 
-    def _run_deepseek(self, task: Task, prompt: str) -> AgentResult:
-        endpoint = "https://api.deepseek.com/chat/completions"
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
-                endpoint,
-                headers={"Authorization": f"Bearer {self.deepseek_key}"},
-                json={
-                    "model": self._model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            content = data["choices"][0]["message"]["content"] or ""
-            return self.result(task, content, TaskStatus.DONE, 0.9)

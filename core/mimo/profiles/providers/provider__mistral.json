@@ -13,8 +13,8 @@
       "vfs": 1.0
     },
     "mistral": {
-      "quality": 0.98,
-      "budget": 1.1,
+      "quality": 1.02,
+      "budget": 1.03,
       "vfs": 1.03
     }
   },
@@ -23,27 +23,27 @@
       "quality": 1.04,
       "budget": 0.97
     },
-    "deepseek": {
-      "quality": 1.0,
-      "budget": 1.0
-    },
     "qwen": {
       "quality": 1.0,
       "budget": 1.06
+    },
+    "mistral": {
+      "quality": 1.08,
+      "budget": 0.98
     }
   },
   "thresholds": {
-    "success_rate": 0.74,
-    "avg_latency_ms": 2200,
-    "quality_min_confidence": 0.72
+    "success_rate": 0.8,
+    "avg_latency_ms": 2000,
+    "quality_min_confidence": 0.78
   },
-  "default_context_depth": 2,
+  "default_context_depth": 4,
   "budget_pressure": {
-    "high": 1100,
-    "medium": 2400
+    "high": 1500,
+    "medium": 3200
   },
   "quality_pressure": {
-    "high": 0.78,
-    "medium": 0.68
+    "high": 0.84,
+    "medium": 0.74
   }
 }

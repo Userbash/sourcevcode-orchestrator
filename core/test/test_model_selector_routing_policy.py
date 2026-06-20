@@ -8,7 +8,7 @@ import pytest
 
 from core.core.agent_registry import AgentRegistry
 from core.core.load_balancer import LoadBalancer
-from core.core.model_selector import ModelSelector, MODEL_QWEN_CODER, MODEL_DEEPSEEK_R1, MODEL_LOCAL_SMALL
+from core.core.model_selector import ModelSelector, MODEL_AI_KERNEL_QWEN36, MODEL_QWEN_CODER, MODEL_LOCAL_SMALL
 from core.core.models import AgentStatus, Complexity, Task, TaskContext, TaskInput, TaskType
 from core.core.task_router import TaskRouter
 
@@ -58,7 +58,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "custom",
         "local://antigravity-cli",
         ["docs", "research", "review"],
-        model_name=MODEL_DEEPSEEK_R1,
+        model_name=MODEL_LOCAL_SMALL,
         provider="local",
     )
     registry.register(
@@ -103,7 +103,7 @@ def _test_openai_env() -> Iterator[None]:
         "OPENAI_CRITICAL_MODELS": os.environ.get("OPENAI_CRITICAL_MODELS"),
     }
     os.environ["AI_BRIDGE_OPENAI_AUTO_MODEL"] = "true"
-    os.environ["OPENAI_API_KEY"] = "sk-test"
+    os.environ["OPENAI_API_KEY"] = "openai_usable_key_value_1234567890"
     os.environ["OPENAI_HIGH_MODELS"] = "gpt-5-mini,gpt-5.1"
     os.environ["OPENAI_CRITICAL_MODELS"] = "gpt-5.2-codex,gpt-5.1-codex-max"
     try:
@@ -150,10 +150,10 @@ def test_selector_applies_experience_policy_override():
     class Learner:
         def recommend_model(self, *, task_type: str, allowed_providers: set[str] | None = None, min_samples: int = 3, min_score: float = 0.65):
             assert task_type == "code"
-            assert allowed_providers == {"local"}
+            assert allowed_providers == {"ai_kernel"}
             return {
-                "model_name": MODEL_DEEPSEEK_R1,
-                "provider": "local",
+                "model_name": "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m:alt",
+                "provider": "ai_kernel",
                 "score": 0.91,
                 "samples": 6,
             }
@@ -165,8 +165,8 @@ def test_selector_applies_experience_policy_override():
     task = _task(TaskType.CODE, "refactor service module", Complexity.MEDIUM)
     choice = selector.select(task)
 
-    assert choice.model_name == MODEL_DEEPSEEK_R1
-    assert choice.provider == "local"
+    assert choice.model_name == "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m:alt"
+    assert choice.provider == "ai_kernel"
     assert choice.reason.startswith("experience_policy:code:")
 
 
@@ -180,10 +180,10 @@ CASES = [
         expected_complexity=Complexity.LOW,
         expected_orchestrator="antigravity-cli-orchestrator",
         expected_provider="local",
-        expected_model=MODEL_DEEPSEEK_R1,
+        expected_model=MODEL_LOCAL_SMALL,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="planning_docs_deepseek_local",
+        expected_reason="planning_docs_qwen_local",
     ),
     RoutingCase(
         name="simple typo fix",
@@ -194,10 +194,10 @@ CASES = [
         expected_complexity=Complexity.LOW,
         expected_orchestrator="mistral-orchestrator",
         expected_provider="local",
-        expected_model=MODEL_QWEN_CODER,
+        expected_model=MODEL_AI_KERNEL_QWEN36,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="standard_code_qwen_local",
+        expected_reason="standard_code_ai_kernel_qwen36",
     ),
     RoutingCase(
         name="medium code refactor",
@@ -208,10 +208,10 @@ CASES = [
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="mistral-orchestrator",
         expected_provider="local",
-        expected_model=MODEL_QWEN_CODER,
+        expected_model=MODEL_AI_KERNEL_QWEN36,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="standard_code_qwen_local",
+        expected_reason="standard_code_ai_kernel_qwen36",
     ),
     RoutingCase(
         name="medium unit test generation",
@@ -222,10 +222,10 @@ CASES = [
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="mistral-orchestrator",
         expected_provider="local",
-        expected_model=MODEL_QWEN_CODER,
+        expected_model=MODEL_AI_KERNEL_QWEN36,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="standard_code_qwen_local",
+        expected_reason="standard_code_ai_kernel_qwen36",
     ),
     RoutingCase(
         name="medium documentation update",
@@ -236,10 +236,10 @@ CASES = [
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="antigravity-cli-orchestrator",
         expected_provider="local",
-        expected_model=MODEL_DEEPSEEK_R1,
+        expected_model=MODEL_LOCAL_SMALL,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="planning_docs_deepseek_local",
+        expected_reason="planning_docs_qwen_local",
     ),
     RoutingCase(
         name="medium research task",
@@ -250,10 +250,10 @@ CASES = [
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="antigravity-cli-orchestrator",
         expected_provider="local",
-        expected_model=MODEL_DEEPSEEK_R1,
+        expected_model=MODEL_LOCAL_SMALL,
         expected_fallback=False,
         expected_secondary_review=False,
-        expected_reason="planning_docs_deepseek_local",
+        expected_reason="planning_docs_qwen_local",
     ),
     RoutingCase(
         name="high architecture redesign",
@@ -320,10 +320,10 @@ CASES = [
         expected_complexity=Complexity.MEDIUM,
         expected_orchestrator="openai-fallback-orchestrator",
         expected_provider="openai",
-        expected_model=MODEL_QWEN_CODER,
+        expected_model=MODEL_AI_KERNEL_QWEN36,
         expected_fallback=True,
         expected_secondary_review=False,
-        expected_reason="standard_code_qwen_local",
+        expected_reason="standard_code_ai_kernel_qwen36",
     ),
 ]
 

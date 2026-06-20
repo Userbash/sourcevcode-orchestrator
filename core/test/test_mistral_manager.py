@@ -27,3 +27,15 @@ def test_mistral_manager_handles_auth_failure():
         
         # Test readiness check
         assert manager.is_ready() is False
+
+
+def test_mistral_manager_uses_cached_registry_when_live_probe_fails(monkeypatch):
+    manager = MistralManager(api_key="mistral_nonsecret_key_value_1234567890")
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("network down")))
+    monkeypatch.setattr(manager.registry, "get_models", lambda force_refresh=False: ["mistral-large-latest", "codestral-latest"])
+
+    probe = manager.probe_models()
+
+    assert probe["ok"] is False
+    assert probe["models"] == ["mistral-large-latest", "codestral-latest"]
+    assert probe["inventory_source"] == "cache"
