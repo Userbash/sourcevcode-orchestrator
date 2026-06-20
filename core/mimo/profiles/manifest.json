@@ -27,22 +27,28 @@
     "research_compare.json"
   ],
   "provider_profiles": [
+    "providers/provider__antigravity.json",
     "providers/provider__openai.json",
     "providers/provider__local.json",
     "providers/provider__mistral.json"
   ],
   "model_profiles": [
+    "models/model__antigravity-pro.json",
+    "models/model__antigravity-flash.json",
     "models/model__qwen-2.5-7b-instruct.json",
     "models/model__qwen2.5-32b-instruct-q4_k_m.json",
     "models/model__deepseek-r1-14b.json",
     "models/model__gpt-4o.json",
     "models/model__gpt-4.1.json",
-    "models/model__claude-3.5-sonnet.json"
+    "models/model__claude-3.5-sonnet.json",
+    "models/model__hauhaucs-qwen36-35b-a3b-aggressive-q4_k_m.json"
   ],
   "combo_profiles": [
+    "combinations/combo__antigravity__antigravity-pro.json",
     "combinations/combo__openai__gpt-4o.json",
     "combinations/combo__local__qwen2.5-32b-instruct-q4_k_m.json",
     "combinations/combo__local__qwen-2.5-7b-instruct.json",
-    "combinations/combo__openai__deepseek-r1-14b.json"
+    "combinations/combo__openai__deepseek-r1-14b.json",
+    "combinations/combo__local__hauhaucs-qwen36-35b-a3b-aggressive-q4_k_m.json"
   ]
 }

@@ -8,6 +8,7 @@ from core.core.kernel_module_manager import KernelModuleManager
 from core.core.model_selector import MODEL_DEEPSEEK_R1, ModelSelector
 from core.core.models import Complexity, Task, TaskContext, TaskInput, TaskType
 from core.core.reasoning_module import ReasoningModule
+from core.core.risk_advisor_module import RiskAssessment
 
 
 class _API:
@@ -61,6 +62,13 @@ class _LocalLLM:
         return '```json\n{"answer":"ok"}\n```'
 
 
+class _RiskLocalLLM:
+    ready = True
+
+    def query(self, prompt: str, system: str | None = None) -> str:
+        return '```json\n{"riskLevel":"High","potentialImpact":"Touches auth flow and deployment safety","recommendations":["security","deployment"]}\n```'
+
+
 def _task(task_type: TaskType = TaskType.REVIEW, complexity: Complexity = Complexity.HIGH) -> Task:
     task = Task(
         task_type,
@@ -103,6 +111,24 @@ def test_reasoning_local_fallback_strips_markdown_json(monkeypatch):
 
     assert reply is not None
     assert reply.answer == "ok"
+
+
+def test_reasoning_local_fallback_normalizes_risk_assessment_payload(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.delenv("ANTIGRAVITY_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    reasoning = ReasoningModule()
+    reasoning.on_load(_API({"local_llm": _RiskLocalLLM()}))
+
+    reply = reasoning.structured_call("return json", RiskAssessment)
+
+    assert reply is not None
+    assert reply.complexity_level == "high"
+    assert reply.suggested_review_level == "architect"
+    assert "deployment" in reply.impact_areas
 
 
 def test_model_selector_does_not_route_to_openai_without_any_cloud_keys(monkeypatch):

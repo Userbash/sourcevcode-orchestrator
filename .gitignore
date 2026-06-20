@@ -88,7 +88,9 @@ htmlcov/
 
 # AI Bridge & Orchestrator
 .env.bridge
+.env.bridge.*
 .env.gemini.local
+.env.gemini.local.*
 .cache
 .tooling
 .agent/bridge_results/

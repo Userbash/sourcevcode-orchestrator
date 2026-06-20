@@ -241,3 +241,15 @@ def test_kpi_event_logger_preserves_cost_components(tmp_path):
     row = json.loads((tmp_path / "kpi_events.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert row["estimated_cost_usd"] == 0.0042
     assert row["cost_components"]["amortized_hardware_usd"] == 0.0021
+
+
+def test_kpi_event_logger_serializes_datetime_payloads(tmp_path):
+    import json
+    from datetime import UTC, datetime
+    from core.core.kpi_event_logger import KPIEventLogger
+
+    logger = KPIEventLogger(file_path=tmp_path / "kpi_events.jsonl", summary_path=tmp_path / "kpi_summary.json")
+    logger.write({"type": "postgres_watchdog", "probe": {"updated_at": datetime(2026, 6, 19, tzinfo=UTC)}})
+
+    row = json.loads((tmp_path / "kpi_events.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["probe"]["updated_at"] == "2026-06-19T00:00:00+00:00"

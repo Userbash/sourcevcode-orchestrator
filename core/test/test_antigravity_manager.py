@@ -1,3 +1,4 @@
+import subprocess
 import pytest
 from unittest.mock import MagicMock, patch
 from core.core.integrations.antigravity_manager import AntigravityManager
@@ -56,6 +57,7 @@ def test_antigravity_manager_uses_absolute_login_helper_path(monkeypatch):
 
 
 def test_antigravity_manager_confirmed_ready_after_login(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_BRIDGE_ANTIGRAVITY_AUTO_LOGIN", "true")
     mock_bridge = MagicMock()
     manager = AntigravityManager(host_bridge=mock_bridge)
     manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
@@ -230,6 +232,7 @@ def test_antigravity_manager_status_avoids_login_loop_when_transient_failure_and
 
 
 def test_antigravity_manager_persists_session_state_after_confirmed_login(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_BRIDGE_ANTIGRAVITY_AUTO_LOGIN", "true")
     mock_bridge = MagicMock()
     manager = AntigravityManager(host_bridge=mock_bridge)
     manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
@@ -455,6 +458,7 @@ def test_antigravity_session_control_reports_pending_login(monkeypatch, tmp_path
 
 
 def test_antigravity_manager_starts_managed_login_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("AI_BRIDGE_ANTIGRAVITY_AUTO_LOGIN", "true")
     mock_bridge = MagicMock()
     manager = AntigravityManager(host_bridge=mock_bridge)
     manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
@@ -560,19 +564,111 @@ def test_antigravity_status_reports_api_key_mode_on_api_probe_failure(monkeypatc
     assert status["api_probe"]["status_code"] == 403
 
 
-def test_antigravity_manager_prefers_local_gemini_cli_when_host_agy_missing(monkeypatch):
+def test_antigravity_manager_reports_cli_missing_when_only_gemini_alias_exists(monkeypatch):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+
+    monkeypatch.setattr("core.core.integrations.antigravity_manager.ExternalAIBridge.resolve_antigravity_cli_command", staticmethod(lambda: None))
+    monkeypatch.setattr(manager, "_run_host", lambda cmd, timeout=None: {"ok": False, "stderr": "antigravity_cli_not_found", "error": "antigravity_cli_not_found", "command": cmd})
+
+    result = manager._run_agy(["models"])
+
+    assert result["ok"] is False
+    assert result.get("error") == "antigravity_cli_not_found" or result.get("stderr") == "antigravity_cli_not_found"
+
+def test_antigravity_manager_status_prefers_api_mode_when_cli_missing_and_api_probe_fails(monkeypatch):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.api_key = "configured"
+
+    monkeypatch.setattr(manager, "_run_agy", lambda args, timeout=None: {"ok": False, "stdout": "", "stderr": "not found", "error": "antigravity_cli_not_found"})
+    monkeypatch.setattr(manager, "probe_api_key_models", lambda: {"ok": False, "models": [], "error": "permission denied", "status_code": 403, "auth_mode": "api_key"})
+
+    status = manager.status()
+
+    assert status["ready"] is False
+    assert status["auth_mode"] == "api_key"
+    assert status["api_probe"]["status_code"] == 403
+
+
+def test_antigravity_manager_run_local_cli_preserves_timeout_output(monkeypatch):
     mock_bridge = MagicMock()
     manager = AntigravityManager(host_bridge=mock_bridge)
 
     monkeypatch.setattr("core.core.integrations.antigravity_manager.ExternalAIBridge.resolve_antigravity_cli_command", staticmethod(lambda: ["/tmp/gemini"]))
-    monkeypatch.setattr("core.core.integrations.antigravity_manager.ExternalAIBridge._antigravity_runtime_env", staticmethod(lambda: {"PATH": "/tmp"}))
+    monkeypatch.setattr("core.core.integrations.antigravity_manager.ExternalAIBridge._antigravity_runtime_env", staticmethod(lambda command_name=None: {"PATH": "/tmp"}))
 
     def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
-        return MagicMock(returncode=0, stdout="0.46.0\n", stderr="")
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, stderr="429 RESOURCE_EXHAUSTED MODEL_CAPACITY_EXHAUSTED")
 
     monkeypatch.setattr("core.core.integrations.antigravity_manager.subprocess.run", fake_run)
 
-    result = manager._run_agy(["models"])
+    result = manager._run_local_cli(["-p", "healthcheck: reply with ok"])
 
-    assert result["ok"] is True
-    assert "gemini-cli" in result["stdout"]
+    assert result["ok"] is False
+    assert "RESOURCE_EXHAUSTED" in result["stderr"]
+    assert result["timeout"] is True
+
+
+
+def test_antigravity_manager_list_models_uses_registry_inventory_when_cli_missing(monkeypatch):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+
+    monkeypatch.setattr(manager, "_run_agy", lambda args, timeout=None: {"ok": False, "stdout": "", "stderr": "not found", "error": "antigravity_cli_not_found"})
+    monkeypatch.setattr(manager, "_registry_models", lambda force_refresh=False: ["antigravity-flash", "antigravity-pro"])
+
+    models = manager.list_models()
+
+    assert models == ["antigravity-flash", "antigravity-pro"]
+
+
+def test_antigravity_manager_status_marks_legacy_cli_unsupported(monkeypatch):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+
+    monkeypatch.setattr(
+        manager,
+        "_run_agy",
+        lambda args, timeout=None: {
+            "ok": False,
+            "stdout": "",
+            "stderr": "IneligibleTierError: migrate to the Antigravity suite of products",
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "probe_api_key_models",
+        lambda: {"ok": False, "models": [], "error": "permission denied", "status_code": 403, "auth_mode": "api_key"},
+    )
+
+    status = manager.status()
+
+    assert status["ready"] is False
+    assert status["auth_mode"] == "legacy_gemini_cli"
+    assert status["auth_probe"]["failure_kind"] == "unsupported_client"
+
+
+def test_antigravity_session_control_reports_legacy_cli_unsupported(monkeypatch, tmp_path):
+    mock_bridge = MagicMock()
+    manager = AntigravityManager(host_bridge=mock_bridge)
+    manager.session_store = manager.session_store.__class__(state_dir=tmp_path / "state", legacy_state_dir=tmp_path / "legacy")
+
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda: {
+            "ready": False,
+            "models": [],
+            "auth_mode": "legacy_gemini_cli",
+            "models_probe": {"ok": False, "stderr": "unsupported_client"},
+            "generation_probe": {"ok": False, "stderr": "unsupported_client"},
+            "auth_probe": {"ok": False, "failure_kind": "unsupported_client"},
+            "api_probe": {"ok": False, "status_code": 403},
+        },
+    )
+
+    summary = manager.session_control_status()
+
+    assert summary["session_state"] == "legacy_cli_unsupported"
+    assert summary["user_action_required"] is True

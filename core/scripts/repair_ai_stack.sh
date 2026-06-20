@@ -15,19 +15,21 @@ echo "   AI Provider Stack Maintainer & Repair"
 echo "=============================================="
 
 # 1. Antigravity (agy)
-echo -n "[Check] Antigravity CLI (agy)... "
-if flatpak-spawn --host agy --version &>/dev/null; then
+echo -n "[Check] Antigravity runtime... "
+if flatpak-spawn --host bash -lc 'command -v agy >/dev/null 2>&1 || command -v antigravity >/dev/null 2>&1 || command -v gemini >/dev/null 2>&1'; then
     echo -e "${GREEN}INSTALLED${NC}"
-    # Check if authorized
-    if flatpak-spawn --host python3 "$PROJECT_ROOT/core/scripts/antigravity_login.py" --verify &>/dev/null; then
-        echo -e "${GREEN}[OK] Antigravity is authorized${NC}"
+    AGY_REPORT=$(flatpak-spawn --host python3 "$PROJECT_ROOT/core/scripts/verify_antigravity_keys.py" 2>/dev/null || true)
+    echo "$AGY_REPORT"
+    if echo "$AGY_REPORT" | grep -q '"ready": true'; then
+        echo -e "${GREEN}[OK] Antigravity is ready${NC}"
+    elif echo "$AGY_REPORT" | grep -q 'legacy_gemini_cli\|unsupported_client'; then
+        echo -e "${YELLOW}[WARN] Legacy Gemini CLI detected; login loop suppressed. Install supported Antigravity runtime or fix API mode.${NC}"
     else
-        echo -e "${YELLOW}[WARN] Antigravity not authorized. Starting login flow...${NC}"
-        flatpak-spawn --host python3 "$PROJECT_ROOT/core/scripts/antigravity_login.py" --login --timeout 300
+        echo -e "${YELLOW}[WARN] Antigravity is degraded. Review verify_antigravity_keys output before retrying login.${NC}"
     fi
 else
     echo -e "${RED}NOT FOUND${NC}"
-    echo "Please ensure 'agy' (Antigravity CLI) is installed on the host."
+    echo "Install a supported Antigravity-compatible CLI on the host, or keep the provider disabled."
 fi
 
 # 2. Sourcecraft (src)

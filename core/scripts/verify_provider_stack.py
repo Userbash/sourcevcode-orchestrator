@@ -9,6 +9,7 @@ from core.core.env_loader import load_env_file
 from core.core.integrations.antigravity_manager import AntigravityManager
 from core.core.integrations.mistral_manager import MistralManager
 from core.core.local_llm_module import LocalLLMModule
+from core.core.mimo_status import resolve_mimo_cli
 from core.core.provider_credentials import credential_snapshot
 from core.scripts.verify_openai_bridge import build_summary as build_openai_summary
 
@@ -17,19 +18,9 @@ load_env_file(".env.bridge", override=True)
 load_env_file(".env.gemini.local", override=True)
 
 
-def _mimo_summary() -> dict[str, object]:
-    try:
-        proc = subprocess.run(["mimo", "models", "--verbose"], capture_output=True, text=True, timeout=20, check=False)
-    except FileNotFoundError:
-        return {"configured": False, "ready": False, "error": "mimo_cli_missing", "model_count": 0, "sample_models": []}
-    except Exception as exc:
-        return {"configured": True, "ready": False, "error": str(exc), "model_count": 0, "sample_models": []}
-
-    if proc.returncode != 0:
-        return {"configured": True, "ready": False, "error": (proc.stderr or proc.stdout or f"exit_{proc.returncode}").strip(), "model_count": 0, "sample_models": []}
-
+def _parse_mimo_model_ids(output: str) -> list[str]:
     model_ids = []
-    for line in proc.stdout.splitlines():
+    for line in output.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("{") or stripped.startswith("}") or stripped.startswith('\"') or stripped.startswith("["):
             continue
@@ -42,19 +33,75 @@ def _mimo_summary() -> dict[str, object]:
             continue
         seen.add(item)
         deduped.append(item)
-    return {"configured": True, "ready": True, "error": None, "model_count": len(deduped), "sample_models": deduped[:8]}
+    return deduped
 
 
-def _mimo_run_summary() -> dict[str, object]:
-    model = "mimo/mimo-auto"
-    prompt = "reply with ok"
+def _mimo_inventory() -> tuple[dict[str, object], list[str], str | None]:
+    mimo_cli = resolve_mimo_cli()
+    if not mimo_cli:
+        return (
+            {"configured": False, "ready": False, "error": "mimo_cli_missing", "model_count": 0, "sample_models": []},
+            [],
+            None,
+        )
     try:
-        proc = subprocess.run(["mimo", "run", "-m", model, "--format", "json", prompt], capture_output=True, text=True, timeout=30, check=False)
-    except FileNotFoundError:
-        return {"run_model": model, "run_ready": False, "run_error": "mimo_cli_missing", "run_response_sample": None}
+        proc = subprocess.run([mimo_cli, "models", "--verbose"], capture_output=True, text=True, timeout=20, check=False)
     except Exception as exc:
-        return {"run_model": model, "run_ready": False, "run_error": str(exc), "run_response_sample": None}
+        return ({"configured": True, "ready": False, "error": str(exc), "model_count": 0, "sample_models": []}, [], mimo_cli)
 
+    if proc.returncode != 0:
+        return (
+            {
+                "configured": True,
+                "ready": False,
+                "error": (proc.stderr or proc.stdout or f"exit_{proc.returncode}").strip(),
+                "model_count": 0,
+                "sample_models": [],
+            },
+            [],
+            mimo_cli,
+        )
+
+    model_ids = _parse_mimo_model_ids(proc.stdout)
+    return (
+        {"configured": True, "ready": True, "error": None, "model_count": len(model_ids), "sample_models": model_ids[:8]},
+        model_ids,
+        mimo_cli,
+    )
+
+
+def _mimo_summary() -> dict[str, object]:
+    summary, _, _ = _mimo_inventory()
+    return summary
+
+
+def _preferred_mimo_probe_models(model_ids: list[str]) -> list[str]:
+    preferred = [
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5.4",
+        "openai/gpt-5.5",
+        "mistral/mistral-medium-latest",
+        "mimo/mimo-auto",
+    ]
+    ordered = []
+    seen = set()
+    for item in preferred:
+        if item not in seen:
+            ordered.append(item)
+            seen.add(item)
+    for prefix in ("openai/", "mistral/", "anthropic/", "github-copilot/", "mimo/"):
+        for item in model_ids:
+            if item.startswith(prefix) and item not in seen:
+                ordered.append(item)
+                seen.add(item)
+    for item in model_ids:
+        if item not in seen:
+            ordered.append(item)
+            seen.add(item)
+    return ordered[:12]
+
+
+def _extract_mimo_run_result(model: str, proc: subprocess.CompletedProcess[str]) -> dict[str, object]:
     events = []
     for line in (proc.stdout or "").splitlines():
         stripped = line.strip()
@@ -86,6 +133,30 @@ def _mimo_run_summary() -> dict[str, object]:
     return {"run_model": model, "run_ready": False, "run_error": stderr or "no_text_events", "run_response_sample": None}
 
 
+def _mimo_run_summary() -> dict[str, object]:
+    summary, model_ids, mimo_cli = _mimo_inventory()
+    if not mimo_cli:
+        return {"run_model": None, "run_ready": False, "run_error": "mimo_cli_missing", "run_response_sample": None, "attempted_models": []}
+    if not summary.get("ready"):
+        return {"run_model": None, "run_ready": False, "run_error": "mimo_inventory_unavailable", "run_response_sample": None, "attempted_models": []}
+
+    prompt = "reply with ok"
+    attempted_models: list[str] = []
+    last_result = {"run_model": None, "run_ready": False, "run_error": "mimo_inventory_unavailable", "run_response_sample": None}
+    for model in _preferred_mimo_probe_models(model_ids):
+        attempted_models.append(model)
+        try:
+            proc = subprocess.run([mimo_cli, "run", "-m", model, "--format", "json", prompt], capture_output=True, text=True, timeout=30, check=False)
+        except Exception as exc:
+            last_result = {"run_model": model, "run_ready": False, "run_error": str(exc), "run_response_sample": None}
+            continue
+        last_result = _extract_mimo_run_result(model, proc)
+        if last_result.get("run_ready"):
+            return {**last_result, "attempted_models": attempted_models}
+
+    return {**last_result, "attempted_models": attempted_models}
+
+
 def _local_llm_summary() -> dict[str, object]:
     probe = LocalLLMModule().check_health()
     models = [str(item).strip() for item in probe.get("available_models", []) if str(item).strip()]
@@ -111,7 +182,7 @@ def main() -> None:
 
     openai_summary = build_openai_summary()
     mimo_summary = _mimo_summary()
-    mimo_run_summary = _mimo_run_summary() if mimo_summary.get("ready") else {"run_model": None, "run_ready": False, "run_error": "mimo_inventory_unavailable", "run_response_sample": None}
+    mimo_run_summary = _mimo_run_summary() if mimo_summary.get("ready") else {"run_model": None, "run_ready": False, "run_error": "mimo_inventory_unavailable", "run_response_sample": None, "attempted_models": []}
     mistral_probe = MistralManager().probe_models()
     antigravity_status = AntigravityManager().status()
     antigravity_api_probe = antigravity_status.get("api_probe") or {}
@@ -137,8 +208,12 @@ def main() -> None:
             "ready": bool(antigravity_status.get("ready")),
             "auth_mode": antigravity_status.get("auth_mode"),
             "status_code": antigravity_api_probe.get("status_code"),
+            "inventory_ok": antigravity_status.get("inventory_ok"),
+            "inventory_source": antigravity_status.get("inventory_source"),
+            "inventory_probe_kind": antigravity_status.get("inventory_probe_kind"),
+            "failure_kind": antigravity_status.get("failure_kind"),
             "model_count": len(antigravity_status.get("models", [])),
-            "error": antigravity_api_probe.get("error") or (antigravity_status.get("models_probe") or {}).get("error") or (antigravity_status.get("auth_probe") or {}).get("error"),
+            "error": antigravity_api_probe.get("error") or (antigravity_status.get("generation_probe") or {}).get("stderr") or (antigravity_status.get("models_probe") or {}).get("error") or (antigravity_status.get("auth_probe") or {}).get("error"),
         },
     }
     print(json.dumps(report, ensure_ascii=True, indent=2))

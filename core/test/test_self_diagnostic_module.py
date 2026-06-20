@@ -85,6 +85,7 @@ def test_run_diagnostics_structure(monkeypatch):
     assert report["layer_check_status"]["ok"] is True
     assert report["diagnostic_matrix"]["source"] == "diagnostic_contracts"
     assert report["layer_checks"][0]["name"] == "boot_contract"
+    assert report["readiness"]["core_ready"] is True
 
 
 def test_run_diagnostics_can_filter_layers(monkeypatch):
@@ -176,3 +177,40 @@ def test_run_diagnostics_matrix_only(monkeypatch):
             "order": ["memory", "providers"],
         },
     }
+
+
+def test_run_diagnostics_builds_remediation_plan_for_degraded_ai_models(monkeypatch):
+    monkeypatch.setattr("core.core.self_diagnostic_module.shared_antigravity_snapshot", lambda force=False: {"ready": False})
+    contracts_module = SimpleNamespace(
+        DIAGNOSTIC_SCHEMA_VERSION="diagnostics.v1",
+        run_diagnostic_matrix=lambda **kwargs: {
+            "ok": True,
+            "status": "ok",
+            "checks": [],
+            "diagnostic_matrix": {"source": "diagnostic_contracts", "layers": {}},
+        },
+    )
+    monkeypatch.setattr(SelfDiagnosticModule, "_load_diagnostic_contracts", staticmethod(lambda: contracts_module))
+
+    module = SelfDiagnosticModule()
+    api = _build_api(module_manager=_FakeModuleManager({"worker": _FakeModule()}), memory=SimpleNamespace(backend=object(), _sessions={}))
+    module._availability = MagicMock()
+    module._availability.check_all = MagicMock(
+        return_value={
+            "antigravity": _FakeHealth(
+                {
+                    "provider": "antigravity",
+                    "status": "degraded",
+                    "error": "antigravity_auth_failed",
+                    "diagnostics": {"remediation": ["refresh auth", "rerun provider probe"]},
+                }
+            )
+        }
+    )
+
+    asyncio.run(module.on_load(api))
+    report = asyncio.run(module.run_diagnostics())
+
+    assert report["status"] == "degraded"
+    assert report["remediation_plan"][0]["name"] == "antigravity"
+    assert report["readiness"]["provider_ready"] is False

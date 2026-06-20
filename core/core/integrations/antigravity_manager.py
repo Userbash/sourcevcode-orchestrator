@@ -12,6 +12,7 @@ import httpx
 from core.core.env_loader import load_env_file
 from core.core.host_bridge import HostBridge
 from core.core.external_ai_bridge import ExternalAIBridge
+from core.core.gemini_model_registry import AntigravityModelRegistry
 from .antigravity_session_store import AntigravitySessionStore
 
 logger = logging.getLogger("AntigravityManager")
@@ -29,6 +30,7 @@ class AntigravityManager:
         self.api_base_url = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
         self.proxy_url = os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip().rstrip("/")
         self.session_store = AntigravitySessionStore()
+        self.registry = AntigravityModelRegistry()
 
     @staticmethod
     def _read_int(key: str, default: int) -> int:
@@ -40,7 +42,7 @@ class AntigravityManager:
 
     @staticmethod
     def auto_login_enabled() -> bool:
-        return os.getenv("AI_BRIDGE_ANTIGRAVITY_AUTO_LOGIN", "true").strip().lower() in {"1", "true", "yes", "on"}
+        return os.getenv("AI_BRIDGE_ANTIGRAVITY_AUTO_LOGIN", "false").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _login_failure_cooldown_sec() -> int:
@@ -73,6 +75,8 @@ class AntigravityManager:
             return "unknown"
         if "not found" in text or "no such file" in text:
             return "cli_missing"
+        if any(marker in text for marker in ["unsupported_client", "ineligibletiererror", "migrate to the antigravity suite of products"]):
+            return "unsupported_client"
         if any(marker in text for marker in ["authentication required", "please sign in", "authorization code", "paste the authorization code", "unauthorized", "forbidden", "error: authentication", "error: please sign in"]):
             return "auth_required"
         if any(marker in text for marker in ["timed out", "timeout", "connection reset", "temporarily unavailable", "network", "dns", "econn", "refused", "unreachable"]):
@@ -293,7 +297,34 @@ class AntigravityManager:
     @staticmethod
     def _cli_missing(probe: dict[str, Any]) -> bool:
         raw = f"{probe.get('stderr', '')} {probe.get('error', '')}".lower()
-        return any(marker in raw for marker in ["no such file or directory", "not found", "node: command not found", "env: \"node\"", "antigravity_cli_not_found"])
+        return any(marker in raw for marker in ["no such file or directory", "not found", "node: command not found", 'env: "node"', "antigravity_cli_not_found"])
+
+    @staticmethod
+    def _timeout_detail(exc: subprocess.TimeoutExpired) -> tuple[str, str]:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        detail = "\n".join(part.strip() for part in (stderr, stdout) if str(part).strip()).strip()
+        return stdout, detail or f"timeout: {exc}"
+
+    @staticmethod
+    def _probe_inventory_kind(probe: dict[str, Any]) -> str:
+        return str(probe.get("probe_kind") or "inventory")
+
+    @classmethod
+    def _probe_has_inventory(cls, probe: dict[str, Any]) -> bool:
+        return cls._probe_inventory_kind(probe) == "inventory"
+
+    @classmethod
+    def _probe_models(cls, probe: dict[str, Any]) -> list[str]:
+        if not probe.get("ok") or not cls._probe_has_inventory(probe):
+            return []
+        return [line.strip() for line in str(probe.get("stdout") or "").splitlines() if line.strip()]
+
+    def _registry_models(self, *, force_refresh: bool = False) -> list[str]:
+        try:
+            return [str(item).strip() for item in self.registry.get_models(force_refresh=force_refresh) if str(item).strip()]
+        except Exception:
+            return []
 
     def _run_local_cli(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
         cmd_prefix = ExternalAIBridge.resolve_antigravity_cli_command()
@@ -303,31 +334,38 @@ class AntigravityManager:
         cli_name = Path(cmd_prefix[0]).name.lower()
         env = ExternalAIBridge._antigravity_runtime_env(cli_name)
         repo_root = str(Path(__file__).resolve().parents[3])
-        if cli_name == "gemini":
-            if args[:1] == ["models"]:
-                cmd = [*cmd_prefix, "--version"]
-            elif args and args[0] == "-p":
-                prompt = args[1] if len(args) > 1 else ""
-                cmd = [*cmd_prefix, "-p", prompt, "--skip-trust"]
-            else:
-                cmd = [*cmd_prefix, *args]
-        else:
-            cmd = [*cmd_prefix, *args]
+        cmd = [*cmd_prefix, *args]
 
+        structural_probe = False
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or self.probe_timeout, env=env, cwd=repo_root)
-            stdout = proc.stdout or ""
-            if cli_name == "gemini" and args[:1] == ["models"] and proc.returncode == 0:
-                stdout = "antigravity-cli\ngemini-cli\n"
-            return {
+            payload = {
                 "ok": proc.returncode == 0,
-                "stdout": stdout,
+                "stdout": proc.stdout or "",
                 "stderr": proc.stderr or "",
                 "exit_code": proc.returncode,
                 "command": cmd,
             }
+            if structural_probe:
+                payload["probe_kind"] = "binary_presence"
+                payload["binary_present"] = proc.returncode == 0
+                payload["inventory_supported"] = False
+            return payload
+        except subprocess.TimeoutExpired as exc:
+            stdout, detail = self._timeout_detail(exc)
+            payload = {"ok": False, "stdout": stdout, "stderr": detail, "error": detail, "command": cmd, "timeout": True}
+            if structural_probe:
+                payload["probe_kind"] = "binary_presence"
+                payload["binary_present"] = False
+                payload["inventory_supported"] = False
+            return payload
         except Exception as exc:
-            return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
+            payload = {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
+            if structural_probe:
+                payload["probe_kind"] = "binary_presence"
+                payload["binary_present"] = False
+                payload["inventory_supported"] = False
+            return payload
 
     def probe_api_key_models(self) -> dict[str, Any]:
         if not self.api_key:
@@ -405,6 +443,11 @@ class AntigravityManager:
             user_action_required = True
             message_for_user = "Antigravity CLI is missing or not executable on this machine."
             message_for_orchestrator = "Do not retry login. Report a runtime dependency problem instead."
+        elif failure_kind == "unsupported_client":
+            session_state = "legacy_cli_unsupported"
+            user_action_required = True
+            message_for_user = "Installed Gemini CLI is a legacy client that must be migrated to Antigravity-compatible runtime or API mode."
+            message_for_orchestrator = "Do not retry OAuth/login loops. Migrate off the legacy Gemini CLI or disable this provider until a supported Antigravity runtime is installed."
         else:
             session_state = "degraded_unknown"
             user_action_required = False
@@ -454,43 +497,81 @@ class AntigravityManager:
 
     def list_models(self) -> list[str]:
         res = self._run_agy(["models"])
-        if res.get("ok"):
-            return [line.strip() for line in res.get("stdout", "").splitlines() if line.strip()]
+        models = self._probe_models(res)
+        if models:
+            return models
+        registry_models = self._registry_models(force_refresh=False)
+        if registry_models:
+            return registry_models
+        api_res = self.probe_api_key_models()
+        if api_res.get("ok"):
+            return [str(item).strip() for item in api_res.get("models", []) if str(item).strip()]
         return []
 
     def status(self) -> dict[str, Any]:
         models_res = self._run_agy(["models"])
-        models = [line.strip() for line in models_res.get("stdout", "").splitlines() if line.strip()] if models_res.get("ok") else []
+        models = self._probe_models(models_res)
         probe_res = {"ok": False, "skipped": True}
         auth_res: dict[str, Any] | None = None
         api_res: dict[str, Any] | None = None
         auth_mode = "agy_oauth"
+        inventory_probe_kind = self._probe_inventory_kind(models_res)
+        inventory_source = "cli" if models else "unavailable"
+        cli_failure_kind = self._classify_failure_text(f"{models_res.get('stderr', '')} {models_res.get('stdout', '')}")
 
         if models_res.get("ok"):
+            if not models:
+                registry_models = self._registry_models(force_refresh=False)
+                if registry_models:
+                    models = registry_models
+                    inventory_source = "registry"
             probe_res = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"])
             if not probe_res.get("ok") and self.api_key:
                 api_res = self.probe_api_key_models()
-                auth_mode = str(api_res.get("auth_mode") or "api_key")
                 if api_res.get("ok"):
-                    models = list(api_res.get("models", [])) or models
+                    auth_mode = str(api_res.get("auth_mode") or "api_key")
+                    api_models = [str(item).strip() for item in api_res.get("models", []) if str(item).strip()]
+                    if api_models:
+                        models = api_models
+                        inventory_source = "api_key"
         else:
             api_res = self.probe_api_key_models()
             if api_res:
                 auth_mode = str(api_res.get("auth_mode") or "api_key")
             if api_res.get("ok"):
-                models = list(api_res.get("models", []))
+                models = [str(item).strip() for item in api_res.get("models", []) if str(item).strip()]
+                if models:
+                    inventory_source = "api_key"
+            elif cli_failure_kind == "unsupported_client":
+                auth_res = {
+                    "ok": False,
+                    "skipped": True,
+                    "failure_kind": "unsupported_client",
+                    "stderr": models_res.get("stderr") or models_res.get("stdout") or "legacy_gemini_cli_unsupported",
+                }
+                auth_mode = "legacy_gemini_cli"
             elif self._cli_missing(models_res):
-                auth_res = {"ok": False, "skipped": True, "reason": "agy_cli_missing"}
+                auth_res = {"ok": False, "skipped": True, "reason": "agy_cli_missing", "failure_kind": "cli_missing"}
             else:
                 verify = self.verify_auth()
                 suppressed = self._maybe_suppress_login(verify)
                 auth_res = suppressed if suppressed is not None else self.ensure_authorized()
                 if auth_res.get("ok"):
+                    auth_mode = str(auth_res.get("auth_mode") or "agy_oauth")
                     models_res = self._run_agy(["models"])
-                    models = [line.strip() for line in models_res.get("stdout", "").splitlines() if line.strip()] if models_res.get("ok") else []
+                    inventory_probe_kind = self._probe_inventory_kind(models_res)
+                    models = self._probe_models(models_res)
+                    if models:
+                        inventory_source = "cli"
+                    else:
+                        registry_models = self._registry_models(force_refresh=False)
+                        if registry_models:
+                            models = registry_models
+                            inventory_source = "registry"
                     if models_res.get("ok"):
                         probe_res = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"])
 
+        inventory_ok = bool(models)
         ready = bool((models_res.get("ok") and probe_res.get("ok")) or (api_res and api_res.get("ok")))
         return {
             "ready": ready,
@@ -500,4 +581,8 @@ class AntigravityManager:
             "auth_probe": auth_res,
             "api_probe": api_res,
             "auth_mode": auth_mode,
+            "inventory_ok": inventory_ok,
+            "inventory_source": inventory_source,
+            "inventory_probe_kind": inventory_probe_kind,
+            "failure_kind": cli_failure_kind if not ready else "",
         }

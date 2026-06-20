@@ -93,6 +93,26 @@ def load_mimo_ping_report(report_dir: str | Path | None = None) -> dict[str, Any
     return payload
 
 
+def load_mimo_usable_report(report_dir: str | Path | None = None) -> dict[str, Any]:
+    base = Path(report_dir) if report_dir is not None else default_report_dir()
+    path = base / 'mimo_usable_models.json'
+    payload = _load_json(path) if path.is_file() else {}
+    if payload:
+        payload['_usable_path'] = str(path)
+        payload['_usable_present'] = True
+        payload['_usable_updated_at'] = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+    else:
+        payload = {
+            '_usable_path': str(path),
+            '_usable_present': False,
+            '_usable_updated_at': None,
+            'models': [],
+            'usable_count': 0,
+            'total': 0,
+        }
+    return payload
+
+
 def build_mimo_runtime_status(
     *,
     bridge: Any | None = None,
@@ -105,7 +125,25 @@ def build_mimo_runtime_status(
 ) -> dict[str, Any]:
     cli_path = resolve_mimo_cli()
     report = load_mimo_ping_report(report_dir)
+    usable_artifact = load_mimo_usable_report(report_dir)
     rows = list(report.get('models') or [])
+    if not rows:
+        usable_rows = []
+        for row in list(usable_artifact.get('models') or []):
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get('model') or '').strip()
+            if not model_name:
+                continue
+            usable_rows.append({
+                'model': model_name,
+                'ok': True,
+                'response_sample': row.get('response_sample'),
+                'exit_code': row.get('exit_code'),
+            })
+        if usable_rows:
+            rows = usable_rows
+            report = {**report, 'models': rows, 'ok': len(rows), 'failed': 0}
     usable_rows = [row for row in rows if isinstance(row, dict) and row.get('ok')]
     failed_rows = [row for row in rows if isinstance(row, dict) and not row.get('ok')]
     auth_categories: dict[str, int] = {}
@@ -163,6 +201,9 @@ def build_mimo_runtime_status(
         'report_present': bool(report.get('_report_present')),
         'report_path': str(report.get('_report_path') or ''),
         'report_updated_at': report.get('_report_updated_at'),
+        'usable_artifact_present': bool(usable_artifact.get('_usable_present')),
+        'usable_artifact_path': str(usable_artifact.get('_usable_path') or ''),
+        'usable_artifact_updated_at': usable_artifact.get('_usable_updated_at'),
         'inventory_count': inventory_count,
         'usable_count': usable_count,
         'failed_count': failed_count,

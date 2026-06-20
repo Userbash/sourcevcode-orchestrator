@@ -126,3 +126,40 @@ def test_memory_layer_cleans_up_probe_key(monkeypatch, tmp_path):
         assert residual == []
     finally:
         orchestrator.shutdown()
+
+
+def test_antigravity_structural_probe_does_not_treat_router_plan_as_inventory(monkeypatch):
+    from core.core.diagnostic_contracts import _provider_structural_probe
+    from core.core.model_selector import ModelChoice
+    from core.core.models import Complexity
+
+    monkeypatch.setenv("ANTIGRAVITY_API_KEY", "antigravity_nonsecret_key_value_1234567890")
+
+    probe = _provider_structural_probe(
+        "antigravity",
+        {},
+        {
+            "models": [],
+            "inventory_ok": False,
+            "inventory_source": "unavailable",
+            "inventory_probe_kind": "binary_presence",
+        },
+        {"models": ["antigravity-flash", "antigravity-pro"]},
+        ModelChoice(model_name="antigravity-flash", provider="antigravity", complexity=Complexity.MEDIUM),
+    )
+
+    assert probe["details"]["inventory_ok"] is False
+    assert probe["details"]["inventory_source"] == "unavailable"
+    assert probe["failure_code"] == "PROVIDER_INVENTORY_EMPTY"
+
+
+def test_run_layer_diagnostic_check_catches_exceptions(monkeypatch):
+    from core.core import diagnostic_contracts
+
+    monkeypatch.setitem(diagnostic_contracts._CHECKS, "boot", lambda api: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    result = diagnostic_contracts.run_layer_diagnostic_check("boot", api=None)
+
+    assert result["ok"] is False
+    assert result["failures"] == ["boot_check_exception"]
+    assert result["observed"]["error_type"] == "RuntimeError"

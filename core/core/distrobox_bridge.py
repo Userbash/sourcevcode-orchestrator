@@ -12,7 +12,7 @@ class DistroboxBridgeError(RuntimeError):
 
 @dataclass(slots=True)
 class DistroboxBridge:
-    default_box_name: str = "ghbox"
+    default_box_name: str = "ai-kernel-local"
     default_image: str = "registry.fedoraproject.org/fedora-toolbox:42"
 
     def _host_prefix(self, mode: str) -> list[str]:
@@ -72,7 +72,13 @@ class DistroboxBridge:
 
         install_cmd = os.getenv(
             "HOST_BRIDGE_GH_INSTALL_CMD",
-            "if command -v dnf >/dev/null 2>&1; then sudo dnf install -y gh; elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y gh; else exit 1; fi",
+            "if command -v dnf >/dev/null 2>&1; then sudo dnf install -y gh; "
+            "elif command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y curl ca-certificates gnupg && "
+            "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && "
+            "sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && "
+            "printf '%s\n' \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null && "
+            "sudo apt-get update && sudo apt-get install -y gh; "
+            "else exit 1; fi",
         )
         install = self._run(["distrobox", "enter", box_name, "--", "sh", "-lc", install_cmd], mode)
         if install.returncode != 0:

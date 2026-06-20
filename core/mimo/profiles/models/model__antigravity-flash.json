@@ -1,0 +1,49 @@
+{
+  "profile_type": "model",
+  "profile_key": "model::antigravity-flash",
+  "provider_weights": {
+    "antigravity": {
+      "quality": 1.08,
+      "budget": 0.95,
+      "vfs": 1.0
+    },
+    "openai": {
+      "quality": 1.08,
+      "budget": 0.94,
+      "vfs": 1.0
+    },
+    "local": {
+      "quality": 0.98,
+      "budget": 1.02,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "antigravity": {
+      "quality": 1.1,
+      "budget": 0.94
+    },
+    "gpt": {
+      "quality": 1.06,
+      "budget": 0.95
+    },
+    "qwen": {
+      "quality": 1.0,
+      "budget": 1.0
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.8,
+    "avg_latency_ms": 1800,
+    "quality_min_confidence": 0.8
+  },
+  "default_context_depth": 4,
+  "budget_pressure": {
+    "high": 1800,
+    "medium": 3600
+  },
+  "quality_pressure": {
+    "high": 0.86,
+    "medium": 0.78
+  }
+}

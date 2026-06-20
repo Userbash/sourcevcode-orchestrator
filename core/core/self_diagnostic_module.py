@@ -98,6 +98,8 @@ class SelfDiagnosticModule:
             if not layer_payload["ok"]:
                 self._degrade(report)
 
+        report["remediation_plan"] = self._build_remediation_plan(report)
+        report["readiness"] = self._build_readiness_summary(report)
         return report
 
     def _build_matrix_only_payload(self, selected_layers: set[str] | None, contracts_module: Any | None = None) -> Dict[str, Any]:
@@ -154,6 +156,13 @@ class SelfDiagnosticModule:
                 "selected_layers": requested_layers,
                 "layers": {},
                 "check_count": 0,
+            },
+            "remediation_plan": [],
+            "readiness": {
+                "core_ready": True,
+                "provider_ready": True,
+                "startup_ready": True,
+                "blocking_issues": [],
             },
         }
 
@@ -631,6 +640,61 @@ class SelfDiagnosticModule:
         report["diagnostic_matrix"] = self._derive_matrix(report.get("layer_checks", []), self._normalize_layers(report.get("requested_layers")), source=source)
         if any(not check.get("ok", False) for check in report.get("layer_checks", []) if isinstance(check, dict)):
             self._degrade(report)
+
+    def _build_remediation_plan(self, report: Dict[str, Any]) -> list[Dict[str, Any]]:
+        plan: list[Dict[str, Any]] = []
+        for name, model in report.get("ai_models", {}).items():
+            if not isinstance(model, dict):
+                continue
+            status = str(model.get("status") or "").strip().lower()
+            if status in _SUCCESS_STATUSES:
+                continue
+            diagnostics = model.get("diagnostics", {}) if isinstance(model.get("diagnostics"), dict) else {}
+            remediation = diagnostics.get("remediation")
+            actions = remediation if isinstance(remediation, list) else []
+            plan.append(
+                {
+                    "area": "ai_models",
+                    "name": name,
+                    "status": status or "unknown",
+                    "error": model.get("error"),
+                    "actions": actions,
+                }
+            )
+        for check in report.get("layer_checks", []):
+            if not isinstance(check, dict) or check.get("ok", False):
+                continue
+            details = check.get("details", {}) if isinstance(check.get("details"), dict) else {}
+            failures = details.get("failures") if isinstance(details.get("failures"), list) else []
+            summary = details.get("summary") or check.get("error")
+            plan.append(
+                {
+                    "area": str(check.get("layer") or "matrix"),
+                    "name": str(check.get("name") or "check"),
+                    "status": str(check.get("status") or "degraded"),
+                    "error": check.get("error"),
+                    "failure_signatures": failures,
+                    "summary": summary,
+                    "actions": [str(summary)] if summary else [],
+                }
+            )
+        return plan
+
+    def _build_readiness_summary(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        layer_status = report.get("layer_check_status", {}) if isinstance(report.get("layer_check_status"), dict) else {}
+        core_ready = bool(layer_status.get("ok", report.get("status") == "healthy"))
+        provider_ready = True
+        for model in report.get("ai_models", {}).values():
+            if isinstance(model, dict) and str(model.get("status") or "").strip().lower() not in _SUCCESS_STATUSES:
+                provider_ready = False
+                break
+        blocking = [item.get("name") for item in report.get("remediation_plan", []) if isinstance(item, dict)]
+        return {
+            "core_ready": core_ready,
+            "provider_ready": provider_ready,
+            "startup_ready": core_ready and provider_ready and report.get("status") == "healthy",
+            "blocking_issues": [str(item) for item in blocking if str(item).strip()],
+        }
 
     def finalize(self) -> Dict[str, Any]:
         """Module summary for reporting."""

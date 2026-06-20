@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import time
 import subprocess
@@ -28,13 +29,42 @@ class AntigravityModelRegistry:
     def _api_key(self) -> str:
         return os.getenv("ANTIGRAVITY_API_KEY", "").strip() or os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
 
+    @staticmethod
+    def _normalize_model_name(raw: str) -> str:
+        return str(raw or "").strip().replace("models/", "").replace(" ", "-").lower()
+
+    @classmethod
+    def _looks_like_model_name(cls, raw: str) -> bool:
+        name = cls._normalize_model_name(raw)
+        if not name or len(name) > 128:
+            return False
+        if any(marker in name for marker in ("authentication", "permission_denied", "timed-out", "timed_out", "rate-limit", "resource_exhausted", "api_key", "forbidden", "unauthorized", "error:")):
+            return False
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*", name):
+            return False
+        return any(marker in name for marker in ("flash", "lite", "pro", "thinking", "gemini", "claude"))
+
+    @classmethod
+    def _filter_models(cls, models: list[str]) -> list[str]:
+        seen: set[str] = set()
+        filtered: list[str] = []
+        for raw in models:
+            name = cls._normalize_model_name(raw)
+            if not cls._looks_like_model_name(name) or name in seen:
+                continue
+            seen.add(name)
+            filtered.append(name)
+        return filtered
+
     def _fetch_live(self) -> list[str]:
         # Try fetching via agy CLI first as a reliable local source
         try:
             result = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 # Map the CLI output to the expected model format if necessary
-                return [line.strip().replace(" ", "-").lower() for line in result.stdout.splitlines() if line.strip()]
+                models = self._filter_models([line for line in result.stdout.splitlines() if line.strip()])
+                if models:
+                    return models
         except Exception:
             pass
 
@@ -58,14 +88,7 @@ class AntigravityModelRegistry:
             page_token = payload.get("nextPageToken", "")
             if not page_token:
                 break
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for model in out:
-            if model in seen:
-                continue
-            seen.add(model)
-            deduped.append(model)
-        return deduped
+        return self._filter_models(out)
 
     def _load_cache(self) -> list[str]:
         if not self.cache_path.exists():
@@ -75,20 +98,22 @@ class AntigravityModelRegistry:
             ts = int(payload.get("ts", 0))
             if int(time.time()) - ts > self.ttl_sec:
                 return []
-            return [str(x) for x in payload.get("models", []) if str(x)]
+            return self._filter_models([str(x) for x in payload.get("models", []) if str(x)])
         except Exception:
             return []
 
     def _save_cache(self, models: list[str]) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_path.write_text(json.dumps({"ts": int(time.time()), "models": models}, ensure_ascii=True), encoding="utf-8")
+        self.cache_path.write_text(json.dumps({"ts": int(time.time()), "models": self._filter_models(models)}, ensure_ascii=True), encoding="utf-8")
 
     def get_models(self, force_refresh: bool = False) -> list[str]:
-        if not force_refresh:
-            cached = self._load_cache()
-            if cached:
-                return cached
-        live = self._fetch_live()
+        cached = [] if force_refresh else self._load_cache()
+        if cached:
+            return cached
+        try:
+            live = self._fetch_live()
+        except Exception:
+            live = []
         if live:
             self._save_cache(live)
             return live

@@ -63,6 +63,18 @@ class StrictTDDModule(KernelModule):
         plan.atomic_tasks = new_tasks
         return plan
 
+    def route_gate(self, task: Task) -> dict[str, Any] | None:
+        """
+        Optional router hook.
+
+        The task router probes this method during admission. The strict TDD
+        module currently enforces policy by mutating execution plans instead of
+        overriding task routing, so return ``None`` to keep default routing.
+        """
+        if not self.enabled:
+            return None
+        return None
+
     def before_task(self, task: Task, context: dict[str, Any]) -> None:
         """
         Enforce guards before task execution.

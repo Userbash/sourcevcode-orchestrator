@@ -44,7 +44,7 @@ def has_auth_marker() -> bool:
 
 
 def _prefer_oauth_cli() -> bool:
-    return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_cli_command() -> list[str] | None:
@@ -62,7 +62,7 @@ def _resolve_cli_command() -> list[str] | None:
         for user_home in var_home.glob("*"):
             if user_home.is_dir() and user_home not in search_roots:
                 search_roots.append(user_home)
-    for candidate in ("agy", "antigravity", "gemini"):
+    for candidate in ("agy", "antigravity"):
         resolved = shutil.which(candidate)
         if resolved:
             candidate_paths.append(resolved)
@@ -111,17 +111,6 @@ def _translate_cli_args(args: list[str]) -> list[str]:
     if not cmd_prefix:
         raise FileNotFoundError("antigravity_cli_not_found")
     cli_name = Path(cmd_prefix[0]).name.lower()
-    if cli_name != "gemini":
-        return [*cmd_prefix, *args]
-    if args[:1] == ["models"]:
-        return [*cmd_prefix, "--version"]
-    if args[:1] == ["-p"]:
-        prompt = args[1] if len(args) > 1 else ""
-        return [*cmd_prefix, "-p", prompt, "--skip-trust"]
-    if "--prompt-interactive" in args:
-        index = args.index("--prompt-interactive")
-        prompt = args[index + 1] if index + 1 < len(args) else AUTH_PROMPT
-        return [*cmd_prefix, "--prompt-interactive", prompt, "--skip-trust"]
     return [*cmd_prefix, *args]
 
 
@@ -145,6 +134,8 @@ def _classify_failure_text(raw: str) -> str:
         return "cli_missing"
     if any(marker in text for marker in ["authentication required", "please sign in", "authorization code", "paste the authorization code", "unauthorized", "forbidden", "error: authentication", "error: please sign in"]):
         return "auth_required"
+    if any(marker in text for marker in ["unsupported_client", "ineligibletiererror", "migrate to the antigravity suite of products"]):
+        return "unsupported_client"
     if any(marker in text for marker in ["timed out", "timeout", "connection reset", "temporarily unavailable", "network", "dns", "econn", "refused", "unreachable"]):
         return "transient"
     return "unknown"

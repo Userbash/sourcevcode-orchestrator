@@ -33,3 +33,9 @@ You are Gemini CLI, and you are now **DIRECTLY CONNECTED** to the AI Orchestrato
 ## Connection Status
 - **Modules:** `chat_bus`, `trigger_dispatcher` (Active)
 - **Status:** Expanded semantic routing established.
+
+## Runtime Notes
+
+- Prefer the orchestrator `CORE:` path for provider diagnostics instead of manually retrying OAuth.
+- If Antigravity reports `legacy_gemini_cli` or `unsupported_client`, do not start another browser login loop; escalate to runtime migration or API-mode repair.
+- SourceCraft is expected to be enabled in the orchestrator runtime, with GitHub CLI provided through the `ai-kernel-local` distrobox when host `gh` is absent.

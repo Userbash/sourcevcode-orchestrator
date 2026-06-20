@@ -13,6 +13,19 @@ class KPIEventLogger:
     file_path: Path
     summary_path: Path | None = None
 
+    @staticmethod
+    def _json_default(value: Any) -> Any:
+        if hasattr(value, "isoformat"):
+            try:
+                return value.isoformat()
+            except Exception:
+                return str(value)
+        return str(value)
+
+    @classmethod
+    def _encode_row(cls, payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=True, default=cls._json_default)
+
     @classmethod
     def from_env(cls) -> "KPIEventLogger":
         configured = (os.getenv("AI_BRIDGE_KPI_LOG_FILE") or "").strip()
@@ -32,14 +45,17 @@ class KPIEventLogger:
         row = dict(payload)
         row.setdefault("logged_at", datetime.now(UTC).isoformat())
         with self.file_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=True) + "\n")
+            f.write(self._encode_row(row) + "\n")
 
     def write_summary(self, payload: dict[str, Any]) -> None:
         if self.summary_path is None:
             return
         row = dict(payload)
         row.setdefault("logged_at", datetime.now(UTC).isoformat())
-        self.summary_path.write_text(json.dumps(row, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+        self.summary_path.write_text(
+            json.dumps(row, ensure_ascii=True, indent=2, sort_keys=True, default=self._json_default),
+            encoding="utf-8",
+        )
 
     def append_fallback(self, payload: dict[str, Any], *, fallback_path: Path | None = None) -> None:
         target = fallback_path or self.file_path.with_name("task_lifecycle_fallback.jsonl")
@@ -47,4 +63,4 @@ class KPIEventLogger:
         row = dict(payload)
         row.setdefault("logged_at", datetime.now(UTC).isoformat())
         with target.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=True) + "\n")
+            f.write(self._encode_row(row) + "\n")

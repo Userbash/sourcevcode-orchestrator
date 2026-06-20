@@ -243,6 +243,9 @@ class ModelAvailability:
         status = shared_antigravity_snapshot(force=False)
         manager = AntigravityManager()
         diagnostics["models"] = status.get("models", [])
+        diagnostics["inventory_ok"] = status.get("inventory_ok")
+        diagnostics["inventory_source"] = status.get("inventory_source")
+        diagnostics["inventory_probe_kind"] = status.get("inventory_probe_kind")
         diagnostics["models_probe"] = status.get("models_probe", {})
         diagnostics["generation_probe"] = status.get("generation_probe", {})
         if status.get("auth_probe"):
@@ -256,7 +259,7 @@ class ModelAvailability:
         if status.get("ready"):
             health = ProviderHealth("antigravity", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics)
         else:
-            raw_error = str(diagnostics.get("models_probe", {}).get("stderr") or diagnostics.get("generation_probe", {}).get("stderr") or diagnostics.get("auth_probe", {}).get("stderr") or "antigravity_not_ready")
+            raw_error = str((diagnostics.get("api_probe") or {}).get("error") or diagnostics.get("generation_probe", {}).get("stderr") or diagnostics.get("models_probe", {}).get("stderr") or (diagnostics.get("auth_probe") or {}).get("stderr") or "antigravity_not_ready")
             error = "antigravity_auth_failed" if self._status_from_error(raw_error, ProviderStatus.DEGRADED) == ProviderStatus.AUTH_FAILED else "antigravity_not_ready"
             health = ProviderHealth("antigravity", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error=error, diagnostics=diagnostics)
             diagnostics["remediation"] = self._remediation("antigravity", health.status, diagnostics)

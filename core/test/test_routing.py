@@ -3,6 +3,7 @@ from core.core.load_balancer import LoadBalancer
 from core.core.models import AgentStatus, Priority, Task, TaskContext, TaskInput, TaskType
 from core.core.task_router import TaskRouter
 from core.core.orchestrator import Orchestrator
+from core.core.tdd_policy_module import StrictTDDModule
 
 
 def test_register_agent_and_route_by_capability():
@@ -182,3 +183,20 @@ def test_router_avoids_economy_bias_for_single_lane_validation_profile():
 
     assert accepted.status.value == "accepted"
     assert accepted.assigned_agent == "openai-review"
+
+
+def test_router_tdd_module_without_route_override_keeps_default_routing():
+    class _FakeApi:
+        def get_module(self, name):
+            return StrictTDDModule() if name == "tdd_policy" else None
+
+    registry = AgentRegistry()
+    registry.register("tester-1", "tester", "local://tester", ["test", "ci"])
+    router = TaskRouter(registry, LoadBalancer())
+    router.set_api(_FakeApi())
+    task = Task(TaskType.TEST, TaskInput("run regression tests"), TaskContext("p", ".", "main"))
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "tester-1"

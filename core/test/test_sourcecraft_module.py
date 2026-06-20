@@ -391,6 +391,79 @@ def test_sourcecraft_ensure_ready_falls_back_to_direct_gh_runtime(tmp_path, monk
     assert report["gh_runtime"] == "direct"
     assert report["gh_auth_ready"] is True
 
+
+def test_sourcecraft_ensure_ready_lazy_resolves_binary(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+
+    def fake_run(command, *, repo_path=".", timeout_sec=None):
+        joined = " ".join(command)
+        if joined == "git remote get-url origin":
+            return {"ok": True, "stdout": "https://github.com/Userbash/sourcevcode-orchestrator.git", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh sh -lc command -v gh >/dev/null 2>&1":
+            return {"ok": True, "stdout": "", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh gh auth status":
+            return {"ok": True, "stdout": "logged in", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.name":
+            return {"ok": True, "stdout": "Userbash", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.email":
+            return {"ok": True, "stdout": "wairuste@gmail.com", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "git symbolic-ref --short HEAD":
+            return {"ok": True, "stdout": "main", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh gh repo view Userbash/sourcevcode-orchestrator":
+            return {"ok": True, "stdout": "repo ok", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        raise AssertionError(joined)
+
+    monkeypatch.setattr(module, "_run_command", fake_run)
+
+    report = module.ensure_ready(repo_path=".")
+
+    assert report["status"] == "ready"
+    assert report["src_ready"] is True
+    assert module._binary == str(src)
+
+
+def test_sourcecraft_finalize_refreshes_stale_runtime(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _make_src_script(src, 'echo "Version: 0.1.2"')
+    monkeypatch.setenv("SOURCECRAFT_CLI_BIN", str(src))
+
+    module = SourceCraftModule()
+    module.on_load(_FakeAPI())
+    module._runtime_health = {
+        "status": "degraded",
+        "checked_at": "2000-01-01T00:00:00+00:00",
+        "warnings": ["stale"],
+    }
+
+    def fake_ensure_ready(*, repo_path="."):
+        return {
+            "status": "ready",
+            "checked_at": "2026-06-20T09:00:00+00:00",
+            "repo_path": repo_path,
+            "src_ready": True,
+            "src_version": "Version: 0.1.2",
+            "ghbox_ready": True,
+            "gh_runtime": "direct",
+            "gh_auth_ready": True,
+            "token_scope_ok": True,
+            "git_identity": {"name": "Userbash", "email": "wairuste@gmail.com", "configured": True},
+            "origin_ready": True,
+            "repo_slug": "Userbash/sourcevcode-orchestrator",
+            "detached_head": False,
+            "current_branch": "main",
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(module, "ensure_ready", fake_ensure_ready)
+
+    final = module.finalize()
+
+    assert final["runtime"]["status"] == "ready"
+
 def test_sourcecraft_push_branch_requires_preview_token(tmp_path, monkeypatch):
     src = tmp_path / "src"
     _make_src_script(src, 'echo "Version: 0.1.2"')

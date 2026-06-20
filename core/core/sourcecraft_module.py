@@ -599,6 +599,13 @@ class SourceCraftModule(KernelModule):
         return first
 
     def ensure_ready(self, *, repo_path: str = ".") -> dict[str, Any]:
+        if not self._binary:
+            self._binary = self._resolve_binary()
+            if self._binary and not self._version:
+                probe = self._probe_version()
+                if probe.get("ok"):
+                    self._last_probe = probe
+                    self._version = str(probe.get("stdout") or "").splitlines()[0].strip() or None
         resolved_repo_path = repo_path or self._default_repo_path()
         try:
             repo_slug = self._resolve_repo_slug(resolved_repo_path)
@@ -1208,8 +1215,6 @@ class SourceCraftModule(KernelModule):
             self._host_bridge = api.get_context("host_bridge")
         except Exception:
             self._host_bridge = None
-        if self._container_runtime():
-            self._host_bridge = None
         self._binary = self._resolve_binary()
         if not self._binary:
             self._status = "error"
@@ -1308,6 +1313,25 @@ class SourceCraftModule(KernelModule):
         }
 
     def finalize(self) -> dict[str, Any]:
+        runtime = self._runtime_health
+        checked_at_raw = str(runtime.get("checked_at") or "").strip() if isinstance(runtime, dict) else ""
+        checked_at = None
+        if checked_at_raw:
+            try:
+                checked_at = datetime.fromisoformat(checked_at_raw)
+            except ValueError:
+                checked_at = None
+        runtime_stale = not checked_at or (datetime.now(UTC) - checked_at).total_seconds() > 60
+        runtime_needs_refresh = self._status in {"ready", "degraded"} and (
+            not isinstance(runtime, dict)
+            or runtime.get("status") != "ready"
+            or runtime_stale
+        )
+        if runtime_needs_refresh:
+            try:
+                runtime = self.ensure_ready(repo_path=self._default_repo_path())
+            except Exception as exc:
+                runtime = self._runtime_health or {"status": "degraded", "warnings": [f"runtime refresh failed: {exc}"]}
         return {
             "status": self._status,
             "binary": self._binary,
@@ -1321,7 +1345,7 @@ class SourceCraftModule(KernelModule):
                 "supported_actions": self._supported_actions(),
                 "tools": self._command_availability(),
             },
-            "runtime": self._runtime_health,
+            "runtime": runtime,
             "audit_log": list(self._audit_log[-20:]),
             "delegation_examples": {
                 "repo_ops": self._recommended_actions("repo_ops"),

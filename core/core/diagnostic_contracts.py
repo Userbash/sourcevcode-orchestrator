@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import traceback
+from dataclasses import asdict, is_dataclass
 from typing import Any, Iterable
 
 from pydantic import Field
@@ -989,12 +991,17 @@ def _provider_structural_probe(
         cli_cmd = ExternalAIBridge.resolve_antigravity_cli_command()
         auth_diag = ExternalAIBridge.antigravity_auth_diagnostics()
         cached_models = antigravity_state.get("models", []) if isinstance(antigravity_state, dict) else []
-        inventory_ok = bool(cached_models or router_plan.get("models"))
+        inventory_ok = bool(antigravity_state.get("inventory_ok")) if isinstance(antigravity_state, dict) else False
+        inventory_source = str(antigravity_state.get("inventory_source") or "unavailable") if isinstance(antigravity_state, dict) else "unavailable"
+        inventory_probe_kind = str(antigravity_state.get("inventory_probe_kind") or "unknown") if isinstance(antigravity_state, dict) else "unknown"
         details.update(
             {
                 "reachable": bool(cli_cmd or os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip()),
                 "authenticated": bool(credential.get("usable") or auth_diag.get("settings_present")),
                 "inventory_ok": inventory_ok,
+                "inventory_source": inventory_source,
+                "inventory_probe_kind": inventory_probe_kind,
+                "cached_models": cached_models,
                 "credential": credential,
                 "cli_command": cli_cmd,
                 "auth_diagnostics": auth_diag,
@@ -1076,7 +1083,15 @@ def _provider_probe_details(
     live_enabled = os.getenv(_LIVE_PROVIDER_PROBE_ENV, "false").strip().lower() in {"1", "true", "yes", "on"}
     availability = getattr(api, "availability", None) if api is not None else None
     try:
-        router_plan = AntigravityRuntimeRouter().build_plan(task, task.input.description).as_dict()
+        raw_router_plan = AntigravityRuntimeRouter().build_plan(task, task.input.description)
+        if hasattr(raw_router_plan, "as_dict"):
+            router_plan = raw_router_plan.as_dict()
+        elif is_dataclass(raw_router_plan):
+            router_plan = asdict(raw_router_plan)
+        elif hasattr(raw_router_plan, "__dict__"):
+            router_plan = dict(vars(raw_router_plan))
+        else:
+            router_plan = {"value": str(raw_router_plan)}
     except Exception as exc:
         router_plan = {"error": str(exc)}
 
@@ -1202,16 +1217,37 @@ _CHECKS = {
 }
 
 
+def _check_exception_result(layer: str, exc: Exception) -> DiagnosticCheckResult:
+    return DiagnosticCheckResult(
+        layer=layer,
+        ok=False,
+        summary=f"Diagnostic check for layer '{layer}' crashed.",
+        failures=[f"{layer}_check_exception"],
+        observed={
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(limit=8),
+        },
+    )
+
+
+def _run_check(layer: str, api: Any | None = None) -> DiagnosticCheckResult:
+    try:
+        return _CHECKS[layer](api)
+    except Exception as exc:
+        return _check_exception_result(layer, exc)
+
+
 def run_layer_diagnostic_check(layer: str, api: Any | None = None) -> dict[str, Any]:
     name = str(layer).strip().lower()
     if name not in _CHECKS:
         raise ValueError(f"Unknown diagnostic layer: {layer}")
-    return _CHECKS[name](api).as_dict()
+    return _run_check(name, api).as_dict()
 
 
 def run_diagnostic_checks(api: Any | None = None, *, layers: Iterable[str] | None = None) -> dict[str, Any]:
     selected = _normalize_layers(layers)
-    results = [_CHECKS[layer](api) for layer in selected]
+    results = [_run_check(layer, api) for layer in selected]
     failures = {
         result.layer: list(result.failures)
         for result in results

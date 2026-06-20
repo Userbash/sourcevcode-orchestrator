@@ -58,7 +58,7 @@ class ExternalAIBridge:
             for user_home in var_home.glob("*"):
                 if user_home.is_dir() and user_home not in search_roots:
                     search_roots.append(user_home)
-        for candidate in ("agy", "antigravity", "gemini"):
+        for candidate in ("agy", "antigravity"):
             resolved = shutil.which(candidate)
             if resolved:
                 candidate_paths.append(resolved)
@@ -69,9 +69,7 @@ class ExternalAIBridge:
                 ])
         candidate_paths.extend([
             "/usr/local/bin/agy",
-            "/usr/local/bin/gemini",
             "/app/core/bin/agy",
-            "/app/core/bin/gemini",
         ])
         for resolved in candidate_paths:
             if resolved and os.path.isfile(resolved) and os.access(resolved, os.X_OK):
@@ -79,13 +77,8 @@ class ExternalAIBridge:
         return None
 
     @staticmethod
-    def resolve_gemini_cli_command() -> list[str] | None:
-        # Legacy compatibility path retained for older call sites.
-        return ExternalAIBridge.resolve_antigravity_cli_command()
-
-    @staticmethod
     def _prefer_oauth_cli() -> bool:
-        return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true").strip().lower() in {"1", "true", "yes", "on"}
+        return os.getenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "false").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _antigravity_runtime_env(command_name: str | None = None) -> dict[str, str]:
@@ -113,15 +106,17 @@ class ExternalAIBridge:
                 merged.append(part)
         env["PATH"] = os.pathsep.join(merged)
         normalized_command = (command_name or "").strip().lower()
-        if ExternalAIBridge._prefer_oauth_cli() and normalized_command != "gemini":
+        if ExternalAIBridge._prefer_oauth_cli():
             for key in ("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
                 env.pop(key, None)
         return env
 
     @staticmethod
-    def _gemini_runtime_env() -> dict[str, str]:
-        # Legacy compatibility path retained for older call sites.
-        return ExternalAIBridge._antigravity_runtime_env()
+    def _timeout_error_detail(exc: subprocess.TimeoutExpired) -> str:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        detail = "\n".join(part.strip() for part in (stderr, stdout) if str(part).strip()).strip()
+        return detail or f"timeout: {exc}"
 
     def _run_prompt_via_proxy(self, prompt: str, timeout_sec: int) -> BridgeExecResult | None:
         if not self.proxy_url:
@@ -207,6 +202,8 @@ class ExternalAIBridge:
             return "quota_exhaustion"
         if any(marker in text for marker in ["401", "403", "api key", "auth", "unauthorized", "forbidden"]):
             return "auth_fail"
+        if any(marker in text for marker in ["unsupported_client", "ineligibletiererror", "migrate to the antigravity suite of products"]):
+            return "unsupported_client"
         if any(marker in text for marker in ["connecttimeout", "readtimeout", "timed out", "connection timed out", "tcp"]):
             return "tcp_timeout"
         if any(marker in text for marker in ["deadline exceeded", "request timeout", "504", "gateway timeout", "api timeout"]):
@@ -274,7 +271,8 @@ class ExternalAIBridge:
                 except RetryError as exc:
                     last_error = str(exc)
                 except subprocess.TimeoutExpired as exc:
-                    return BridgeExecResult(False, "", f"timeout: {exc}", "antigravity-cli", model, attempts, error_type="sdk_hang")
+                    err = self._timeout_error_detail(exc)
+                    return BridgeExecResult(False, "", err, "antigravity-cli", model, attempts, error_type=self.classify_error(err))
                 except RuntimeError as exc:
                     last_error = str(exc)
                     if model and (self._is_capacity_error(last_error) or self._is_token_error(last_error) or self.classify_error(last_error) in {"quota_exhaustion", "auth_fail"}):
@@ -288,7 +286,8 @@ class ExternalAIBridge:
                 try:
                     proc = _run_once()
                 except subprocess.TimeoutExpired as exc:
-                    return BridgeExecResult(False, "", f"timeout: {exc}", "antigravity-cli", model, attempts, error_type="sdk_hang")
+                    err = self._timeout_error_detail(exc)
+                    return BridgeExecResult(False, "", err, "antigravity-cli", model, attempts, error_type=self.classify_error(err))
                 except Exception as exc:
                     return BridgeExecResult(False, "", f"execution_error: {exc}", "antigravity-cli", model, attempts, error_type=self.classify_error(str(exc)))
 

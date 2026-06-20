@@ -23,9 +23,12 @@ def main() -> None:
         "placeholder": bool(credential.get("placeholder")),
         "ready": bool(status.get("ready")),
         "auth_mode": status.get("auth_mode"),
+        "inventory_ok": status.get("inventory_ok"),
+        "inventory_source": status.get("inventory_source"),
+        "inventory_probe_kind": status.get("inventory_probe_kind"),
         "model_count": len(status.get("models", [])),
         "api_status_code": api_probe.get("status_code"),
-        "error": api_probe.get("error") or (status.get("auth_probe") or {}).get("error") or (status.get("models_probe") or {}).get("error"),
+        "error": api_probe.get("error") or (status.get("generation_probe") or {}).get("stderr") or (status.get("auth_probe") or {}).get("error") or (status.get("models_probe") or {}).get("error"),
     }
     print(json.dumps(summary, ensure_ascii=True))
 

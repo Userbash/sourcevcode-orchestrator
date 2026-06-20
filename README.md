@@ -76,7 +76,7 @@ The bootstrap script will:
 - start `Postgres`, `RabbitMQ`, the orchestrator, and an `Ollama` container on `127.0.0.1:11434`
 - pull the configured local model
 - verify `Mistral` when `MISTRAL_API_KEY` is set
-- verify or launch `agy` authorization when requested
+- verify the installed Antigravity-compatible runtime and avoid unsupported legacy Gemini login loops when the host only has unsupported `gemini` CLI
 
 ## Runtime endpoints
 
@@ -92,7 +92,7 @@ The bootstrap script will:
 - `.env.bridge.example`: provider keys, OpenAI-compatible endpoint overrides, and bridge-specific runtime settings
 - `.env.gemini.local.example`: local model defaults
 
-Remote providers remain optional. Without `OPENAI_API_KEY`, `MISTRAL_API_KEY`, or a working `agy` login, the stack still starts and serves local orchestration, database, broker, and local-model routing. The default zero-to-working local model is `qwen2.5:0.5b` to keep first deployment fast; move to a larger Ollama model once the stack is healthy.
+Remote providers remain optional. Without `OPENAI_API_KEY`, `MISTRAL_API_KEY`, or a working Antigravity-compatible runtime, the stack still starts and serves local orchestration, database, broker, SourceCraft, and local-model routing. The default zero-to-working local model is `qwen2.5:0.5b` to keep first deployment fast; move to a larger Ollama model once the stack is healthy.
 
 ## Development commands
 
@@ -137,3 +137,10 @@ MIT (see `LICENSE`).
 - The routing stack now uses a normalized intake profile to choose safer providers, stronger review lanes, and parallel code fan-out when the request shape supports it.
 - Prompt optimization and memory context now surface intake-quality and risk hints so downstream agents act with clearer guardrails.
 - Local bootstrap now provisions the minimal AI stack without requiring `podman compose` or manual env-file creation.
+
+## Antigravity notes
+
+- The repo now defaults `AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH=false` to avoid stripping API keys from unsupported legacy Gemini CLI probes.
+- If the host only has `@google/gemini-cli` and it returns `UNSUPPORTED_CLIENT`, the orchestrator will mark Antigravity as degraded without entering repeated OAuth/login loops.
+- A supported `agy`/`antigravity` runtime is still required for a true `healthy` Antigravity state when API mode is unavailable.
+- Use `python3 -m core.scripts.verify_antigravity_keys` for the canonical readiness summary.

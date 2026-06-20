@@ -57,15 +57,15 @@ def test_bridge_treats_auth_prompt_output_as_failure(monkeypatch):
     assert result.error_type == "auth_fail"
 
 
-def test_resolve_antigravity_cli_command_accepts_gemini_alias(monkeypatch):
+def test_resolve_antigravity_cli_command_rejects_gemini_alias(monkeypatch):
     monkeypatch.setattr("core.core.external_ai_bridge.shutil.which", lambda name: "/tmp/gemini" if name == "gemini" else None)
     monkeypatch.setattr("core.core.external_ai_bridge.os.path.isfile", lambda path: path == "/tmp/gemini")
     monkeypatch.setattr("core.core.external_ai_bridge.os.access", lambda path, mode: path == "/tmp/gemini")
 
-    assert ExternalAIBridge.resolve_antigravity_cli_command() == ["/tmp/gemini"]
+    assert ExternalAIBridge.resolve_antigravity_cli_command() is None
 
 
-def test_antigravity_runtime_env_prefers_oauth_and_preserves_bin_paths(monkeypatch):
+def test_antigravity_runtime_env_preserves_keys_when_oauth_not_forced(monkeypatch):
     monkeypatch.setenv("HOME", "/home/tester")
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("ANTIGRAVITY_API_KEY", "token-a")
@@ -76,20 +76,38 @@ def test_antigravity_runtime_env_prefers_oauth_and_preserves_bin_paths(monkeypat
 
     assert env["PATH"].startswith("/home/tester/.npm-packages/bin")
     assert "/home/tester/.local/bin" in env["PATH"]
-    assert "ANTIGRAVITY_API_KEY" not in env
-    assert "GEMINI_API_KEY" not in env
-    assert "GOOGLE_API_KEY" not in env
+    assert env["ANTIGRAVITY_API_KEY"] == "token-a"
+    assert env["GEMINI_API_KEY"] == "token-b"
+    assert env["GOOGLE_API_KEY"] == "token-c"
 
 
-def test_antigravity_runtime_env_keeps_api_keys_for_gemini_cli(monkeypatch):
+def test_antigravity_runtime_env_strips_keys_when_oauth_forced(monkeypatch):
     monkeypatch.setenv("HOME", "/home/tester")
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("ANTIGRAVITY_API_KEY", "token-a")
     monkeypatch.setenv("GEMINI_API_KEY", "token-b")
     monkeypatch.setenv("GOOGLE_API_KEY", "token-c")
 
-    env = ExternalAIBridge._antigravity_runtime_env("gemini")
+    monkeypatch.setenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true")
 
-    assert env["ANTIGRAVITY_API_KEY"] == "token-a"
-    assert env["GEMINI_API_KEY"] == "token-b"
-    assert env["GOOGLE_API_KEY"] == "token-c"
+    env = ExternalAIBridge._antigravity_runtime_env("agy")
+
+    assert "ANTIGRAVITY_API_KEY" not in env
+    assert "GEMINI_API_KEY" not in env
+    assert "GOOGLE_API_KEY" not in env
+
+def test_bridge_timeout_preserves_partial_capacity_error(monkeypatch):
+    bridge = ExternalAIBridge()
+    monkeypatch.setattr(ExternalAIBridge, "resolve_antigravity_cli_command", staticmethod(lambda: ["agy"]))
+
+    def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, stderr="429 RESOURCE_EXHAUSTED MODEL_CAPACITY_EXHAUSTED")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
+
+    assert result.ok is False
+    assert "RESOURCE_EXHAUSTED" in result.error
+    assert result.error_type == "quota_exhaustion"
+

@@ -270,7 +270,7 @@ start_orchestrator() {
     -e AI_BRIDGE_MEMORY_STORE_DIR=/app/memory_store \
     -e AI_BRIDGE_LIVE_MODEL_PROBE=false \
     -e AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS=false \
-    -e AI_BRIDGE_DISABLE_SOURCECRAFT=true \
+    -e AI_BRIDGE_DISABLE_SOURCECRAFT="${AI_BRIDGE_DISABLE_SOURCECRAFT:-false}" \
     -e AI_BRIDGE_ENABLE_VOICE=false \
     -e AI_BRIDGE_AUTO_APPROVE=true \
     -e AI_BRIDGE_CONFIRMATION_POLICY=full_auto \
@@ -279,6 +279,7 @@ start_orchestrator() {
     -v "/var/home/sanya/.npm-packages:/var/home/sanya/.npm-packages:ro,z" \
     -v "$PROJECT_ROOT/.env.bridge:/app/.env.bridge:ro,z" \
     -v "$PROJECT_ROOT/scripts:/app/scripts:ro,z" \
+    -v "$PROJECT_ROOT/.tooling:/app/.tooling:ro,z" \
     -v "$PROJECT_ROOT:/workspace:z" \
     "$ORCHESTRATOR_IMAGE" >/dev/null
 
@@ -299,8 +300,8 @@ verify_mistral() {
 }
 
 verify_agy() {
-  if ! host_run bash -lc 'command -v agy >/dev/null 2>&1' >/dev/null 2>&1; then
-    warn "agy is not installed on the host. Antigravity provider will stay degraded until agy is installed and authorized."
+  if ! host_run bash -lc 'command -v agy >/dev/null 2>&1 || command -v antigravity >/dev/null 2>&1' >/dev/null 2>&1; then
+    warn "No Antigravity-compatible CLI is installed on the host. Antigravity provider will stay degraded until agy/antigravity is installed or API mode is fixed."
     return
   fi
 
