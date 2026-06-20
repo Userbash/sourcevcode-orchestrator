@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BASE_DIR="${AI_KERNEL_MODEL_DIR:-/var/home/sanya/.local/share/ai-kernel/models/hauhaucs-qwen36-35b-a3b-aggressive}"
-VENV_DIR="${AI_KERNEL_VENV_DIR:-/var/home/sanya/.local/share/ai-kernel/venvs/llama-cpp}"
+VENV_DIR="${AI_KERNEL_VENV_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ai-kernel/venvs/llama-cpp}"
 MODEL_PATH="${AI_KERNEL_MODEL_PATH:-$BASE_DIR/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf}"
 MMPROJ_PATH="${AI_KERNEL_MMPROJ_PATH:-$BASE_DIR/mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf}"
 HOST="${AI_KERNEL_HOST:-0.0.0.0}"

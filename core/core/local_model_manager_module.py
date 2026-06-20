@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .kernel_protocol import KernelAPI, KernelModule
+from .local_model_memory_policy import LocalModelMemoryPolicy
 from .local_model_runtime import LocalModelRuntime, LocalModelResidentInfo, LocalModelRuntimeConfig
 
 OOM_ERROR_MARKERS = (
@@ -16,12 +17,6 @@ OOM_ERROR_MARKERS = (
     "cuda out of memory",
     "llama-server process has terminated",
 )
-
-DEFAULT_MODEL_MEMORY_GB = {
-    "qwen2.5:32b-instruct-q4_k_m": 22.0,
-    "qwen-2.5-7b-instruct": 6.0,
-    "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m": 24.0,
-}
 
 
 @dataclass(slots=True)
@@ -47,35 +42,14 @@ class ResidentModelRecord:
 class LocalModelManagerModule(KernelModule):
     name = "local_model_manager"
 
-    def __init__(self, runtime: LocalModelRuntime | None = None) -> None:
+    def __init__(self, runtime: LocalModelRuntime | None = None, policy: LocalModelMemoryPolicy | None = None) -> None:
         self._api: KernelAPI | None = None
         self.runtime = runtime or LocalModelRuntime(LocalModelRuntimeConfig.from_env())
         self._lock = threading.RLock()
         self._records: dict[tuple[str, str], ResidentModelRecord] = {}
         self._task_claims: dict[str, tuple[str, str]] = {}
-        self.total_memory_budget_gb = self._env_float("AI_BRIDGE_LOCAL_MODEL_MEMORY_BUDGET_GB", 28.0)
-        self.pressure_threshold = self._env_float("AI_BRIDGE_LOCAL_MODEL_PRESSURE_THRESHOLD", 0.92)
-        self.idle_unload_sec = self._env_int("AI_BRIDGE_LOCAL_MODEL_IDLE_UNLOAD_SEC", 900)
-        self.warm_keep_alive_sec = self._env_int("AI_BRIDGE_LOCAL_MODEL_WARM_KEEPALIVE_SEC", 300)
-        self.oom_cooldown_sec = self._env_int("AI_BRIDGE_LOCAL_MODEL_OOM_COOLDOWN_SEC", 600)
-        self.model_memory_map = self._load_model_memory_map()
+        self.policy = policy or LocalModelMemoryPolicy.from_env()
         self._register_configured_models()
-
-    @staticmethod
-    def _env_float(name: str, default: float) -> float:
-        raw = os.getenv(name, str(default)).strip()
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return default
-
-    @staticmethod
-    def _env_int(name: str, default: int) -> int:
-        raw = os.getenv(name, str(default)).strip()
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            return default
 
     @staticmethod
     def _normalize_provider(provider: str) -> str:
@@ -99,26 +73,13 @@ class LocalModelManagerModule(KernelModule):
         except Exception:
             return None
 
-    def _load_model_memory_map(self) -> dict[str, float]:
-        mapping = dict(DEFAULT_MODEL_MEMORY_GB)
-        raw = os.getenv("AI_BRIDGE_LOCAL_MODEL_MEMORY_MAP", "").strip()
-        for item in raw.split(","):
-            if "=" not in item:
-                continue
-            key, value = item.split("=", 1)
-            try:
-                mapping[key.strip()] = max(0.1, float(value.strip()))
-            except ValueError:
-                continue
-        return mapping
-
     def _register_configured_models(self) -> None:
         self._touch("local", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL") or "qwen2.5:32b-instruct-q4_k_m")
         self._touch("local", "qwen-2.5-7b-instruct")
         self._touch("ai_kernel", os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m")
 
     def _estimated_memory_gb(self, model_name: str) -> float:
-        return float(self.model_memory_map.get(model_name, 8.0))
+        return self.policy.estimated_memory_gb(model_name)
 
     def _touch(self, provider: str, model_name: str) -> ResidentModelRecord:
         key = (self._normalize_provider(provider), str(model_name or "").strip())
@@ -197,7 +158,7 @@ class LocalModelManagerModule(KernelModule):
         unloaded = False
         if oom_detected:
             record.oom_failures += 1
-            record.cooldown_until = (now + timedelta(seconds=self.oom_cooldown_sec)).isoformat()
+            record.cooldown_until = (now + timedelta(seconds=self.policy.oom_cooldown_sec)).isoformat()
             if record.provider == "local":
                 unloaded = self._unload_local_model_locked(model_name, reason="oom_failure")
         return {
@@ -234,7 +195,7 @@ class LocalModelManagerModule(KernelModule):
             record.last_action = "cooldown_skip"
             return False
         try:
-            result = self.runtime.warm_model_sync(model_name, keep_alive=self.warm_keep_alive_sec, timeout_sec=max(1.0, self.runtime.config.health_timeout_sec))
+            result = self.runtime.warm_model_sync(model_name, keep_alive=self.policy.warm_keep_alive_sec, timeout_sec=max(1.0, self.runtime.config.health_timeout_sec))
         except Exception as exc:
             record.last_error = str(exc)
             record.last_action = "warm_failed"
@@ -262,7 +223,7 @@ class LocalModelManagerModule(KernelModule):
 
     def _evict_idle_locked(self) -> list[str]:
         unloaded: list[str] = []
-        threshold = self._now() - timedelta(seconds=self.idle_unload_sec)
+        threshold = self._now() - timedelta(seconds=self.policy.idle_unload_sec)
         for record in self._eviction_candidates_locked():
             last_used = self._parse_ts(record.last_used_at)
             last_warm = self._parse_ts(record.last_warm_at)
@@ -279,7 +240,7 @@ class LocalModelManagerModule(KernelModule):
         if normalized not in {"local", "ai_kernel"}:
             return unloaded
         requested = self._estimated_memory_gb(model_name)
-        budget_limit = self.total_memory_budget_gb * self.pressure_threshold
+        budget_limit = self.policy.total_memory_budget_gb * self.policy.pressure_threshold
         while self._resident_memory_gb_locked() + requested > budget_limit:
             candidates = self._eviction_candidates_locked(exclude_model=model_name if normalized == "local" else "")
             if not candidates:
@@ -327,7 +288,7 @@ class LocalModelManagerModule(KernelModule):
                 "idle_unloaded": idle_unloaded,
                 "pressure_unloaded": pressure_unloaded,
                 "resident_memory_gb": self._resident_memory_gb_locked(),
-                "budget_limit_gb": round(self.total_memory_budget_gb * self.pressure_threshold, 3),
+                "budget_limit_gb": self.policy.budget_limit_gb,
                 "blocked": self._is_in_cooldown(record),
             }
 
@@ -338,6 +299,20 @@ class LocalModelManagerModule(KernelModule):
                 self._task_claims.pop(task_id, None)
             self._sync_local_residents_locked()
             return payload
+
+    def warm_model(self, model_name: str) -> bool:
+        with self._lock:
+            self._sync_local_residents_locked()
+            self._ensure_capacity_locked('local', model_name)
+            warmed = self._warm_local_model_locked(model_name)
+            self._sync_local_residents_locked()
+            return warmed
+
+    def unload_model(self, model_name: str, *, reason: str = 'manual') -> bool:
+        with self._lock:
+            unloaded = self._unload_local_model_locked(model_name, reason=reason)
+            self._sync_local_residents_locked()
+            return unloaded
 
     def before_task(self, task: Any, context: dict[str, Any]) -> None:
         provider = str(context.get("selected_provider") or context.get("provider") or "")
@@ -375,13 +350,25 @@ class LocalModelManagerModule(KernelModule):
             ]
             models = [asdict(record) for record in sorted(self._records.values(), key=lambda item: (item.provider, item.model_name))]
             resident_models = [item for item in models if item["resident"]]
+            total_warmups = sum(int(item['warmups']) for item in models)
+            total_evictions = sum(int(item['unloads']) for item in models)
+            pressure = round((self._resident_memory_gb_locked() / self.policy.budget_limit_gb), 3) if self.policy.budget_limit_gb else 0.0
             return {
                 "status": "ready",
-                "budget_gb": self.total_memory_budget_gb,
-                "pressure_threshold": self.pressure_threshold,
+                "policy": self.policy.as_dict(),
+                "budget_gb": self.policy.total_memory_budget_gb,
+                "pressure_threshold": self.policy.pressure_threshold,
                 "resident_memory_gb": self._resident_memory_gb_locked(),
+                "memory_pressure": {
+                    "resident_memory_gb": self._resident_memory_gb_locked(),
+                    "budget_limit_gb": self.policy.budget_limit_gb,
+                    "pressure_ratio": pressure,
+                    "pressure_state": 'high' if pressure >= 1.0 else 'elevated' if pressure >= 0.85 else 'normal',
+                },
                 "blocked_models": blocked_models,
                 "resident_models": resident_models,
                 "models": models,
+                "warmups": total_warmups,
+                "evictions": total_evictions,
                 "active_tasks": {task_id: {"provider": provider, "model_name": model_name} for task_id, (provider, model_name) in sorted(self._task_claims.items())},
             }

@@ -68,19 +68,26 @@ def _build_http_app(orchestrator: Orchestrator):
             agent_healths = [h.as_dict() for h in full]
             providers = _orch.healthcheck.check_providers()
             provider_dicts = [v.as_dict() if hasattr(v, 'as_dict') else v for v in providers.values()]
+            local_models = module_state.get("local_model_manager", {}) if isinstance(module_state, dict) else {}
+            memory_pressure = local_models.get("memory_pressure", {}) if isinstance(local_models, dict) else {}
+            blocked_models = local_models.get("blocked_models", []) if isinstance(local_models, dict) else []
+            local_ok = not blocked_models and str(memory_pressure.get("pressure_state") or "normal") != "high"
             return {
                 "status": "ok",
-                "overall_ok": all(p.get("status") in ("healthy", "degraded") for p in provider_dicts),
+                "overall_ok": all(p.get("status") in ("healthy", "degraded") for p in provider_dicts) and local_ok,
                 "summary": {
                     "provider_count": len(provider_dicts),
                     "agent_count": len(_orch.registry.list_agents()),
                     "ready_agents": sum(1 for a in agent_healths if a.get("status") == "ready"),
                     "problem_agents": sum(1 for a in agent_healths if a.get("status") not in ("ready",)),
                     "problem_providers": sum(1 for p in provider_dicts if p.get("status") not in ("healthy", "degraded")),
+                    "blocked_local_models": len(blocked_models),
+                    "local_memory_pressure": memory_pressure.get("pressure_state", "unknown"),
                 },
                 "providers": provider_dicts,
                 "agents": agent_healths,
                 "modules": module_state,
+                "local_models": local_models,
                 "sourcecraft": module_state.get("sourcecraft", {}),
                 "postgres_state": module_state.get("postgres_state", {}),
                 "registry_size": len(_orch.registry.list_agents()),
@@ -102,10 +109,32 @@ def _build_http_app(orchestrator: Orchestrator):
 
     @app.get("/stats")
     def stats():
-        mod = _orch.module_manager.get_module("model_usage")
-        if mod and hasattr(mod, "finalize"):
-            return {"status": "success", "data": mod.finalize()}
-        return {"status": "no_data"}
+        usage_mod = _orch.module_manager.get_module("model_usage")
+        local_model_manager = _orch.module_manager.get_module("local_model_manager")
+        module_state = _orch.module_state()
+        return {
+            "status": "success",
+            "data": {
+                "model_usage": usage_mod.finalize() if usage_mod and hasattr(usage_mod, "finalize") else {},
+                "local_model_manager": local_model_manager.finalize() if local_model_manager and hasattr(local_model_manager, "finalize") else {},
+                "provider_inventory": module_state.get("provider_inventory", {}),
+            },
+        }
+
+    @app.get("/health/local_models")
+    def local_model_health():
+        local_model_manager = _orch.module_manager.get_module("local_model_manager")
+        if local_model_manager and hasattr(local_model_manager, "finalize"):
+            state = local_model_manager.finalize()
+            return {
+                "status": "ok",
+                "resident_models": state.get("resident_models", []),
+                "blocked_models": state.get("blocked_models", []),
+                "memory_pressure": state.get("memory_pressure", {}),
+                "evictions": state.get("evictions", 0),
+                "warmups": state.get("warmups", 0),
+            }
+        return JSONResponse({"status": "error", "error": "local_model_manager not loaded"}, status_code=503)
 
     @app.get("/dump_memory")
     def dump_memory():

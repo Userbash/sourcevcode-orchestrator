@@ -503,6 +503,14 @@ class LocalLLMModule(KernelModule):
         self.last_advisory = advisory
         return advisory
 
+    def _manager_module(self):
+        if self._api is None or not hasattr(self._api, 'get_module'):
+            return None
+        try:
+            return self._api.get_module('local_model_manager')
+        except Exception:
+            return None
+
     def pull_model(self, model_name: str | None = None) -> bool:
         """Seamlessly pulls the requested model from Ollama."""
         target_model = (model_name or self.model_name).strip()
@@ -530,46 +538,50 @@ class LocalLLMModule(KernelModule):
         if self.last_probe.get("ok") and self.last_probe.get("model_present"):
             api.log("info", f"[LOCAL_LLM] Local model {self.model_name} is reachable and ready.")
         elif self.last_probe.get("ok"):
-            api.log("warning", f"[LOCAL_LLM] Ollama is reachable, but model {self.model_name} is not found. Attempting seamless update...")
-            if self.pull_model():
-                self.last_probe = self.check_health()
-            else:
-                api.log("error", f"[LOCAL_LLM] Seamless update failed for {self.model_name}.")
+            api.log("warning", f"[LOCAL_LLM] Ollama is reachable, but model {self.model_name} is not present. Startup provisioning is delegated to the bridge/runtime manager.")
         else:
             api.log("error", f"[LOCAL_LLM] Local model endpoint is unreachable: {self.last_probe.get('error', 'unknown error')}")
 
 
     def unload_model(self, model_name: str | None = None) -> bool:
-        """Gracefully unloads the model from VRAM (Ollama specific)."""
+        """Delegate unload lifecycle to local_model_manager when available."""
         target_model = (model_name or self.model_name).strip()
+        manager = self._manager_module()
         try:
-            if not self.runtime.unload_model_sync(target_model):
-                return False
-            if self._api:
+            if manager is not None and hasattr(manager, "unload_model"):
+                ok = bool(manager.unload_model(target_model, reason="local_llm_unload"))
+            else:
+                ok = bool(self.runtime.unload_model_sync(target_model))
+            if ok and self._api:
                 self._api.log("info", f"[LOCAL_LLM] Model {target_model} successfully UNLOADED from VRAM.")
-            return True
+            return ok
         except Exception as e:
             logger.error(f"Failed to unload local model {target_model}: {e}")
             return False
 
     def hot_reload(self, new_model_name: str) -> bool:
-        """Dynamically switches the active model and pulls it if missing."""
+        """Dynamically switch the active model while delegating residency to local_model_manager."""
         if self._api:
             self._api.log("info", f"[LOCAL_LLM] Hot-reloading model to {new_model_name}...")
-        
-        # Unload old model
-        self.unload_model()
-        
-        # Update model name
+
+        previous_model = self.model_name
+        self.unload_model(previous_model)
         self._refresh_runtime_model(new_model_name)
         self.runtime.config.default_model = new_model_name
-        
-        # Re-probe and pull if needed
+
         self.last_probe = self.check_health()
-        if not self.last_probe.get("model_present"):
-            if not self.pull_model():
-                return False
-                
+        if not self.last_probe.get("model_present") and not self.pull_model():
+            self._refresh_runtime_model(previous_model)
+            self.runtime.config.default_model = previous_model
+            return False
+
+        manager = self._manager_module()
+        if manager is not None and hasattr(manager, "warm_model"):
+            try:
+                manager.warm_model(new_model_name)
+            except Exception as exc:
+                logger.warning(f"Failed to warm local model via manager {new_model_name}: {exc}")
+
         if self._api:
             self._api.log("info", f"[LOCAL_LLM] Hot-reload successful. Active model: {self.model_name}")
         return True

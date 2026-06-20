@@ -117,46 +117,97 @@ class ModelSelector:
     def _ai_kernel_enabled() -> bool:
         return os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-    @staticmethod
-    def _local_code_choice(complexity: Complexity) -> ModelChoice:
+    def _query_local_model_manager_state(self, key: str, default: Any) -> Any:
+        if self._api is None or not hasattr(self._api, "query_module_state"):
+            return default
+        try:
+            value = self._api.query_module_state("local_model_manager", key)
+        except Exception:
+            return default
+        return default if value is None else value
+
+    def _blocked_model_keys(self) -> set[tuple[str, str]]:
+        blocked = self._query_local_model_manager_state("blocked_models", [])
+        keys: set[tuple[str, str]] = set()
+        if not isinstance(blocked, list):
+            return keys
+        for item in blocked:
+            if not isinstance(item, dict):
+                continue
+            provider = str(item.get("provider") or "").strip().lower()
+            model_name = str(item.get("model_name") or "").strip()
+            if provider and model_name:
+                keys.add((provider, model_name))
+        return keys
+
+    def _choice_blocked(self, provider: str, model_name: str) -> bool:
+        return (str(provider).strip().lower(), str(model_name).strip()) in self._blocked_model_keys()
+
+    def _first_unblocked_choice(self, candidates: list[ModelChoice]) -> ModelChoice | None:
+        for choice in candidates:
+            if not self._choice_blocked(choice.provider, choice.model_name):
+                return choice
+        return None
+
+    def _local_code_choice(self, complexity: Complexity) -> ModelChoice | None:
+        candidates: list[ModelChoice] = []
         if ModelSelector._ai_kernel_enabled():
-            return ModelChoice(
+            candidates.append(ModelChoice(
                 MODEL_AI_KERNEL_QWEN36,
                 "ai_kernel",
                 complexity,
                 params=ModelParams(temperature=0.15, context_depth=4),
                 requires_secondary_review=False,
                 reason="standard_code_ai_kernel_qwen36",
-            )
-        return ModelChoice(
+            ))
+        candidates.append(ModelChoice(
             MODEL_QWEN_CODER,
             "local",
             complexity,
             params=ModelParams(temperature=0.2, context_depth=2),
             requires_secondary_review=False,
             reason="standard_code_qwen_local",
-        )
+        ))
+        return self._first_unblocked_choice(candidates)
 
-    @staticmethod
-    def _local_planning_choice(task: Task, complexity: Complexity) -> ModelChoice:
+    def _local_planning_choice(self, task: Task, complexity: Complexity) -> ModelChoice | None:
+        candidates: list[ModelChoice] = []
         if task.type == TaskType.REVIEW:
-            return ModelChoice(
+            candidates.append(ModelChoice(
                 MODEL_LOCAL_SMALL,
                 "local",
                 complexity,
                 params=ModelParams(temperature=0.2, context_depth=4),
                 requires_secondary_review=True,
                 reason="review_qwen_local",
-            )
-
-        return ModelChoice(
-            MODEL_LOCAL_SMALL,
+            ))
+        else:
+            candidates.append(ModelChoice(
+                MODEL_LOCAL_SMALL,
+                "local",
+                complexity,
+                params=ModelParams(temperature=0.6, context_depth=3),
+                requires_secondary_review=False,
+                reason="planning_docs_qwen_local",
+            ))
+        if ModelSelector._ai_kernel_enabled() and task.type in {TaskType.PLAN, TaskType.RESEARCH, TaskType.REVIEW}:
+            candidates.append(ModelChoice(
+                MODEL_AI_KERNEL_QWEN36,
+                "ai_kernel",
+                complexity,
+                params=ModelParams(temperature=0.35, context_depth=3),
+                requires_secondary_review=task.type == TaskType.REVIEW,
+                reason="planning_fallback_ai_kernel_qwen36",
+            ))
+        candidates.append(ModelChoice(
+            MODEL_QWEN_CODER,
             "local",
             complexity,
-            params=ModelParams(temperature=0.6, context_depth=3),
+            params=ModelParams(temperature=0.4, context_depth=2),
             requires_secondary_review=False,
-            reason="planning_docs_qwen_local",
-        )
+            reason="planning_fallback_qwen_local",
+        ))
+        return self._first_unblocked_choice(candidates)
 
     def _local_policy_choice(self, task: Task, complexity: Complexity, advisory_context: dict[str, Any] | None) -> ModelChoice | None:
         local_choice = self._local_llm_choice(task, complexity, advisory_context)
@@ -169,7 +220,7 @@ class ModelSelector:
         if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW}:
             return self._local_planning_choice(task, complexity)
 
-        return ModelChoice(
+        utility_choice = ModelChoice(
             MODEL_QWEN_CODER,
             "local",
             complexity,
@@ -177,6 +228,7 @@ class ModelSelector:
             requires_secondary_review=False,
             reason="policy_default_utility_qwen",
         )
+        return None if self._choice_blocked(utility_choice.provider, utility_choice.model_name) else utility_choice
 
     @staticmethod
     def _local_llm_advisory(advisory_context: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -215,7 +267,8 @@ class ModelSelector:
             if profile_weights:
                 context_depth += 1 if float(profile_weights.get("quality", 1.0)) > 1.2 else 0
             reason_prefix = "local_llm_primary_owner" if is_primary_owner else "local_llm_advisory"
-            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=False, reason=f"{reason_prefix}_{task_family}")
+            choice = ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=False, reason=f"{reason_prefix}_{task_family}")
+            return None if self._choice_blocked(choice.provider, choice.model_name) else choice
 
         if task.type == TaskType.PLAN and complexity in {Complexity.LOW, Complexity.MEDIUM} and (should_delegate or is_primary_owner):
             model_name = preferred_model or MODEL_LOCAL_SMALL
@@ -224,7 +277,8 @@ class ModelSelector:
             if profile_weights:
                 context_depth += 1 if float(profile_weights.get("quality", 1.0)) > 1.25 else 0
             reason_prefix = "local_llm_primary_owner" if is_primary_owner else "local_llm_plan_hand_off"
-            return ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=True, reason=f"{reason_prefix}_{task_family}")
+            choice = ModelChoice(model_name, "local", complexity, params=ModelParams(temperature=temperature, context_depth=min(6, context_depth)), requires_secondary_review=True, reason=f"{reason_prefix}_{task_family}")
+            return None if self._choice_blocked(choice.provider, choice.model_name) else choice
 
         return None
 
@@ -261,7 +315,10 @@ class ModelSelector:
                 return ModelChoice("mistral-large-latest", "mistral", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_mistral_fallback:{reason}")
             if has_usable_credential("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
                 return ModelChoice("antigravity-pro", "antigravity", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_antigravity_fallback:{reason}")
-            return self._local_planning_choice(task, complexity) if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} else self._local_code_choice(complexity)
+            fallback_choice = self._local_planning_choice(task, complexity) if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} else self._local_code_choice(complexity)
+            if fallback_choice is not None:
+                return fallback_choice
+            return ModelChoice(fallback_model, "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_unavailable_local_models_blocked:{reason}")
         if not OpenAIRuntimeRouter.enabled():
             return ModelChoice(fallback_model, "openai", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=reason)
         plan = self.openai_router.build_plan(task, task.input.description)
@@ -304,14 +361,7 @@ class ModelSelector:
 
         choice = self._apply_experience_policy(
             task,
-            ModelChoice(
-                MODEL_QWEN_CODER,
-                "local",
-                complexity,
-                params=ModelParams(temperature=0.5, context_depth=1),
-                requires_secondary_review=False,
-                reason="policy_default_utility_qwen",
-            ),
+            self._openai_choice(task, complexity, False, "local_models_unavailable", "gpt-4o-mini"),
         )
         return self._attach_selection_trace(choice, task, advisory_context)
 

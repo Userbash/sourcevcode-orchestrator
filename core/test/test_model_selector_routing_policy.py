@@ -414,3 +414,54 @@ def test_model_selector_prefers_local_llm_when_advisory_is_available():
     assert choice.provider == "local"
     assert choice.model_name == MODEL_LOCAL_SMALL
     assert choice.reason.startswith("local_llm_advisory_")
+
+
+def test_selector_skips_ai_kernel_models_in_cooldown():
+    selector = ModelSelector()
+
+    class API:
+        experience_policy_learner = None
+
+        @staticmethod
+        def query_module_state(module_name: str, key: str):
+            assert module_name == "local_model_manager"
+            if key == "blocked_models":
+                return [{"provider": "ai_kernel", "model_name": MODEL_AI_KERNEL_QWEN36, "cooldown_until": "2099-01-01T00:00:00+00:00"}]
+            return None
+
+        @staticmethod
+        def log(level: str, message: str):
+            return None
+
+    selector.set_api(API())
+    task = _task(TaskType.CODE, "refactor service module", Complexity.MEDIUM)
+    choice = selector.select(task)
+
+    assert choice.provider == "local"
+    assert choice.model_name == MODEL_QWEN_CODER
+    assert choice.reason == "standard_code_qwen_local"
+
+
+def test_selector_skips_local_planning_model_in_cooldown():
+    selector = ModelSelector()
+
+    class API:
+        experience_policy_learner = None
+
+        @staticmethod
+        def query_module_state(module_name: str, key: str):
+            assert module_name == "local_model_manager"
+            if key == "blocked_models":
+                return [{"provider": "local", "model_name": MODEL_LOCAL_SMALL, "cooldown_until": "2099-01-01T00:00:00+00:00"}]
+            return None
+
+        @staticmethod
+        def log(level: str, message: str):
+            return None
+
+    selector.set_api(API())
+    task = _task(TaskType.DOCS, "update API docs", Complexity.MEDIUM)
+    choice = selector.select(task)
+
+    assert choice.model_name != MODEL_LOCAL_SMALL
+    assert choice.reason in {"planning_fallback_ai_kernel_qwen36", "planning_fallback_qwen_local"}

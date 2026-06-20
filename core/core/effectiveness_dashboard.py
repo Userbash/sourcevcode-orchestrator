@@ -164,13 +164,13 @@ def _recovery_checklist() -> list[str]:
         "Load model_usage, ai_activity, orchestrator_control, prompt_optimizer, and smart_decomposer first.",
         "Enable local_llm only after readiness checks pass.",
         "Confirm task_lifecycle and KPI dashboard files are being written.",
-        "Run a smoke task in plan/review/test to validate routing and model availability.",
+        "Run a smoke task in plan/review/test to validate routing and cached provider availability.",
         "Check rollback: disable high_risk_trained_memory if trained memory metrics degrade.",
     ]
 
 def _module_inventory() -> dict[str, Any]:
     loadable = [
-        "ai_activity", "orchestrator_control", "model_usage", "model_availability", "antigravity_status",
+        "ai_activity", "orchestrator_control", "model_usage", "antigravity_status",
         "smart_decomposer", "prompt_optimizer", "chat_bus", "trigger_dispatcher", "unified_vfs",
         "cold_boot", "tdd_policy", "qwen_code", "readability_policy", "dev_toolkit", "self_diagnostic", "local_llm",
         "sourcecraft", "voice_listener", "reasoning", "risk_advisor", "orchestrator_advisor", "intelligence",

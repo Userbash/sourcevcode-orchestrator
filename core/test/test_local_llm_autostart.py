@@ -84,6 +84,31 @@ def test_autostart_local_llm_invokes_bridge(monkeypatch):
 
 
 
+def test_autostart_ai_kernel_invokes_bridge(monkeypatch):
+    bridge_calls: list[str] = []
+
+    def fake_ensure_ready(model_name: str) -> bool:
+        bridge_calls.append(model_name)
+        return True
+
+    monkeypatch.setattr(Orchestrator, "_ai_kernel_autostart_enabled", staticmethod(lambda: True))
+    monkeypatch.setattr(Orchestrator, "_testing_mode", staticmethod(lambda: False))
+    monkeypatch.setenv("TESTING", "false")
+    monkeypatch.setenv("AI_KERNEL_ENABLED", "true")
+    monkeypatch.setenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m")
+
+    orchestrator = Orchestrator.__new__(Orchestrator)
+    orchestrator.console = _Console()
+    orchestrator.ai_kernel_bridge = SimpleNamespace(ensure_ready=fake_ensure_ready)
+    orchestrator.log = Orchestrator.log.__get__(orchestrator, Orchestrator)
+
+    Orchestrator._autostart_ai_kernel(orchestrator)
+
+    assert bridge_calls == ["hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"]
+    assert any("[AI_KERNEL] Autostart complete" in message for _, message in orchestrator.console.messages)
+
+
+
 def test_local_llm_decomposition_task_plan_uses_draft(monkeypatch):
     from core.core.models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
     from core.core.task_decomposer import TaskDecomposer
@@ -136,9 +161,11 @@ def test_local_llm_decomposition_task_plan_uses_draft(monkeypatch):
 def test_local_llm_bridge_auto_provisions_missing_container(monkeypatch):
     from core.core.local_llm_bridge import LocalLLMBridge
     from types import SimpleNamespace
+    from core.scripts import deploy_local_llm
 
     bridge = LocalLLMBridge(container_name="ai-kernel-local", ollama_port=11434)
     calls: list[str] = []
+    original_run_command = deploy_local_llm.run_command
 
     monkeypatch.setenv("AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION", "true")
     monkeypatch.setattr(LocalLLMBridge, "container_exists", lambda self: False)
@@ -152,6 +179,7 @@ def test_local_llm_bridge_auto_provisions_missing_container(monkeypatch):
 
     assert bridge.ensure_ready("qwen2.5:32b-instruct-q4_k_m") is True
     assert calls == ["ensure:ai-kernel-local", "install:ai-kernel-local", "start:ai-kernel-local"]
+    assert deploy_local_llm.run_command is original_run_command
 
 
 def test_orchestrator_preserves_local_llm_advisory_flags_during_mimo_merge():

@@ -507,14 +507,3 @@ class ModelAvailability:
 
     def cached_report(self) -> dict[str, dict]:
         return {provider: health.as_dict() for provider, health in sorted(self._health_cache.items())}
-
-class ModelAvailabilityModule:
-    name: str = "model_availability"
-    def __init__(self):
-        pass
-    def on_load(self, api):
-        pass
-    def before_task(self, task, context):
-        pass
-
-

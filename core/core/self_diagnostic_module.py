@@ -3,14 +3,11 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
-import os
 from datetime import UTC, datetime
 from typing import Any, Dict, Optional
 
 from .kernel_api import KernelAPI
 from .models import Task
-from .availability import ModelAvailability
-from .antigravity_status_module import shared_antigravity_snapshot
 
 logger = logging.getLogger("self_diagnostic")
 
@@ -47,7 +44,6 @@ class SelfDiagnosticModule:
     def __init__(self):
         self._api: Optional[KernelAPI] = None
         self._is_active: bool = False
-        self._availability = ModelAvailability()
 
     async def on_load(self, api: KernelAPI) -> None:
         self._api = api
@@ -187,6 +183,50 @@ class SelfDiagnosticModule:
         if report.get("status") == "healthy":
             report["status"] = "degraded"
 
+    def _module_state(self) -> Dict[str, Any]:
+        if not self._api or not hasattr(self._api, "module_state"):
+            return {}
+        try:
+            state = self._api.module_state()
+        except Exception:
+            return {}
+        return state if isinstance(state, dict) else {}
+
+    def _cached_provider_reports(self) -> Dict[str, Any]:
+        state = self._module_state()
+        availability_state = state.get("model_availability", {}) if isinstance(state, dict) else {}
+        if not isinstance(availability_state, dict):
+            return {}
+        providers = availability_state.get("cached_report")
+        if isinstance(providers, dict):
+            return {str(k): (dict(v) if isinstance(v, dict) else {"status": "unknown", "details": v}) for k, v in providers.items()}
+        providers = availability_state.get("providers")
+        if isinstance(providers, dict):
+            return {str(k): (dict(v) if isinstance(v, dict) else {"status": "unknown", "details": v}) for k, v in providers.items()}
+        return {}
+
+    def _local_model_health(self) -> Dict[str, Any]:
+        state = self._module_state()
+        local_state = state.get("local_model_manager", {}) if isinstance(state, dict) else {}
+        if not isinstance(local_state, dict) or not local_state:
+            return {}
+        memory_pressure = local_state.get("memory_pressure", {}) if isinstance(local_state.get("memory_pressure"), dict) else {}
+        blocked_models = local_state.get("blocked_models", []) if isinstance(local_state.get("blocked_models"), list) else []
+        pressure_state = str(memory_pressure.get("pressure_state") or "normal").strip().lower()
+        status = "healthy"
+        if blocked_models or pressure_state == "high":
+            status = "degraded"
+        elif pressure_state == "elevated":
+            status = "degraded"
+        return {
+            "provider": "local",
+            "status": status,
+            "source": "local_model_manager",
+            "blocked_models": blocked_models,
+            "resident_models": local_state.get("resident_models", []),
+            "memory_pressure": memory_pressure,
+        }
+
     def _populate_legacy_report(self, report: Dict[str, Any], selected_layers: set[str] | None) -> None:
         if self._layer_requested(selected_layers, "components"):
             self._populate_component_report(report)
@@ -215,8 +255,6 @@ class SelfDiagnosticModule:
             try:
                 mod = module_manager.get_module(mod_name)
                 mod_report = module_state.get(mod_name, {}) if isinstance(module_state, dict) else {}
-                if not mod_report and hasattr(mod, "finalize"):
-                    mod_report = mod.finalize()
                 report["components"][mod_name] = {
                     "status": "ok",
                     "details": mod_report,
@@ -249,17 +287,16 @@ class SelfDiagnosticModule:
 
     def _populate_ai_model_report(self, report: Dict[str, Any]) -> None:
         try:
-            provider_health = self._availability.check_all()
-            report["ai_models"] = {provider: health.as_dict() for provider, health in provider_health.items()}
-            report["antigravity_status"] = shared_antigravity_snapshot(force=False)
-            local_model = os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL")
-            if local_model and "local" not in report["ai_models"]:
-                report["ai_models"]["local"] = {
-                    "model": local_model,
-                    "status": "checked_via_env",
-                }
+            state = self._module_state()
+            ai_models = self._cached_provider_reports()
+            local_health = self._local_model_health()
+            if local_health:
+                ai_models["local"] = local_health
+            report["ai_models"] = ai_models
+            antigravity_status = state.get("antigravity_status", {}) if isinstance(state, dict) else {}
+            report["antigravity_status"] = antigravity_status if isinstance(antigravity_status, dict) else {}
             if any(
-                health.get("status") != "healthy"
+                str(health.get("status") or "").strip().lower() not in {"healthy", "ready"}
                 for health in report["ai_models"].values()
                 if isinstance(health, dict) and "status" in health
             ):
@@ -328,7 +365,8 @@ class SelfDiagnosticModule:
                 "api": self._api,
                 "module": self,
                 "diagnostic_module": self,
-                "availability": self._availability,
+                "availability": getattr(self._api, "availability", None),
+                "cached_only": True,
                 "report": report,
                 "baseline_report": report,
                 "selected_layers": sorted(selected_layers) if selected_layers else None,

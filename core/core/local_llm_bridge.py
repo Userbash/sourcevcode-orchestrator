@@ -5,10 +5,8 @@ import os
 import shlex
 import subprocess
 
-import requests
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.error import URLError
 from urllib.request import urlopen
 
 from core.core.host_bridge import HostBridge
@@ -58,18 +56,6 @@ class LocalLLMBridge:
         except Exception:
             return False
 
-    def is_container_running(self) -> bool:
-        try:
-            result = self._run(["distrobox", "list", "--no-color"])
-            if result.returncode != 0:
-                return False
-            for line in result.stdout.splitlines():
-                if self.container_name in line and "Running" in line:
-                    return True
-            return False
-        except Exception:
-            return False
-
     def is_model_downloaded(self, model_name: str) -> bool:
         try:
             result = self._run(["distrobox", "enter", self.container_name, "--", "ollama", "list"])
@@ -99,10 +85,9 @@ class LocalLLMBridge:
             if not auto_provision:
                 logger.warning("Local LLM container '%s' does not exist; skipping autostart.", self.container_name)
                 return False
+            original_run_command = deploy_local_llm.run_command
             try:
-                # Patch runner to use host bridge for deployment script
                 deploy_local_llm.run_command = lambda cmd, **kwargs: self._run(cmd, **kwargs)
-                
                 deploy_local_llm.CONTAINER_NAME = self.container_name
                 deploy_local_llm.MODEL_NAME = model_name
                 deploy_local_llm.OLLAMA_HOST = self.ollama_host
@@ -113,6 +98,8 @@ class LocalLLMBridge:
             except Exception as exc:
                 logger.warning("Failed to auto-provision local LLM container '%s': %s", self.container_name, exc)
                 return False
+            finally:
+                deploy_local_llm.run_command = original_run_command
 
         quoted_model = shlex.quote(model_name)
         boot_cmd = (
@@ -134,35 +121,3 @@ class LocalLLMBridge:
 
         return self.is_model_downloaded(model_name)
 
-    def query(self, prompt: str, model_name: str) -> str:
-        endpoints = [
-            f"http://host.containers.internal:{self.ollama_port}/api/generate",
-            f"http://127.0.0.1:{self.ollama_port}/api/generate",
-        ]
-        last_exc = None
-        for url in endpoints:
-            try:
-                response = requests.post(
-                    url,
-                    json={
-                        "model": model_name,
-                        "prompt": prompt,
-                        "stream": False,
-                    },
-                    timeout=60,
-                )
-                response.raise_for_status()
-                payload = response.json() if response.content else {}
-                if not isinstance(payload, dict):
-                    continue
-                text = payload.get("response")
-                if not isinstance(text, str) or not text.strip():
-                    continue
-                return text.strip()
-            except Exception as exc:
-                last_exc = exc
-                continue
-        
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("failed to query local LLM on all endpoints")

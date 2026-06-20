@@ -5,14 +5,6 @@ from unittest.mock import MagicMock
 from core.core.self_diagnostic_module import SelfDiagnosticModule
 
 
-class _FakeHealth:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def as_dict(self):
-        return dict(self._payload)
-
-
 class _FakeModule:
     def __init__(self, payload=None):
         self._payload = payload or {"status": "ready"}
@@ -35,7 +27,7 @@ class _FakeModuleManager:
 def _build_api(module_manager=None, memory=None):
     api = MagicMock()
     api.log = MagicMock()
-    api.module_state = MagicMock(return_value={"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}})
+    api.module_state = MagicMock(return_value={"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {}}, "antigravity_status": {"ready": True}})
     api.get_context = MagicMock(side_effect=lambda key: module_manager if key == "module_manager" else None)
     api.get_memory = MagicMock(return_value=memory)
     return api
@@ -47,7 +39,6 @@ def test_self_diagnostic_module_initialization():
 
 
 def test_run_diagnostics_structure(monkeypatch):
-    monkeypatch.setattr("core.core.self_diagnostic_module.shared_antigravity_snapshot", lambda force=False: {"ready": True})
     contracts_payload = {
         "ok": True,
         "status": "ok",
@@ -71,9 +62,8 @@ def test_run_diagnostics_structure(monkeypatch):
     memory = SimpleNamespace(backend=object(), _sessions={"s1": object()})
     manager = _FakeModuleManager({"worker": _FakeModule(), "self_diagnostic": _FakeModule({"status": "active"})})
     api = _build_api(module_manager=manager, memory=memory)
-    module._availability = MagicMock()
-    module._availability.check_all = MagicMock(return_value={"openai": _FakeHealth({"provider": "openai", "status": "healthy"})})
 
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {"openai": {"provider": "openai", "status": "healthy"}}}, "local_model_manager": {"blocked_models": [], "resident_models": [], "memory_pressure": {"pressure_state": "normal"}}, "antigravity_status": {"ready": True}}
     asyncio.run(module.on_load(api))
     report = asyncio.run(module.run_diagnostics())
 
@@ -89,7 +79,6 @@ def test_run_diagnostics_structure(monkeypatch):
 
 
 def test_run_diagnostics_can_filter_layers(monkeypatch):
-    monkeypatch.setattr("core.core.self_diagnostic_module.shared_antigravity_snapshot", lambda force=False: {"ready": True})
     contracts_payload = {
         "ok": True,
         "status": "ok",
@@ -107,9 +96,8 @@ def test_run_diagnostics_can_filter_layers(monkeypatch):
 
     module = SelfDiagnosticModule()
     api = _build_api(module_manager=_FakeModuleManager({"worker": _FakeModule()}), memory=SimpleNamespace(backend=object(), _sessions={}))
-    module._availability = MagicMock()
-    module._availability.check_all = MagicMock(return_value={})
 
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {}}, "antigravity_status": {"ready": True}}
     asyncio.run(module.on_load(api))
     report = asyncio.run(module.run_diagnostics(layers=["memory"]))
 
@@ -122,7 +110,6 @@ def test_run_diagnostics_can_filter_layers(monkeypatch):
 
 
 def test_run_layer_diagnostics_passthrough(monkeypatch):
-    monkeypatch.setattr("core.core.self_diagnostic_module.shared_antigravity_snapshot", lambda force=False: {"ready": True})
     expected = {
         "ok": False,
         "status": "degraded",
@@ -136,9 +123,9 @@ def test_run_layer_diagnostics_passthrough(monkeypatch):
     monkeypatch.setattr(SelfDiagnosticModule, "_load_diagnostic_contracts", staticmethod(lambda: contracts_module))
 
     module = SelfDiagnosticModule()
-    module._availability = MagicMock()
-    module._availability.check_all = MagicMock(return_value={})
-    asyncio.run(module.on_load(_build_api()))
+    api = _build_api()
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {}}, "antigravity_status": {"ready": True}}
+    asyncio.run(module.on_load(api))
     result = asyncio.run(module.run_layer_diagnostics(["ai_models"]))
 
     assert result["ok"] is False
@@ -162,7 +149,9 @@ def test_run_diagnostics_matrix_only(monkeypatch):
     monkeypatch.setattr(SelfDiagnosticModule, "_load_diagnostic_contracts", staticmethod(lambda: contracts_module))
 
     module = SelfDiagnosticModule()
-    asyncio.run(module.on_load(_build_api()))
+    api = _build_api()
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {}}, "antigravity_status": {"ready": True}}
+    asyncio.run(module.on_load(api))
     report = asyncio.run(module.run_diagnostics(layers=["memory", "providers"], matrix_only=True))
 
     assert report == {
@@ -180,7 +169,6 @@ def test_run_diagnostics_matrix_only(monkeypatch):
 
 
 def test_run_diagnostics_builds_remediation_plan_for_degraded_ai_models(monkeypatch):
-    monkeypatch.setattr("core.core.self_diagnostic_module.shared_antigravity_snapshot", lambda force=False: {"ready": False})
     contracts_module = SimpleNamespace(
         DIAGNOSTIC_SCHEMA_VERSION="diagnostics.v1",
         run_diagnostic_matrix=lambda **kwargs: {
@@ -194,20 +182,8 @@ def test_run_diagnostics_builds_remediation_plan_for_degraded_ai_models(monkeypa
 
     module = SelfDiagnosticModule()
     api = _build_api(module_manager=_FakeModuleManager({"worker": _FakeModule()}), memory=SimpleNamespace(backend=object(), _sessions={}))
-    module._availability = MagicMock()
-    module._availability.check_all = MagicMock(
-        return_value={
-            "antigravity": _FakeHealth(
-                {
-                    "provider": "antigravity",
-                    "status": "degraded",
-                    "error": "antigravity_auth_failed",
-                    "diagnostics": {"remediation": ["refresh auth", "rerun provider probe"]},
-                }
-            )
-        }
-    )
 
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {"antigravity": {"provider": "antigravity", "status": "degraded", "error": "antigravity_auth_failed", "diagnostics": {"remediation": ["refresh auth", "rerun provider probe"]}}}}, "antigravity_status": {"ready": False}}
     asyncio.run(module.on_load(api))
     report = asyncio.run(module.run_diagnostics())
 

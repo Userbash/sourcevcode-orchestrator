@@ -100,3 +100,26 @@ def test_manager_releases_claim_after_task_and_reports_resident_snapshot(monkeyp
     ai_kernel_row = next(item for item in state['models'] if item['provider'] == 'ai_kernel')
     assert ai_kernel_row['active_tasks'] == 0
     assert ai_kernel_row['last_action'] == 'task_claimed'
+
+
+from core.core.local_model_memory_policy import LocalModelMemoryPolicy
+
+
+def test_manager_uses_schema_memory_policy_without_env(monkeypatch):
+    monkeypatch.delenv('AI_BRIDGE_LOCAL_MODEL_MEMORY_BUDGET_GB', raising=False)
+    policy = LocalModelMemoryPolicy(
+        total_memory_budget_gb=12.0,
+        pressure_threshold=0.75,
+        idle_unload_sec=11,
+        warm_keep_alive_sec=22,
+        oom_cooldown_sec=33,
+        model_memory_map={'qwen2.5:32b-instruct-q4_k_m': 7.5},
+    )
+
+    module = LocalModelManagerModule(runtime=_FakeRuntime(), policy=policy)
+    module.on_load(_Api())
+    state = module.finalize()
+
+    assert state['policy']['budget_limit_gb'] == 9.0
+    assert state['policy']['idle_unload_sec'] == 11
+    assert any(row['estimated_memory_gb'] == 7.5 for row in state['models'] if row['model_name'] == 'qwen2.5:32b-instruct-q4_k_m')

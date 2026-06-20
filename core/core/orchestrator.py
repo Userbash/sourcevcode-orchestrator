@@ -33,7 +33,7 @@ from .result_merger import ResultMerger
 from .smart_scheduler import SmartScheduler
 from .session_memory import MemoryScope, SessionMemory
 from .memory_control_module import MemoryControlModule
-from .availability import ModelAvailability, ModelAvailabilityModule, ProviderStatus
+from .availability import ModelAvailability, ProviderStatus
 from .ai_activity_module import AIActivityModule
 from .data_plane_monitor import build_data_plane_snapshot
 from .antigravity_status_module import AntigravityStatusModule
@@ -67,6 +67,7 @@ from .experience_training_pipeline import ExperienceTrainingPipeline
 
 
 from .local_llm_bridge import LocalLLMBridge
+from .ai_kernel_bridge import AIKernelBridge
 from .local_llm_module import LocalLLMModule
 from .sourcecraft_module import SourceCraftModule
 from .reasoning_module import ReasoningModule
@@ -157,6 +158,7 @@ class Orchestrator:
 
     def module_state(self) -> dict[str, Any]:
         state = self.module_manager.finalize()
+        state["model_availability"] = self._model_availability_state()
         state["provider_inventory"] = self._provider_inventory_snapshot if isinstance(self._provider_inventory_snapshot, dict) else {"updated_at": None, "providers": {}}
         return state
 
@@ -368,6 +370,10 @@ class Orchestrator:
         return os.getenv("AI_BRIDGE_AUTOSTART_EASY_DIFFUSION", "false").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
+    def _ai_kernel_autostart_enabled() -> bool:
+        return os.getenv("AI_BRIDGE_AUTOSTART_AI_KERNEL", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
     def _testing_mode() -> bool:
         return os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
 
@@ -402,6 +408,22 @@ class Orchestrator:
             except Exception:
                 pass
         return {"providers": providers}
+
+    def _model_availability_state(self) -> dict[str, Any]:
+        cached = self.availability.cached_report() if hasattr(self.availability, "cached_report") else {}
+        cached_report = cached if isinstance(cached, dict) else {}
+        provider_status = {
+            provider: state.get("status")
+            for provider, state in cached_report.items()
+            if isinstance(state, dict)
+        }
+        return {
+            "status": "active",
+            "provider_count": len(cached_report),
+            "providers": provider_status,
+            "cached_report": cached_report,
+            "source": "orchestrator.availability",
+        }
 
     def cache_guard_snapshot(self, session_id: str) -> dict[str, Any]:
         return self.cache_guard.snapshot(session_id)
@@ -501,6 +523,25 @@ class Orchestrator:
         else:
             self.log("warning", f"[LOCAL_LLM] Autostart could not confirm readiness for {module.model_name}.")
 
+    def _autostart_ai_kernel(self) -> None:
+        if self._testing_mode() or not self._ai_kernel_autostart_enabled():
+            return
+
+        if not os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            return
+
+        model_name = (os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip()
+        try:
+            ready = self.ai_kernel_bridge.ensure_ready(model_name)
+        except Exception as exc:
+            self.log("warning", f"[AI_KERNEL] Autostart failed: {exc}")
+            return
+
+        if ready:
+            self.log("info", f"[AI_KERNEL] Autostart complete for {model_name}.")
+        else:
+            self.log("warning", f"[AI_KERNEL] Autostart could not confirm readiness for {model_name}.")
+
     def _autostart_easy_diffusion(self) -> None:
         if self._testing_mode() or not self._easy_diffusion_autostart_enabled():
             return
@@ -547,8 +588,7 @@ class Orchestrator:
         self.scheduler = components.scheduler
         self.message_bus = components.message_bus
         self.healthcheck = components.healthcheck
-        if hasattr(self.healthcheck, "set_module_state_source"):
-            self.healthcheck.set_module_state_source(self.module_state)
+        self.healthcheck.set_module_state_source(self.module_state)
         self.availability = ModelAvailability()
         self.provider_inventory = ProviderInventoryService()
         self.model_replacement_policy = ModelReplacementPolicy()
@@ -604,6 +644,7 @@ class Orchestrator:
         self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
         self._provider_inventory_refresh_interval_sec = max(60, int(getattr(self.orchestration_config, "provider_inventory_refresh_interval_sec", 1800)))
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
+        self.ai_kernel_bridge = AIKernelBridge(host_bridge=self.host_bridge)
         self.mimo_director = MimoOrchestrationDirector()
         self.experience_policy_learner = ExperiencePolicyLearner()
         self.experience_trainer = ExperienceTrainingPipeline()
@@ -623,7 +664,6 @@ class Orchestrator:
         self.module_manager.register(MemoryControlModule())
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(LocalModelManagerModule())
-        self.module_manager.register(ModelAvailabilityModule())
         self.module_manager.register(AntigravityStatusModule())
         self.mimo_director.set_status_source(self._provider_health_snapshot)
         self.module_manager.register(SmartDecomposerModule())
@@ -663,7 +703,6 @@ class Orchestrator:
             self._refresh_provider_inventory_snapshot(force_refresh=False)
         except Exception as exc:
             self.console.emit("INVENTORY", f"initial provider inventory refresh failed: {exc}")
-        self.module_manager.load("model_availability")
         self.module_manager.load("smart_decomposer")
         self.module_manager.load("prompt_optimizer")
         self.module_manager.load("chat_bus")
@@ -700,6 +739,7 @@ class Orchestrator:
         if not self._testing_mode():
             self.module_manager.load("local_llm")
         self._autostart_local_llm()
+        self._autostart_ai_kernel()
         self._autostart_easy_diffusion()
         # Register default orchestrator agent to handle sourcecraft and orchestrator capability tasks
         self.attach_local_agent("orchestrator", OrchestratorAgent("orchestrator"), agent_type="orchestrator", critical=True, model_name="orchestrator-core", provider="local")
@@ -1948,7 +1988,18 @@ class Orchestrator:
                 provider=str(agent_record.provider if agent_record else choice.provider),
                 model_name=str(agent_record.model_name if agent_record else choice.model_name),
             )
-            
+
+            selected_provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
+            if selected_provider == "ai_kernel":
+                target_model = str(agent_record.model_name if agent_record else choice.model_name)
+                try:
+                    if not self.ai_kernel_bridge.ensure_ready(target_model):
+                        failed_result = AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "AI Kernel backend is not ready", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["ai_kernel_not_ready"], [])
+                        self.module_manager.after_task(task, failed_result, module_context)
+                        return failed_result
+                except Exception as exc:
+                    self.log("warning", f"[AI_KERNEL] preflight failed: {exc}")
+
             # TPP: Mark pod as BUSY
             self._broadcast_pod_state(agent_id, AgentStatus.BUSY, task_id=task.task_id)
             
@@ -1980,6 +2031,15 @@ class Orchestrator:
                             manager.handle_failure(source_provider, failed_model_name, result_errors, task_id=task.task_id)
                         except Exception as exc:
                             self.log("warning", f"[LOCAL_MODEL_MANAGER] failure hook failed: {exc}")
+                    if source_provider == "ai_kernel":
+                        try:
+                            recovered = self.ai_kernel_bridge.ensure_ready(failed_model_name)
+                            if recovered:
+                                self.log("info", f"[AI_KERNEL] Failure recovery restored readiness for {failed_model_name}.")
+                            else:
+                                self.log("warning", f"[AI_KERNEL] Failure recovery did not restore readiness for {failed_model_name}.")
+                        except Exception as exc:
+                            self.log("warning", f"[AI_KERNEL] failure recovery hook failed: {exc}")
                     self._update_model_replacement_snapshot()
 
                 # Proactive Soft Fallback for all critical/high failures or quota issues
@@ -2320,7 +2380,7 @@ class Orchestrator:
             if any(r.status != TaskStatus.DONE for r in results):
                 merged = self.merger.merge(final_results)
                 module_state = self.module_state()
-                return {"status": "failed", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
+                return {"status": "failed", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {}), "local_model_manager": module_state.get("local_model_manager", {})}
 
             for task in ready_tasks:
                 completed.add(task.task_id)
@@ -2330,7 +2390,7 @@ class Orchestrator:
         self.console.progress("Parallel batches", total_tasks, total_tasks, details="orchestration complete")
         self.console.emit("DONE", "Все критерии выполнены (Асинхронный параллельный режим)")
         module_state = self.module_state()
-        return {"status": "done", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "disabled_agents": self.autoscaler.disabled_agents, "enabled_agents": self.autoscaler.enabled_agents, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {})}
+        return {"status": "done", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "disabled_agents": self.autoscaler.disabled_agents, "enabled_agents": self.autoscaler.enabled_agents, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {}), "local_model_manager": module_state.get("local_model_manager", {})}
 
     async def run_async(self, root_task: Task) -> dict:
         """Asynchronous entry point that leverages parallel execution."""

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Callable
+
 from .agent_registry import AgentRegistry
 from .models import AgentHealth, AgentStatus
 from .availability import ModelAvailability
@@ -11,9 +13,9 @@ class HealthChecker:
         self.registry = registry
         self.rest_protocol = rest_protocol or RestProtocol()
         self.availability = ModelAvailability()
-        self._module_state_source = None
+        self._module_state_source: Callable[[], dict[str, Any]] | None = None
 
-    def set_module_state_source(self, module_state_source):
+    def set_module_state_source(self, module_state_source: Callable[[], dict[str, Any]] | None) -> None:
         self._module_state_source = module_state_source
 
     def module_state(self) -> dict[str, Any]:
