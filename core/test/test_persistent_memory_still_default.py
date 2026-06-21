@@ -62,6 +62,8 @@ def test_consolidate_successful_task_uses_task_specific_domain(monkeypatch):
     assert stored[0]["metadata"]["source"] == "consolidate_successful_task"
     assert stored[0]["metadata"]["task_type"] == "review"
     assert stored[0]["source_memory_ids"] == [7, 8]
+    assert stored[0]["content"]["summary"] == "review passed"
+    assert stored[0]["metadata"]["semantic_vector"]
 
 
 from core.core.models import AgentResult, Priority, Task, TaskContext, TaskInput, TaskType, TaskStatus

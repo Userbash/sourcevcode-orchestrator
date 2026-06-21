@@ -85,6 +85,7 @@ def _mimo_summary() -> dict[str, object]:
 
 def _preferred_mimo_probe_models(model_ids: list[str]) -> list[str]:
     preferred = [
+        "openai/gpt-5.4-nano",
         "openai/gpt-5.4-mini",
         "openai/gpt-5.4",
         "openai/gpt-5.5",

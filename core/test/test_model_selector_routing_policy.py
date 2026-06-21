@@ -66,7 +66,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "codex",
         "local://openai-large",
         ["plan"],
-        model_name="gpt-4o",
+        model_name="gpt-5.5",
         provider="openai",
     )
     registry.register(
@@ -74,7 +74,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "codex",
         "local://openai-secure",
         ["code", "fix", "test", "docs", "research", "review"],
-        model_name="gpt-4o",
+        model_name="gpt-5.5",
         provider="openai",
     )
     registry.register(
@@ -82,7 +82,7 @@ def _build_registry(*, mistral_offline: bool = False) -> AgentRegistry:
         "codex",
         "local://openai-standard",
         ["code", "fix", "test"],
-        model_name="gpt-4o",
+        model_name="gpt-5.5",
         provider="openai",
     )
 
@@ -104,8 +104,8 @@ def _test_openai_env() -> Iterator[None]:
     }
     os.environ["AI_BRIDGE_OPENAI_AUTO_MODEL"] = "true"
     os.environ["OPENAI_API_KEY"] = "openai_usable_key_value_1234567890"
-    os.environ["OPENAI_HIGH_MODELS"] = "gpt-5-mini,gpt-5.1"
-    os.environ["OPENAI_CRITICAL_MODELS"] = "gpt-5.2-codex,gpt-5.1-codex-max"
+    os.environ["OPENAI_HIGH_MODELS"] = "gpt-5.4-mini,gpt-5.4"
+    os.environ["OPENAI_CRITICAL_MODELS"] = "gpt-5.5,gpt-5.4"
     try:
         yield
     finally:
@@ -264,7 +264,7 @@ CASES = [
         expected_complexity=Complexity.HIGH,
         expected_orchestrator="openai-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-5-mini",
+        expected_model="gpt-5.4-mini",
         expected_fallback=False,
         expected_secondary_review=True,
         expected_reason="openai_auto_high_reasoning:high_risk_or_complexity_escalation",
@@ -278,7 +278,7 @@ CASES = [
         expected_complexity=Complexity.CRITICAL,
         expected_orchestrator="openai-secure-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-5.2-codex",
+        expected_model="gpt-5.5",
         expected_fallback=False,
         expected_secondary_review=True,
         expected_reason="openai_auto_critical_quality:high_risk_or_complexity_escalation",
@@ -292,7 +292,7 @@ CASES = [
         expected_complexity=Complexity.CRITICAL,
         expected_orchestrator="openai-secure-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-5.2-codex",
+        expected_model="gpt-5.5",
         expected_fallback=False,
         expected_secondary_review=True,
         expected_reason="openai_auto_critical_quality:high_risk_or_complexity_escalation",
@@ -306,7 +306,7 @@ CASES = [
         expected_complexity=Complexity.CRITICAL,
         expected_orchestrator="openai-secure-orchestrator",
         expected_provider="openai",
-        expected_model="gpt-5.2-codex",
+        expected_model="gpt-5.5",
         expected_fallback=False,
         expected_secondary_review=True,
         expected_reason="openai_auto_critical_quality:high_risk_or_complexity_escalation",

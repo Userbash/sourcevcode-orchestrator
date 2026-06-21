@@ -186,6 +186,10 @@ class MemoryControlModule:
             token_limit=token_limit,
             task_type=task_type,
             allow_trained_memory=high_risk_enabled,
+            query_text=str(task.input.description or ''),
+            files=[str(item).strip() for item in list(task.input.files or []) if str(item).strip()],
+            constraints=[str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()],
+            acceptance_criteria=[str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()],
         )
         if not brief:
             return {"trained_memory_disabled_for_risk": not high_risk_enabled}

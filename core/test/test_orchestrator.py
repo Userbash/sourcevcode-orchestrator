@@ -1,11 +1,14 @@
 import asyncio
+import json
 import time
 from core.agents.base_agent import BaseAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.core.models import AgentResult, ResultOutput, Task, TaskContext, TaskInput, TaskStatus, TaskType
+from core.core.models import AgentResult, Complexity, Priority, ResultOutput, Task, TaskContext, TaskInput, TaskStatus, TaskType
+from core.core.model_selector import ModelChoice
 from core.core.orchestrator import Orchestrator
+from core.core.availability import ProviderStatus
 
 
 class LocalCodeAgent(BaseAgent):
@@ -46,6 +49,20 @@ class DocsAgent(BaseAgent):
 
     def run(self, task: Task, memory_context: dict | None = None):
         return self.result(task, "Prepared required documentation updates.")
+
+
+class GatewayFailingAgent(BaseAgent):
+    def __init__(self, agent_id: str = "gateway-failing") -> None:
+        super().__init__(agent_id, ["docs", "research", "review", "code"])
+
+    def run(self, task: Task, memory_context: dict | None = None):
+        return self.result(
+            task,
+            "Remote provider disconnected.",
+            TaskStatus.FAILED,
+            confidence=0.1,
+            errors=["unexpected status 502 Bad Gateway: service temporarily unavailable; stream disconnected before completion"],
+        )
 
 
 def _orchestrator_with_agents(code_agent: BaseAgent | None = None, fix_agent: BaseAgent | None = None) -> Orchestrator:
@@ -245,3 +262,181 @@ def test_code_task_decomposition_uses_normalized_profile_for_parallel_fanout():
     code_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.CODE]
     assert len(code_tasks) == 3
     assert all(item.routing_hints.get("preferred_agent_id") for item in code_tasks)
+
+
+def test_parallel_code_plan_applies_openai_template_hints():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+    orchestrator.attach_local_agent("code-third", LocalCodeAgent("code-third"), model_name="mistral-large-latest", provider="mistral")
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput(
+            "Implement backend changes and frontend updates for the feature with tests aligned",
+            files=["backend/app.py", "frontend/ui.tsx"],
+            acceptance_criteria=["backend updated", "frontend updated"],
+        ),
+        TaskContext("demo", ".", "main"),
+    )
+    task.routing_hints = {"parallelize_code": True, "parallel_branches": 3}
+
+    advisory = {
+        "openai_compatible": {
+            "code_parallel_candidates": [
+                {"model_name": "gpt-5.5", "provider": "openai", "role": "code_parallel", "family": "gpt", "tier": "frontier"},
+                {"model_name": "claude-sonnet-4-6", "provider": "openai", "role": "code_parallel", "family": "claude", "tier": "frontier"},
+                {"model_name": "deepseek-v4-pro", "provider": "openai", "role": "code_parallel", "family": "deepseek", "tier": "frontier"},
+            ],
+            "review_candidates": [
+                {"model_name": "claude-opus-4-8", "provider": "openai", "role": "review_primary", "family": "claude", "tier": "frontier"},
+            ],
+        }
+    }
+
+    plan = orchestrator.decomposer.decompose(task, advisory_context=advisory)
+
+    code_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.CODE]
+    review_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.REVIEW]
+
+    assert [item.assigned_model for item in code_tasks] == ["gpt-5.5", "claude-sonnet-4-6", "deepseek-v4-pro"]
+    assert all(item.routing_hints.get("preferred_provider") == "openai" for item in code_tasks)
+    assert review_tasks[0].assigned_model == "claude-opus-4-8"
+    assert review_tasks[0].routing_hints.get("model_template_role") == "review_primary"
+
+
+def test_sync_openai_template_workers_attaches_and_prunes(tmp_path, monkeypatch):
+    catalog = tmp_path / "orchestrator_templates.json"
+    monkeypatch.setenv("OPENAI_ORCHESTRATOR_TEMPLATES_PATH", str(catalog))
+
+    catalog.write_text(json.dumps({
+        "roles": {
+            "code_parallel": [
+                {"model_name": "gpt-5.5"},
+                {"model_name": "claude-sonnet-4-6"},
+                {"model_name": "deepseek-v4-pro"},
+            ]
+        }
+    }), encoding="utf-8")
+
+    orchestrator = _orchestrator_with_agents()
+    for agent_id in [item for item in list(orchestrator.local_agents) if item.startswith("codex-openai-")]:
+        orchestrator._detach_local_agent(agent_id)
+    orchestrator._openai_template_agent_ids = set()
+    catalog.write_text(json.dumps({
+        "roles": {
+            "code_parallel": [
+                {"model_name": "gpt-5.5"},
+                {"model_name": "claude-sonnet-4-6"},
+                {"model_name": "deepseek-v4-pro"},
+            ]
+        }
+    }), encoding="utf-8")
+    sync = orchestrator.sync_openai_template_workers(enabled=True, primary_model="gpt-5.5")
+
+    assert set(sync["attached"]) == {"codex-openai-claude-sonnet-4-6", "codex-openai-deepseek-v4-pro"}
+    assert orchestrator.registry.get("codex-openai-claude-sonnet-4-6") is not None
+    assert orchestrator.registry.get("codex-openai-deepseek-v4-pro") is not None
+
+    catalog.write_text(json.dumps({
+        "roles": {
+            "code_parallel": [
+                {"model_name": "gpt-5.5"},
+                {"model_name": "qwen3.7-max"},
+            ]
+        }
+    }), encoding="utf-8")
+
+    resync = orchestrator.sync_openai_template_workers(enabled=True, primary_model="gpt-5.5")
+
+    assert set(resync["removed"]) == {"codex-openai-claude-sonnet-4-6", "codex-openai-deepseek-v4-pro"}
+    assert resync["attached"] == ["codex-openai-qwen3-7-max"]
+    assert orchestrator.registry.get("codex-openai-claude-sonnet-4-6") is None
+    assert orchestrator.registry.get("codex-openai-deepseek-v4-pro") is None
+    assert orchestrator.registry.get("codex-openai-qwen3-7-max") is not None
+
+
+def test_refresh_provider_inventory_snapshot_records_worker_sync(monkeypatch):
+    orchestrator = _orchestrator_with_agents()
+
+    calls = {}
+
+    def _fake_refresh(force_refresh=False):
+        return {"openai": {"ok": True, "diagnostics": {}}, "mistral": {"ok": True}}
+
+    def _fake_participation(records):
+        return {"agent_count": len(list(records))}
+
+    def _fake_sync(*, enabled=True, primary_model=""):
+        calls["enabled"] = enabled
+        calls["primary_model"] = primary_model
+        return {"attached": ["codex-openai-claude-sonnet-4-6"], "removed": [], "kept": [], "enabled": enabled}
+
+    monkeypatch.setattr(orchestrator.provider_inventory, "refresh", _fake_refresh)
+    monkeypatch.setattr(orchestrator.provider_inventory, "build_participation_snapshot", _fake_participation)
+    monkeypatch.setattr(orchestrator, "sync_openai_template_workers", _fake_sync)
+
+    snapshot = orchestrator._refresh_provider_inventory_snapshot(force_refresh=True)
+
+    assert calls["enabled"] is True
+    assert snapshot["providers"]["openai"]["diagnostics"]["worker_sync"]["attached"] == ["codex-openai-claude-sonnet-4-6"]
+    assert snapshot["participation"]["agent_count"] >= 1
+
+
+
+def test_orchestrator_selects_mimo_agent_for_xiaomi_provider_alias():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("mimo-router-1", LocalCodeAgent("mimo-router-1"), model_name="mimo/mimo-auto", provider="mimo")
+
+    selected = orchestrator._select_agent_by_provider_preference("code", ["xiaomi"])
+
+    assert selected == "mimo-router-1"
+
+
+def test_orchestrator_normalizes_github_models_to_mimo():
+    assert Orchestrator._normalize_provider("github-models") == "mimo"
+
+
+def test_orchestrator_runtime_gateway_failure_retries_via_delivery_path(monkeypatch):
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("docs-remote", GatewayFailingAgent("docs-remote"), provider="openai", model_name="gpt-5.5")
+    orchestrator.attach_local_agent("docs-local", DocsAgent("docs-local"), provider="local", model_name="qwen-2.5-7b-instruct")
+
+    calls: list[tuple[str, str]] = []
+    real_run_via_delivery = orchestrator._run_local_agent_via_delivery
+
+    def _spy_run_via_delivery(task, agent_id, capability, agent, memory_context):
+        calls.append((agent_id, capability))
+        return real_run_via_delivery(task, agent_id, capability, agent, memory_context)
+
+    class _Health:
+        def __init__(self, provider: str):
+            self.provider = provider
+            self.status = ProviderStatus.HEALTHY
+            self.error = None
+        def as_dict(self):
+            return {"provider": self.provider, "status": "healthy", "error": None, "diagnostics": {}}
+
+    monkeypatch.setattr(orchestrator, "_select_model_choice_with_mimo", lambda *args, **kwargs: (ModelChoice(
+        model_name="gpt-5.5",
+        provider="openai",
+        complexity=Complexity.MEDIUM,
+        requires_secondary_review=False,
+        reason="test_choice",
+        detected_keywords=[],
+        matched_high_risk_rules=[],
+        matched_low_risk_exemptions=[],
+    ), None))
+    monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task: {"local_llm": {"ready": True, "should_delegate": True, "task_family": "docs"}})
+    monkeypatch.setattr(orchestrator.availability, "check_provider", lambda provider, live=True: _Health(provider))
+    monkeypatch.setattr(orchestrator, "_run_local_agent_via_delivery", _spy_run_via_delivery)
+
+    task = Task(TaskType.DOCS, TaskInput("Explain fallback behavior"), TaskContext("demo", ".", "main"), priority=Priority.NORMAL)
+    task.required_capability = "docs"
+    task.routing_hints = {"provider_preference": "openai", "source": "websocket", "cost_tier": "interactive"}
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.DONE
+    assert calls[0][0] == "docs-remote"
+    assert calls[-1][0] == "docs-local"
+    assert len(calls) >= 2

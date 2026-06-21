@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-MODEL_WINDOWS = {"local-small": 8000, "gpt-4o": 128000, "gemini-1.5-pro": 1000000}
+MODEL_WINDOWS = {"local-small": 8000, "gpt-5.4-nano": 128000, "gpt-5.4-mini": 128000, "gpt-5.4": 128000, "gpt-5.5": 128000, "gemini-1.5-pro": 1000000}
 
 
 def resolve_window(model_name: str | None, default: int = 8000) -> int:

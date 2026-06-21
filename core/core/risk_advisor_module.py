@@ -146,7 +146,7 @@ Context: {task.context.repo_path}
         system_prompt = "You are a senior security and architecture auditor. Provide a structured risk assessment."
         
         # Use a "Thinking" model if possible, otherwise default.
-        model = "gpt-4o" # default reasoning model
+        model = "gpt-5.5" # default reasoning model
         
         return reasoning.structured_call(prompt, RiskAssessment, system_prompt=system_prompt, model=model)
 

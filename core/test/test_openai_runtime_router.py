@@ -24,7 +24,7 @@ def test_openai_registry_uses_cached_text_models(tmp_path, monkeypatch):
         json.dumps(
             {
                 "ts": 4_102_444_800,
-                "models": ["gpt-5-mini", "gpt-4.1-nano", "text-embedding-3-small", "gpt-5.2-codex"],
+                "models": ["gpt-5.4-mini", "gpt-5.4-nano", "text-embedding-3-small", "gpt-5.5"],
             }
         ),
         encoding="utf-8",
@@ -34,9 +34,9 @@ def test_openai_registry_uses_cached_text_models(tmp_path, monkeypatch):
 
     catalog = OpenAIModelRegistry().get_catalog()
 
-    assert "gpt-5-mini" in catalog.mini
-    assert "gpt-4.1-nano" in catalog.nano
-    assert "gpt-5.2-codex" in catalog.codex
+    assert "gpt-5.4-mini" in catalog.mini
+    assert "gpt-5.4-nano" in catalog.nano
+    assert "gpt-5.5" in catalog.standard
 
 
 
@@ -57,11 +57,10 @@ def test_openai_registry_exposes_fetch_error_diagnostics(tmp_path, monkeypatch):
     registry = OpenAIModelRegistry()
 
     assert registry.get_models(force_refresh=True) == []
-    assert registry.diagnostics() == {
-        "ok": False,
-        "error_type": "AuthenticationError",
-        "error_message": "invalid_api_key",
-    }
+    diagnostics = registry.diagnostics()
+    assert diagnostics["ok"] is False
+    assert diagnostics["error_type"] == "AuthenticationError"
+    assert diagnostics["error_message"] == "invalid_api_key"
 
 def test_openai_runtime_router_prefers_light_model_for_low_budget(monkeypatch):
     monkeypatch.setenv("OPENAI_SESSION_TOKEN_BUDGET", "64")
@@ -71,7 +70,7 @@ def test_openai_runtime_router_prefers_light_model_for_low_budget(monkeypatch):
     plan = router.build_plan(_task(complexity=Complexity.CRITICAL), "very long prompt" * 100)
 
     assert plan.reason == "budget_guard_lightweight"
-    assert plan.models[0] in {"gpt-5-nano", "gpt-5-mini", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini"}
+    assert plan.models[0] in {"gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5"}
 
 
 def test_model_selector_openai_auto_is_opt_in(monkeypatch):
@@ -91,11 +90,11 @@ def test_model_selector_openai_auto_is_opt_in(monkeypatch):
 
     monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
-    monkeypatch.setenv("OPENAI_HIGH_MODELS", "gpt-5-mini,gpt-5.1")
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "gpt-5.4-mini,gpt-5.4")
     auto = ModelSelector().select(task)
 
     assert auto.provider == "openai"
-    assert auto.model_name == "gpt-5-mini"
+    assert auto.model_name == "gpt-5.4-mini"
     assert auto.reason.startswith("openai_auto_")
 
 
@@ -160,7 +159,7 @@ def test_openai_runtime_router_uses_websocket_budget_and_interactive_reason(monk
 
     assert plan.remaining_tokens == 2000
     assert plan.reason == "ws_interactive"
-    assert plan.models[0] in {"gpt-5-mini", "gpt-4.1-mini", "gpt-4o-mini", "gpt-5-nano"}
+    assert plan.models[0] in {"gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.4-nano"}
 
 
 def test_openai_runtime_router_uses_websocket_economy_models(monkeypatch):
@@ -175,4 +174,21 @@ def test_openai_runtime_router_uses_websocket_economy_models(monkeypatch):
 
     assert plan.remaining_tokens == 5000
     assert plan.reason == "ws_economy"
-    assert plan.models[0] in {"gpt-5-nano", "gpt-5-mini", "gpt-4.1-nano", "gpt-4.1-mini", "gpt-4o-mini"}
+    assert plan.models[0] in {"gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5"}
+
+
+
+def test_openai_registry_reports_http_endpoint_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setenv("OPENAI_MODELS_CACHE_PATH", str(tmp_path / "openai_models.json"))
+
+    class _Response:
+        status_code = 502
+        content = b''
+
+    monkeypatch.setattr("core.core.openai_model_registry.requests.get", lambda *args, **kwargs: _Response())
+    registry = OpenAIModelRegistry()
+
+    assert registry.get_models(force_refresh=True) == []
+    assert registry.diagnostics()["error_type"] == "endpoint_unavailable"
+    assert registry.diagnostics()["status_code"] == 502

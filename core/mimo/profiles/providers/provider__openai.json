@@ -42,4 +42,22 @@
     "high": 0.86,
     "medium": 0.76
   }
+,
+  "metadata": {
+    "endpoint_roles": {
+      "inventory": "models",
+      "chat": "chat/completions",
+      "responses": "responses",
+      "claude_messages": "messages",
+      "claude_count_tokens": "messages/count_tokens",
+      "codex": "backend-api/codex"
+    },
+    "runtime_policy": {
+      "disconnect_error_types": ["api_timeout", "tcp_timeout", "sdk_hang"],
+      "auth_status_codes": [401, 403],
+      "quota_status_codes": [429],
+      "server_status_codes": [500, 502, 503, 504],
+      "redirect_status_codes": [301, 302, 307, 308]
+    }
+  }
 }

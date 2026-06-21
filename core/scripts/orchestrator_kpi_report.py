@@ -21,6 +21,8 @@ for line in p.read_text(encoding='utf-8').splitlines():
 
 by_day={}
 for r in rows:
+    if r.get('event_type') != 'task_lifecycle':
+        continue
     s=r.get('started_at') or r.get('logged_at')
     if not s:
         continue
@@ -48,4 +50,4 @@ for day,items in sorted(by_day.items()):
         'tokens_per_success':round(sum(tok)/ok,2) if ok else 0,
     }
 
-print(json.dumps({'path':str(p),'days':out}, ensure_ascii=False, indent=2))
+print(json.dumps({'path':str(p),'event_scope':'task_lifecycle','days':out}, ensure_ascii=False, indent=2))

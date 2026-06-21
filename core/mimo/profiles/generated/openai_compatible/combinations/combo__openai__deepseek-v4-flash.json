@@ -1,0 +1,82 @@
+{
+  "profile_type": "combo",
+  "profile_key": "combo::openai::deepseek-v4-flash",
+  "provider_weights": {
+    "openai": {
+      "quality": 1.08,
+      "budget": 0.94,
+      "vfs": 0.96
+    },
+    "local": {
+      "quality": 1.0,
+      "budget": 1.0,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 1.05,
+      "budget": 0.98,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "gpt": {
+      "quality": 1.18,
+      "budget": 0.9
+    },
+    "claude": {
+      "quality": 1.2,
+      "budget": 0.88
+    },
+    "deepseek": {
+      "quality": 1.12,
+      "budget": 0.93
+    },
+    "qwen": {
+      "quality": 1.08,
+      "budget": 0.95
+    },
+    "kimi": {
+      "quality": 1.08,
+      "budget": 0.94
+    },
+    "glm": {
+      "quality": 1.05,
+      "budget": 0.96
+    },
+    "minimax": {
+      "quality": 1.04,
+      "budget": 0.97
+    },
+    "mimo": {
+      "quality": 1.1,
+      "budget": 0.94
+    },
+    "hy3": {
+      "quality": 1.03,
+      "budget": 0.98
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.81,
+    "avg_latency_ms": 1350,
+    "quality_min_confidence": 0.78
+  },
+  "default_context_depth": 4,
+  "budget_pressure": {
+    "high": 1296,
+    "medium": 2520
+  },
+  "quality_pressure": {
+    "high": 0.85,
+    "medium": 0.76
+  },
+  "metadata": {
+    "model_family": "deepseek",
+    "generated": true,
+    "tier": "economy",
+    "class_weights": {
+      "quality": 1.12,
+      "budget": 0.93
+    }
+  }
+}

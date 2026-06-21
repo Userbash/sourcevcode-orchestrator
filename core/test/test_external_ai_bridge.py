@@ -111,3 +111,8 @@ def test_bridge_timeout_preserves_partial_capacity_error(monkeypatch):
     assert "RESOURCE_EXHAUSTED" in result.error
     assert result.error_type == "quota_exhaustion"
 
+
+
+def test_classify_error_treats_gateway_disconnect_as_api_timeout():
+    assert ExternalAIBridge.classify_error("unexpected status 502 Bad Gateway") == "api_timeout"
+    assert ExternalAIBridge.classify_error("CORE stream disconnected before completion: service temporarily unavailable") == "api_timeout"

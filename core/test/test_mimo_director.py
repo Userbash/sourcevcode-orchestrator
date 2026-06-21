@@ -1,3 +1,5 @@
+import json
+
 from core.mimo.proxy import MimoOrchestrationDirector
 
 
@@ -29,7 +31,7 @@ def test_director_can_correct_low_score_model():
     director.state.update_score("model-a", is_successful=False, latency=1500.0)
     choice = DummyChoice("model-a")
     result = director.validate_and_correct(choice, DummyTask(), current_budget=100.0)
-    assert result.model_name == "gpt-4o"
+    assert result.model_name == "gpt-5.4-mini"
 
 
 def test_director_uses_budget_module_when_mimo_disabled():
@@ -71,7 +73,7 @@ def test_director_prefers_historical_model_by_task_type():
     task = type("T", (), {"session_id": "s1", "task_id": "t1", "memory_scope": "task", "complexity": type("C", (), {"value": "medium"})(), "type": DummyTaskType("review")})()
     ctx = director.build_selection_context("model-a", task, 900.0, memory_context={})
     assert ctx["budget_pressure"] == "high"
-    assert ctx["preferred_model"] == "gpt-4o"
+    assert ctx["preferred_model"] == "gpt-5.4-mini"
 
 
 def test_director_applies_vfs_pressure():
@@ -155,6 +157,43 @@ def test_director_loads_granular_profiles():
     assert "docs_api" in director.task_profiles
     assert "test_critical" in director.task_profiles
     assert "research_compare" in director.task_profiles
+
+
+def test_director_loads_generated_profiles_from_generated_manifest(tmp_path):
+    profile_dir = tmp_path / "profiles"
+    generated_dir = profile_dir / "generated" / "openai_compatible"
+    model_dir = generated_dir / "models"
+    combo_dir = generated_dir / "combinations"
+    model_dir.mkdir(parents=True)
+    combo_dir.mkdir(parents=True)
+
+    (profile_dir / "manifest.json").write_text(json.dumps({"task_profiles": [], "provider_profiles": [], "model_profiles": [], "combo_profiles": []}), encoding="utf-8")
+    (generated_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "model_profiles": ["models/model__glm-5.json"],
+                "combo_profiles": ["combinations/combo__openai__glm-5.json"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model_dir / "model__glm-5.json").write_text(
+        json.dumps({"profile_key": "model::glm-5", "default_context_depth": 4, "provider_weights": {}}),
+        encoding="utf-8",
+    )
+    (combo_dir / "combo__openai__glm-5.json").write_text(
+        json.dumps({"profile_key": "combo::openai::glm-5", "default_context_depth": 5, "provider_weights": {}}),
+        encoding="utf-8",
+    )
+
+    director = MimoOrchestrationDirector()
+    director.profile_dir = profile_dir
+    director.profile_manifest_path = profile_dir / "manifest.json"
+    director._profile_mtimes = {}
+    director.task_profiles = director._load_profiles()
+
+    assert "model::glm-5" in director.task_profiles
+    assert "combo::openai::glm-5" in director.task_profiles
 
 
 def test_director_prefers_more_specific_profile_for_regression_fix():
@@ -555,21 +594,21 @@ def test_director_resolve_candidate_models_prefers_better_value_over_local_bias(
     director = MimoOrchestrationDirector()
     director.bridge.get_cached_models = lambda: [
         type("Model", (), {"provider": "local", "id": "local-small", "full_id": "local/local-small", "context_window": 64000, "capability_tags": ["docs"], "cost_class": "medium", "blocked": False, "ready": True, "status": "ready"})(),
-        type("Model", (), {"provider": "openai", "id": "gpt-4o-mini", "full_id": "openai/gpt-4o-mini", "context_window": 128000, "capability_tags": ["docs"], "cost_class": "low", "blocked": False, "ready": True, "status": "ready"})(),
+        type("Model", (), {"provider": "openai", "id": "gpt-5.4-mini", "full_id": "openai/gpt-4o-mini", "context_window": 128000, "capability_tags": ["docs"], "cost_class": "low", "blocked": False, "ready": True, "status": "ready"})(),
     ]
     director.set_budget_module(type("Budget", (), {"history": [
         {"model": "local-small", "provider": "local", "estimated_cost_usd": 0.09},
         {"model": "local-small", "provider": "local", "estimated_cost_usd": 0.08},
-        {"model": "gpt-4o-mini", "provider": "openai", "estimated_cost_usd": 0.002},
-        {"model": "gpt-4o-mini", "provider": "openai", "estimated_cost_usd": 0.003},
+        {"model": "gpt-5.4-mini", "provider": "openai", "estimated_cost_usd": 0.002},
+        {"model": "gpt-5.4-mini", "provider": "openai", "estimated_cost_usd": 0.003},
     ]})())
     task = type("T", (), {"type": DummyTaskType("docs"), "input": type("I", (), {"description": "write docs", "constraints": [], "acceptance_criteria": []})(), "priority": type("P", (), {"value": "normal"})()})()
     director.register_execution_result("local-small", True, 2.4, task=task, quality_score=0.75, provider="local")
-    director.register_execution_result("gpt-4o-mini", True, 0.7, task=task, quality_score=0.92, provider="openai")
+    director.register_execution_result("gpt-5.4-mini", True, 0.7, task=task, quality_score=0.92, provider="openai")
 
     candidates = director.resolve_candidate_models(task, {"local_llm": {"ready": True}, "mimo": {"budget_pressure": "normal"}})
 
-    assert candidates[0]["model_name"] == "gpt-4o-mini"
+    assert candidates[0]["model_name"] == "gpt-5.4-mini"
     assert candidates[0]["value_score"] >= candidates[1]["value_score"]
     assert candidates[0]["value_diagnostics"]["observed_avg_cost_usd"] < candidates[1]["value_diagnostics"]["observed_avg_cost_usd"]
 

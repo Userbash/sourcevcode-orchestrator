@@ -29,7 +29,7 @@ from .integrations.antigravity_manager import AntigravityManager
 from .integrations.mistral_manager import MistralManager
 from .openai_model_registry import OpenAIModelRegistry
 from .provider_inventory_service import ProviderInventoryService
-from .openai_provider import default_openai_tcp_probe_hosts
+from .openai_provider import default_openai_tcp_probe_hosts, openai_endpoint_manifest, resolve_openai_provider_config
 
 
 class ProviderStatus(Enum):
@@ -397,11 +397,43 @@ class ModelAvailability:
         return self._cache(health)
 
 
+    @staticmethod
+    def _probe_openai_endpoint(name: str, url: str, api_key: str) -> dict[str, Any]:
+        endpoint = str(url or "").strip()
+        if not endpoint:
+            return {"name": name, "url": endpoint, "ok": False, "error_type": "missing_endpoint", "status_code": None}
+        try:
+            response = requests.get(
+                endpoint,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=5.0,
+                allow_redirects=False,
+            )
+            status_code = int(response.status_code)
+            if status_code == 200:
+                return {"name": name, "url": endpoint, "ok": True, "status_code": status_code, "category": "ok"}
+            if status_code == 405:
+                return {"name": name, "url": endpoint, "ok": True, "status_code": status_code, "category": "method_not_allowed_but_present"}
+            error_type = OpenAIModelRegistry._classify_status_code(status_code)[0]
+            return {"name": name, "url": endpoint, "ok": False, "status_code": status_code, "error_type": error_type}
+        except Exception as exc:
+            return {
+                "name": name,
+                "url": endpoint,
+                "ok": False,
+                "status_code": None,
+                "error_type": ExternalAIBridge.classify_error(str(exc)),
+                "error": str(exc),
+            }
+
     def check_openai(self, *, live: bool | None = None) -> ProviderHealth:
         start = datetime.now(UTC)
+        cfg = resolve_openai_provider_config()
+        endpoint_manifest = openai_endpoint_manifest(cfg)
         diagnostics: dict[str, Any] = {
             "provider": "openai",
             "credential": credential_snapshot(("OPENAI_API_KEY",)),
+            "endpoint_manifest": endpoint_manifest,
         }
         if not diagnostics["credential"].get("usable"):
             latency = (datetime.now(UTC) - start).total_seconds() * 1000
@@ -417,6 +449,11 @@ class ModelAvailability:
             health = ProviderHealth("openai", ProviderStatus.TIMEOUT, latency, datetime.now(UTC), error="tcp_probe_failed", diagnostics=diagnostics)
             diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
             return self._cache(health)
+
+        endpoint_statuses: dict[str, dict[str, Any]] = {}
+        for name, endpoint in cfg.endpoint_map().items():
+            endpoint_statuses[name] = self._probe_openai_endpoint(name, endpoint, cfg.api_key)
+        diagnostics["endpoint_statuses"] = endpoint_statuses
 
         registry = OpenAIModelRegistry()
         models = registry.get_models(force_refresh=bool(live if live is not None else self._live_probe_enabled()))
@@ -435,6 +472,7 @@ class ModelAvailability:
             diagnostics["configured_models_available"] = [item for item in configured if item in set(models)]
 
         latency = (datetime.now(UTC) - start).total_seconds() * 1000
+        models_probe = endpoint_statuses.get("models", {})
         if not models:
             snapshot = self._snapshot_inventory("openai")
             snap_models = [str(item).strip() for item in snapshot.get("models", []) if str(item).strip()] if isinstance(snapshot, dict) else []
@@ -443,11 +481,33 @@ class ModelAvailability:
                 diagnostics["models"] = models
                 diagnostics["inventory_snapshot"] = snapshot
                 diagnostics["inventory_source"] = "snapshot"
-        if models:
-            health = ProviderHealth("openai", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics)
-        else:
-            health = ProviderHealth("openai", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="openai_models_unavailable", diagnostics=diagnostics)
+
+        if models_probe.get("error_type") == "auth_fail":
+            health = ProviderHealth("openai", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error="openai_auth_failed", diagnostics=diagnostics)
             diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
+            return self._cache(health)
+        if models_probe.get("error_type") == "quota_exhaustion":
+            health = ProviderHealth("openai", ProviderStatus.QUOTA_EXCEEDED, latency, datetime.now(UTC), error="openai_rate_limited", diagnostics=diagnostics)
+            diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
+            return self._cache(health)
+        if models_probe.get("error_type") in {"endpoint_unavailable", "api_timeout", "tcp_timeout"}:
+            health = ProviderHealth("openai", ProviderStatus.TIMEOUT, latency, datetime.now(UTC), error="openai_endpoint_unavailable", diagnostics=diagnostics)
+            diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
+            return self._cache(health)
+
+        endpoint_failures = [name for name, payload in endpoint_statuses.items() if not payload.get("ok")]
+        if models:
+            status = ProviderStatus.HEALTHY if not endpoint_failures else ProviderStatus.DEGRADED
+            health = ProviderHealth("openai", status, latency, datetime.now(UTC), diagnostics=diagnostics)
+            if status != ProviderStatus.HEALTHY:
+                diagnostics["remediation"] = [
+                    "Часть OpenAI-compatible endpoints деградировала; ядро может продолжать routing через рабочие routes из endpoint_statuses.",
+                    "При отказе chat/responses/messages переключай orchestration на local/mistral path и используй models snapshot для inventory.",
+                ]
+            return self._cache(health)
+
+        health = ProviderHealth("openai", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="openai_models_unavailable", diagnostics=diagnostics)
+        diagnostics["remediation"] = self._remediation("openai", health.status, diagnostics)
         return self._cache(health)
 
     def check_ai_kernel(self, *, live: bool | None = None) -> ProviderHealth:

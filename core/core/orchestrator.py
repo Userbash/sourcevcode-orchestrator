@@ -14,6 +14,7 @@ from typing import Any
 from datetime import UTC, datetime
 
 from core.agents.base_agent import BaseAgent
+from core.agents.codex_agent import CodexAgent
 
 from .agent_factory import AgentFactory
 from .agent_registry import AgentRegistry
@@ -643,6 +644,7 @@ class Orchestrator:
         self._training_consolidation_interval_sec = max(60, int(self.orchestration_config.training_consolidation_interval_sec))
         self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
         self._provider_inventory_refresh_interval_sec = max(60, int(getattr(self.orchestration_config, "provider_inventory_refresh_interval_sec", 1800)))
+        self._openai_template_agent_ids: set[str] = set()
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
         self.ai_kernel_bridge = AIKernelBridge(host_bridge=self.host_bridge)
         self.mimo_director = MimoOrchestrationDirector()
@@ -732,7 +734,11 @@ class Orchestrator:
         self.module_manager.load("intelligence")
         self.module_manager.load("security_sentinel")
         self.experience_policy_learner.refresh(persistent=self.session_memory.hybrid.persistent)
-        self.experience_trainer.train(persistent=self.session_memory.hybrid.persistent)
+        self.experience_trainer.train(
+            persistent=self.session_memory.hybrid.persistent,
+            runtime_snapshot=self._training_runtime_snapshot(),
+            repo_path=os.getcwd(),
+        )
 
         # Load local_llm before autostart so the module is available for
         # advisory context and readiness checks during kernel boot.
@@ -790,6 +796,17 @@ class Orchestrator:
     def _stop_postgres_watchdog(self) -> None:
         self._postgres_watchdog_stop.set()
 
+    def _training_runtime_snapshot(self) -> dict[str, Any]:
+        local_llm = self.get_module("local_llm") if hasattr(self, "get_module") else None
+        provider_inventory = getattr(self, "_provider_inventory_snapshot", {})
+        providers = provider_inventory.get("providers", {}) if isinstance(provider_inventory, dict) else {}
+        return {
+            "local_llm_ready": bool(local_llm and getattr(local_llm, "ready", False)),
+            "local_llm_model": str(getattr(local_llm, "model_name", "") or ""),
+            "ai_kernel_enabled": os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+            "provider_inventory_ready": bool(providers),
+        }
+
     def _training_memory_domain(self, task: Task) -> str:
         task_type = task.type.value.lower()
         return {
@@ -805,12 +822,25 @@ class Orchestrator:
         memory_domain = self._training_memory_domain(task)
         model_name = str(result.model_name or getattr(task, "assigned_model", "") or "").strip()
         provider = str(result.provider or "").strip().lower()
+        files = [str(item).strip() for item in list(task.input.files or []) if str(item).strip()]
+        constraints = [str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()]
+        acceptance = [str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()]
+        description = str(task.input.description or '').strip()
+        summary = str(result.output.get("summary", "") or "").strip()
         payload = {
             "session_id": task.session_id or task.task_id,
             "agent_id": result.agent_id or "orchestrator",
             "task_type": task.type.value,
             "memory_domain": memory_domain,
-            "summary": str(result.output.get("summary", "") or "").strip(),
+            "summary": summary,
+            "problem": description,
+            "objective": description,
+            "constraints": constraints,
+            "files": files,
+            "acceptance_criteria": acceptance,
+            "outcome": result.status.value,
+            "failure_mode": "; ".join(result.errors or []) if result.errors else "",
+            "reuse_hint": "Reuse when task type, files, and constraints overlap; treat as a pattern rather than a literal script.",
             "source_memory_ids": [],
             "quality_score": max(0.0, min(1.0, float(result.confidence))),
             "metadata": {
@@ -819,6 +849,15 @@ class Orchestrator:
                 "memory_domain": memory_domain,
                 "model_name": model_name,
                 "provider": provider,
+                "summary": summary,
+                "task_description": description,
+                "constraints": constraints,
+                "files": files,
+                "acceptance_criteria": acceptance,
+                "failure_mode": "; ".join(result.errors or []) if result.errors else "",
+                "reuse_hint": "Reuse when task type, files, and constraints overlap; treat as a pattern rather than a literal script.",
+                "outcome": result.status.value,
+                "problem": description,
             },
         }
         if not payload["summary"]:
@@ -858,7 +897,14 @@ class Orchestrator:
             except Exception as exc:
                 self.log("warning", f"[MEMORY] Experience policy refresh failed: {exc}")
             try:
-                self.experience_trainer.train(persistent=self.session_memory.hybrid.persistent)
+                training_refresh = self.experience_trainer.train(
+                    persistent=self.session_memory.hybrid.persistent,
+                    runtime_snapshot=self._training_runtime_snapshot(),
+                    repo_path=os.getcwd(),
+                )
+                supervisor = ((training_refresh or {}).get('training_supervisor') or {}).get('primary', {})
+                if supervisor:
+                    self.console.emit("TRAINING", f"supervisor={supervisor.get('owner', 'orchestrator')} task_board={(training_refresh or {}).get('training_task_board_path', '')}")
             except Exception as exc:
                 self.log("warning", f"[MEMORY] Experience training refresh failed: {exc}")
         return processed
@@ -878,6 +924,13 @@ class Orchestrator:
 
     def _refresh_provider_inventory_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
         payload = self.provider_inventory.refresh(force_refresh=force_refresh)
+        openai_entry = payload.get("openai", {}) if isinstance(payload, dict) else {}
+        primary_model = str(os.getenv("CODEX_OPENAI_MODEL", "gpt-5.5")).strip()
+        if isinstance(openai_entry, dict) and openai_entry.get("ok"):
+            template_sync = self.sync_openai_template_workers(enabled=True, primary_model=primary_model)
+            diagnostics = openai_entry.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                diagnostics["worker_sync"] = template_sync
         participation = self.provider_inventory.build_participation_snapshot(self.registry.list_agents())
         self._provider_inventory_snapshot = {"updated_at": int(__import__("time").time()), "providers": payload, "participation": participation}
         self._update_model_replacement_snapshot()
@@ -1204,8 +1257,10 @@ class Orchestrator:
     @staticmethod
     def _normalize_provider(provider: str) -> str:
         p = provider.strip().lower()
-        if p in {"antigravity", "antigravity-cli", "agy"}:
+        if p in {"antigravity", "antigravity-cli", "agy", "google", "gemini"}:
             return "antigravity"
+        if p in {"mimo", "mimo-cli", "xiaomi", "github-copilot", "github-models"}:
+            return "mimo"
         return p
 
     def _select_agent_by_provider_preference(self, capability: str, providers: list[str], exclude: set[str] | None = None, priority: Priority | str | None = None) -> str | None:
@@ -1302,6 +1357,97 @@ class Orchestrator:
             reserved_models.add((str(selected.provider), str(selected.model_name)))
         return assignments
 
+    @staticmethod
+    def _openai_template_catalog_path() -> Path:
+        explicit = str(os.getenv("OPENAI_ORCHESTRATOR_TEMPLATES_PATH", "")).strip()
+        if explicit:
+            return Path(explicit)
+        return Path("core/mimo/profiles/generated/openai_compatible/orchestrator_templates.json")
+
+    def _load_openai_template_catalog(self) -> dict[str, Any]:
+        path = self._openai_template_catalog_path()
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _openai_template_agent_id(model_name: str) -> str:
+        safe = str(model_name or "").replace(".", "-").replace(":", "-").replace("/", "-").strip("-")
+        safe = safe or "worker"
+        return f"codex-openai-{safe}"[:64]
+
+    @staticmethod
+    def _openai_template_worker_limit() -> int:
+        raw = str(os.getenv("AI_BRIDGE_OPENAI_CODE_WORKERS_MAX", "3")).strip()
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 3
+
+    def _detach_local_agent(self, agent_id: str) -> None:
+        self.local_agents.pop(agent_id, None)
+        self.registry.unregister(agent_id)
+        self._agent_p2p_inbox.pop(agent_id, None)
+        if hasattr(self.message_bus, "pods"):
+            self.message_bus.pods.pop(agent_id, None)
+        inboxes = getattr(self.message_bus, "_pod_inboxes", None)
+        if isinstance(inboxes, dict):
+            inboxes.pop(agent_id, None)
+
+    def sync_openai_template_workers(self, *, enabled: bool = True, primary_model: str = "") -> dict[str, Any]:
+        if not enabled:
+            return {"enabled": False, "attached": [], "removed": [], "kept": sorted(self._openai_template_agent_ids)}
+
+        payload = self._load_openai_template_catalog()
+        role_map = payload.get("roles") if isinstance(payload.get("roles"), dict) else {}
+        rows = role_map.get("code_parallel") if isinstance(role_map, dict) else []
+        if not isinstance(rows, list):
+            return {"enabled": True, "attached": [], "removed": [], "kept": sorted(self._openai_template_agent_ids)}
+
+        primary = str(primary_model or "").strip()
+        limit = self._openai_template_worker_limit()
+        desired: list[tuple[str, str]] = []
+        seen_models: set[str] = {primary} if primary else set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get("model_name") or "").strip()
+            if not model_name or model_name in seen_models:
+                continue
+            seen_models.add(model_name)
+            desired.append((self._openai_template_agent_id(model_name), model_name))
+            if len(desired) >= limit:
+                break
+
+        desired_ids = {agent_id for agent_id, _ in desired}
+        removed: list[str] = []
+        for agent_id in sorted(self._openai_template_agent_ids - desired_ids):
+            self._detach_local_agent(agent_id)
+            removed.append(agent_id)
+
+        attached: list[str] = []
+        kept: list[str] = []
+        for agent_id, model_name in desired:
+            if agent_id in self.local_agents and self.registry.get(agent_id) is not None:
+                kept.append(agent_id)
+                continue
+            self.attach_local_agent(
+                agent_id,
+                CodexAgent(agent_id),
+                agent_type="codex",
+                critical=False,
+                model_name=model_name,
+                provider="openai",
+            )
+            attached.append(agent_id)
+
+        self._openai_template_agent_ids = desired_ids
+        return {"enabled": True, "attached": attached, "removed": removed, "kept": kept}
+
     def _build_decomposition_advisory(self, task: Task) -> dict[str, object]:
         advisory_context: dict[str, object] = {}
 
@@ -1320,6 +1466,14 @@ class Orchestrator:
             }
             return advisory_context
 
+        task_text = str(task.input.description or "").lower()
+        sourcecraft_keywords = ("sourcecraft", "repo", "repository", "pull request", "issue", "release", "branch", "changelog", "quota", "status")
+        is_sourcecraft_task = (
+            str(getattr(task, "required_capability", "") or "").strip().lower() in {"sourcecraft", "repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance"}
+            or (task.type == TaskType.PLAN and any(keyword in task_text for keyword in sourcecraft_keywords))
+        )
+        fast_plan_task = task.type == TaskType.PLAN and not is_sourcecraft_task
+
         sourcecraft_module = self.module_manager.get_module("sourcecraft") if hasattr(self.module_manager, "get_module") else None
         if sourcecraft_module and hasattr(sourcecraft_module, "build_delegation_profile"):
             try:
@@ -1331,8 +1485,10 @@ class Orchestrator:
                         "branch": task.context.branch,
                     },
                 )
-                if hasattr(sourcecraft_module, "ensure_ready"):
+                if is_sourcecraft_task and hasattr(sourcecraft_module, "ensure_ready"):
                     advisory_context["sourcecraft_runtime"] = sourcecraft_module.ensure_ready(repo_path=task.context.repo_path or ".")
+                else:
+                    advisory_context["sourcecraft_runtime"] = {"status": "skipped_for_fast_plan"}
             except Exception:
                 advisory_context["sourcecraft"] = {"enabled": False, "should_delegate": False}
                 advisory_context["sourcecraft_runtime"] = {"status": "error"}
@@ -1340,19 +1496,36 @@ class Orchestrator:
         local_llm_module = self.module_manager.get_module("local_llm") if hasattr(self.module_manager, "get_module") else None
         if local_llm_module and isinstance(local_llm_module, LocalLLMModule):
             try:
-                # Use build_decomposition_draft for the "First Layer" planning
-                advisory_context["local_llm"] = local_llm_module.build_decomposition_draft(
-                    task,
-                    {
-                        "description": task.input.description,
-                        "repo_path": task.context.repo_path,
-                        "branch": task.context.branch,
-                    },
-                )
+                advisory_payload = {
+                    "description": task.input.description,
+                    "repo_path": task.context.repo_path,
+                    "branch": task.context.branch,
+                }
+                if fast_plan_task:
+                    advisory_context["local_llm"] = local_llm_module._advisory_base(task, advisory_payload)
+                    advisory_context["local_llm"]["decomposition"] = local_llm_module._heuristic_decomposition_draft(task, advisory_payload)
+                    advisory_context["local_llm"]["decomposition_source"] = "heuristic_fast_plan"
+                else:
+                    advisory_context["local_llm"] = local_llm_module.build_decomposition_draft(task, advisory_payload)
                 self.log("info", f"[LOCAL_LLM] First-layer decomposition draft generated for task {task.task_id}")
             except Exception as e:
                 self.log("warning", f"[LOCAL_LLM] Failed to generate decomposition draft: {e}")
                 advisory_context["local_llm"] = {"enabled": False, "ready": False, "should_delegate": False}
+
+        template_catalog = self._load_openai_template_catalog()
+        role_map = template_catalog.get("roles") if isinstance(template_catalog.get("roles"), dict) else {}
+        if role_map:
+            advisory_context["openai_compatible"] = {
+                "enabled": True,
+                "generated_at": template_catalog.get("generated_at"),
+                "template_count": template_catalog.get("template_count", 0),
+                "code_parallel_candidates": list(role_map.get("code_parallel", []))[:4],
+                "review_candidates": list(role_map.get("review_primary", []))[:3],
+                "plan_candidates": list(role_map.get("plan_primary", []))[:3],
+                "test_candidates": list(role_map.get("test_primary", []))[:3],
+                "docs_candidates": list(role_map.get("docs_primary", []))[:3],
+                "research_candidates": list(role_map.get("research_primary", []))[:3],
+            }
 
         return advisory_context
 
@@ -1528,6 +1701,10 @@ class Orchestrator:
                 token_limit=token_limit,
                 task_type=task_type,
                 allow_trained_memory=high_risk_trained_memory,
+                query_text=str(task.input.description or ''),
+                files=[str(item).strip() for item in list(task.input.files or []) if str(item).strip()],
+                constraints=[str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()],
+                acceptance_criteria=[str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()],
             )
             if trained_brief:
                 context["trained_memory_domain"] = trained_domain
@@ -2073,7 +2250,18 @@ class Orchestrator:
                         if fallback_agent:
                             agent_id = retry_agent_id
                             agent_record = retry_agent_record or agent_record
-                            result = fallback_agent.run(task, memory_context=memory_context)
+                            fallback_provider = str(agent_record.provider if agent_record else choice.provider)
+                            fallback_model = str(agent_record.model_name if agent_record else choice.model_name)
+                            module_context["agent_id"] = agent_id
+                            module_context["provider"] = fallback_provider
+                            module_context["model"] = fallback_model
+                            memory_context = self._load_memory_context(
+                                task,
+                                agent_id,
+                                provider=fallback_provider,
+                                model_name=fallback_model,
+                            )
+                            result = self._run_local_agent_via_delivery(task, agent_id, capability, fallback_agent, memory_context)
                             result_errors = " ".join(result.errors or [])
                             if result_errors:
                                 try:

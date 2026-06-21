@@ -131,11 +131,16 @@ class TaskDecomposer:
             task.required_capability = "sourcecraft" if self._is_sourcecraft_task(task) else CAPABILITY_BY_TASK_TYPE.get(task.type, "code")
         if task.complexity is None:
             task.complexity = self.model_selector.classify(task)
-        try:
-            choice = self.model_selector.select(task)
-            task.assigned_model = choice.model_name
-        except Exception:
-            task.assigned_model = task.assigned_model or None
+        requested_model = str(task.assigned_model or (task.routing_hints or {}).get("requested_model") or "").strip()
+        if requested_model:
+            task.assigned_model = requested_model
+            task.routing_hints.setdefault("requested_model", requested_model)
+        else:
+            try:
+                choice = self.model_selector.select(task)
+                task.assigned_model = choice.model_name
+            except Exception:
+                task.assigned_model = task.assigned_model or None
         if not task.routing_hints:
             task.routing_hints = {}
         task.routing_hints.setdefault("required_capability", task.required_capability)
@@ -161,6 +166,23 @@ class TaskDecomposer:
         task.routing_hints.setdefault("kpi_floor", kpi_floor)
 
 
+    @staticmethod
+    def _openai_template_candidates(advisory_context: dict[str, Any] | None, role: str) -> list[dict[str, Any]]:
+        if not isinstance(advisory_context, dict):
+            return []
+        payload = advisory_context.get("openai_compatible")
+        if not isinstance(payload, dict):
+            return []
+        key_map = {
+            "code_parallel": "code_parallel_candidates",
+            "review_primary": "review_candidates",
+            "plan_primary": "plan_candidates",
+            "test_primary": "test_candidates",
+            "docs_primary": "docs_candidates",
+        }
+        rows = payload.get(key_map.get(role, role))
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
     def _parallel_code_agents(self) -> list[str]:
         api = getattr(self.model_selector, "_api", None)
         registry = getattr(api, "registry", None) if api is not None else None
@@ -176,7 +198,7 @@ class TaskDecomposer:
             agents.append(record.id)
         return agents
 
-    def _parallel_code_plan(self, task: Task) -> ExecutionPlan | None:
+    def _parallel_code_plan(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ExecutionPlan | None:
         hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
         complexity = task.complexity or self.model_selector.classify(task)
         task.complexity = complexity
@@ -198,10 +220,30 @@ class TaskDecomposer:
             except ValueError:
                 max_branches = 4
         selected_agents = agents[:min(len(agents), max_branches)]
+        branch_templates = self._openai_template_candidates(advisory_context, "code_parallel")
+        review_templates = self._openai_template_candidates(advisory_context, "review_primary")
         branch_labels = ["primary", "fast", "safe", "alt", "review-ready", "fallback"]
         branches: list[Task] = []
         for idx, agent_id in enumerate(selected_agents):
             label = branch_labels[idx] if idx < len(branch_labels) else f"branch-{idx+1}"
+            template = branch_templates[idx] if idx < len(branch_templates) else {}
+            branch_hints = {
+                **dict(hints),
+                "preferred_agent_id": agent_id,
+                "batch_forced_agent_id": agent_id,
+                "parallelize_code": True,
+                "parallel_group": "code_fanout",
+                "fanout_label": label,
+            }
+            requested_model = str(template.get("model_name") or "").strip()
+            preferred_provider = str(template.get("provider") or "").strip().lower()
+            if requested_model:
+                branch_hints["requested_model"] = requested_model
+                branch_hints["model_template_role"] = str(template.get("role") or "code_parallel")
+                branch_hints["model_template_family"] = str(template.get("family") or "")
+                branch_hints["model_template_tier"] = str(template.get("tier") or "")
+            if preferred_provider:
+                branch_hints["preferred_provider"] = preferred_provider
             branch = Task(
                 TaskType.CODE,
                 TaskInput(
@@ -214,18 +256,20 @@ class TaskDecomposer:
                 Priority.NORMAL if task.priority == Priority.NORMAL else task.priority,
                 parent_task_id=task.task_id,
                 draft_layer=f"parallel_code_{label}",
-                routing_hints={
-                    **dict(hints),
-                    "preferred_agent_id": agent_id,
-                    "batch_forced_agent_id": agent_id,
-                    "parallelize_code": True,
-                    "parallel_group": "code_fanout",
-                    "fanout_label": label,
-                },
+                routing_hints=branch_hints,
             )
+            if requested_model:
+                branch.assigned_model = requested_model
             branch.required_capability = "code"
             branches.append(branch)
 
+        review_hints = {**dict(hints), "parallel_source": "code_fanout"}
+        review_model = str((review_templates[0] if review_templates else {}).get("model_name") or "").strip()
+        review_provider = str((review_templates[0] if review_templates else {}).get("provider") or "").strip().lower()
+        if review_model:
+            review_hints["requested_model"] = review_model
+            review_hints["preferred_provider"] = review_provider or "openai"
+            review_hints["model_template_role"] = "review_primary"
         review = Task(
             TaskType.REVIEW,
             TaskInput(
@@ -238,8 +282,10 @@ class TaskDecomposer:
             parent_task_id=task.task_id,
             dependencies=[branch.task_id for branch in branches],
             draft_layer="parallel_code_review",
-            routing_hints={**dict(hints), "parallel_source": "code_fanout"},
+            routing_hints=review_hints,
         )
+        if review_model:
+            review.assigned_model = review_model
         review.required_capability = "review"
         tasks = [*branches, review]
         for atomic in tasks:
@@ -438,7 +484,7 @@ class TaskDecomposer:
     def decompose(self, task: Task, advisory_context: dict[str, Any] | None = None) -> ExecutionPlan:
 
         if task.type == TaskType.CODE:
-            parallel_plan = self._parallel_code_plan(task)
+            parallel_plan = self._parallel_code_plan(task, advisory_context=advisory_context)
             if parallel_plan is not None:
                 return parallel_plan
 

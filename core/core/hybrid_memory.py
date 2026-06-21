@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
 from typing import Any
+import math
 
 from .memory_backend import BackendEntry, InMemoryBackend, MemoryBackend
 from .memory_settings import MemorySettings
@@ -71,6 +73,11 @@ class HybridMemory:
         self._trained_memory_degrade_releases = 0
         self._trained_memory_outcome_stats: dict[tuple[str, str], dict[str, int]] = {}
         self._event_publisher: Callable[[str, dict[str, Any]], None] | None = None
+        self._retrieval_min_score = max(0.0, min(1.0, float(getattr(self.settings, "retrieval_min_score", 0.34) or 0.34)))
+        self._retrieval_min_semantic_similarity = max(0.0, min(1.0, float(getattr(self.settings, "retrieval_min_semantic_similarity", 0.16) or 0.16)))
+        self._retrieval_min_vector_similarity = max(0.0, min(1.0, float(getattr(self.settings, "retrieval_min_vector_similarity", 0.10) or 0.10)))
+        self._retrieval_min_summary_signal = max(0.0, min(1.0, float(getattr(self.settings, "retrieval_min_summary_signal", 0.18) or 0.18)))
+        self._retrieval_reuse_min_score = max(0.0, min(1.0, float(getattr(self.settings, "retrieval_reuse_min_score", 0.48) or 0.48)))
 
     @staticmethod
     def make_key(scope: str, identifier: str, key: str) -> str:
@@ -271,36 +278,54 @@ class HybridMemory:
         now = datetime.now(UTC)
         hits: list[RetrievalHit] = []
 
-        # 1. Semantic Search (Vector) if LLM is available
-        query_vector: list[float] = []
+        # Keep the local-LM hook intact, but retrieval quality should not depend on it.
         if api:
             local_llm = api.get_module("local_llm")
             if local_llm and getattr(local_llm, "ready", False):
                 try:
-                    # In a real system, we'd use a dedicated embedding endpoint.
-                    # Here we use the LLM to get a representation or just tokens.
-                    # For prototype, we'll keep using the token-based fallback but with higher weights.
                     pass
                 except Exception:
                     pass
 
-        norm_query_terms = set(self._tokenize(query_text))
+        norm_query_terms = {term for term in self._tokenize(query_text) if len(term) >= 2}
+        query_vector = self._hashed_vector(query_text)
         candidate_keys = self._candidate_keys(norm_query_terms, session_id=session_id, project_name=project_name)
-        
+
         for full_key in candidate_keys:
             entry = self._hot.get(full_key)
             if not entry:
                 continue
-            
-            semantic_similarity = self._semantic_similarity(norm_query_terms, list(entry.indexed_terms))
+
+            candidate_text = self._semantic_text_for_entry(entry)
+            candidate_terms = self._tokenize(candidate_text)
+            term_similarity = self._semantic_similarity(norm_query_terms, candidate_terms)
+            vector_similarity = max(0.0, self._cosine_similarity(query_vector, self._hashed_vector(candidate_text)))
+            summary_signal = self._summary_signal_score(candidate_text)
+            exact_key_match = 1.0 if any(part in full_key.lower() for part in norm_query_terms if len(part) >= 4) else 0.0
+            semantic_similarity = (
+                term_similarity * 0.5
+                + vector_similarity * 0.35
+                + min(1.0, summary_signal) * 0.1
+                + exact_key_match * 0.05
+            )
             age_sec = max(1.0, (now - entry.last_accessed).total_seconds())
-            
-            # Time Decay: Newer is better (Half-life: 1 hour)
             time_decay = 1.0 / (1.0 + age_sec / 3600.0)
-            
-            # Weighted Scoring: Semantic (50%) + Importance (30%) + Recency (20%)
-            score = 0.5 * semantic_similarity + 0.3 * entry.importance_score + 0.2 * time_decay
-            
+
+            score = (
+                0.58 * semantic_similarity
+                + 0.22 * entry.importance_score
+                + 0.15 * time_decay
+                + 0.05 * min(1.0, entry.access_count / 4.0)
+            )
+            if semantic_similarity < self._retrieval_min_semantic_similarity:
+                continue
+            if vector_similarity < self._retrieval_min_vector_similarity and term_similarity < (self._retrieval_min_semantic_similarity + 0.08):
+                continue
+            if summary_signal < self._retrieval_min_summary_signal and term_similarity < 0.35 and exact_key_match <= 0.0:
+                continue
+            if score < self._retrieval_min_score:
+                continue
+
             hits.append(
                 RetrievalHit(
                     key=full_key,
@@ -452,11 +477,11 @@ class HybridMemory:
             limit=limit or self.settings.command_window_size,
         )
 
-    def _trained_cache_key(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float) -> tuple[str, str, str, int, int, float]:
-        return (session_id, agent_id, memory_domain, int(top_k), int(token_limit), round(float(quality_threshold), 3))
+    def _trained_cache_key(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float, query_signature: str = '') -> tuple[str, str, str, int, int, float, str]:
+        return (session_id, agent_id, memory_domain, int(top_k), int(token_limit), round(float(quality_threshold), 3), query_signature[:24])
 
-    def _trained_cache_get(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float) -> str | None:
-        key = self._trained_cache_key(session_id=session_id, agent_id=agent_id, memory_domain=memory_domain, top_k=top_k, token_limit=token_limit, quality_threshold=quality_threshold)
+    def _trained_cache_get(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float, query_signature: str = '') -> str | None:
+        key = self._trained_cache_key(session_id=session_id, agent_id=agent_id, memory_domain=memory_domain, top_k=top_k, token_limit=token_limit, quality_threshold=quality_threshold, query_signature=query_signature)
         cached = self._trained_memory_brief_cache.get(key)
         if not cached:
             return None
@@ -466,13 +491,17 @@ class HybridMemory:
             return None
         return brief
 
-    def _trained_cache_set(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float, brief: str) -> None:
-        key = self._trained_cache_key(session_id=session_id, agent_id=agent_id, memory_domain=memory_domain, top_k=top_k, token_limit=token_limit, quality_threshold=quality_threshold)
+    def _trained_cache_set(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int, token_limit: int, quality_threshold: float, brief: str, query_signature: str = '') -> None:
+        key = self._trained_cache_key(session_id=session_id, agent_id=agent_id, memory_domain=memory_domain, top_k=top_k, token_limit=token_limit, quality_threshold=quality_threshold, query_signature=query_signature)
         self._trained_memory_brief_cache[key] = (datetime.now(UTC) + timedelta(seconds=self._trained_memory_brief_ttl_sec), brief)
 
     def _trained_memory_rank(self, record: Any, *, position: int) -> float:
-        score = float(getattr(record, "quality_score", 0.0) or 0.0)
-        created_at = getattr(record, "created_at", "")
+        if isinstance(record, dict):
+            score = float(record.get("quality_score", 0.0) or 0.0)
+            created_at = record.get("created_at", "")
+        else:
+            score = float(getattr(record, "quality_score", 0.0) or 0.0)
+            created_at = getattr(record, "created_at", "")
         age_bonus = 0.0
         if created_at:
             try:
@@ -488,6 +517,64 @@ class HybridMemory:
         key = memory_domain.split(":", 1)[-1].lower()
         return float(self._trained_memory_quality_thresholds_by_task.get(key, self._trained_memory_quality_threshold) or self._trained_memory_quality_threshold)
 
+
+    @staticmethod
+    def _trained_memory_payload(record: Any) -> tuple[dict[str, Any], dict[str, Any], float, str, list[Any], str | None]:
+        if isinstance(record, dict):
+            content = record.get("content")
+            metadata = dict(record.get("metadata") or {})
+            quality = float(record.get("quality_score", 0.0) or 0.0)
+            created_at = record.get("created_at")
+            source_ids = list(record.get("source_memory_ids") or [])
+            domain = str(record.get("memory_domain", "") or "")
+        else:
+            content = getattr(record, "content", None)
+            metadata = dict(getattr(record, "metadata", {}) or {})
+            quality = float(getattr(record, "quality_score", 0.0) or 0.0)
+            created_at = getattr(record, "created_at", None)
+            source_ids = list(getattr(record, "source_memory_ids", []) or [])
+            domain = str(getattr(record, "memory_domain", "") or "")
+        payload = content if isinstance(content, dict) else {"summary": str(content or "")}
+        return payload, metadata, quality, domain, source_ids, created_at
+
+    def _trained_memory_document(self, record: Any, *, memory_domain: str, query_text: str = "", files: list[str] | None = None, constraints: list[str] | None = None, acceptance_criteria: list[str] | None = None) -> tuple[str, float]:
+        payload, metadata, quality, domain, _, created_at = self._trained_memory_payload(record)
+        parts = [
+            str(metadata.get("semantic_document") or "").strip(),
+            str(payload.get("problem") or payload.get("objective") or "").strip(),
+            str(payload.get("summary") or "").strip(),
+            str(payload.get("outcome") or "").strip(),
+            str(payload.get("failure_mode") or "").strip(),
+            " ".join(str(item) for item in (payload.get("files") or [])),
+            " ".join(str(item) for item in (payload.get("constraints") or [])),
+            " ".join(str(item) for item in (payload.get("acceptance_criteria") or [])),
+            str(payload.get("reuse_hint") or "").strip(),
+            domain or memory_domain,
+        ]
+        document = "\n".join(part for part in parts if part)
+        summary_signal = self._summary_signal_score(document)
+        age_bonus = 0.0
+        if created_at:
+            try:
+                age_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                age_hours = max(0.0, (datetime.now(UTC) - age_dt).total_seconds() / 3600.0)
+                age_bonus = 1.0 / (1.0 + age_hours / 48.0)
+            except Exception:
+                age_bonus = 0.0
+        richness = max(0.0, min(1.0, summary_signal * 0.55 + quality * 0.3 + age_bonus * 0.15))
+        return document, richness
+
+    def _trained_query_signature(self, *, memory_domain: str, query_text: str = "", files: list[str] | None = None, constraints: list[str] | None = None, acceptance_criteria: list[str] | None = None) -> str:
+        blob = "\n".join([
+            memory_domain,
+            query_text or "",
+            " ".join(files or []),
+            " ".join(constraints or []),
+            " ".join(acceptance_criteria or []),
+        ])
+        if not blob.strip():
+            return ""
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:24]
 
     def _degrade_key(self, session_id: str, task_type: str) -> tuple[str, str]:
         return (session_id, task_type)
@@ -557,16 +644,55 @@ class HybridMemory:
             self._trained_memory_degrade_releases += released
         return released
 
-    def _rank_trained_memories(self, records: list[Any], *, top_k: int, quality_threshold: float) -> list[Any]:
-        filtered = [record for record in records if float(getattr(record, "quality_score", 0.0) or 0.0) >= quality_threshold]
-        if not filtered:
-            return []
-        ordered = sorted(
-            enumerate(filtered),
-            key=lambda pair: self._trained_memory_rank(pair[1], position=pair[0]),
-            reverse=True,
-        )
-        return [record for _, record in ordered[:max(1, int(top_k))]]
+    def _rank_trained_memories(
+        self,
+        records: list[Any],
+        *,
+        top_k: int,
+        quality_threshold: float,
+        memory_domain: str,
+        query_text: str = "",
+        files: list[str] | None = None,
+        constraints: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+    ) -> list[Any]:
+        filtered = []
+        query_document = "\n".join([
+            memory_domain,
+            query_text or memory_domain,
+            " ".join(files or []),
+            " ".join(constraints or []),
+            " ".join(acceptance_criteria or []),
+        ])
+        query_terms = set(self._tokenize(query_document))
+        query_vector = self._hashed_vector(query_document)
+        for position, record in enumerate(records):
+            payload, metadata, quality, domain, _, _ = self._trained_memory_payload(record)
+            if quality < quality_threshold:
+                continue
+            document, richness = self._trained_memory_document(
+                record,
+                memory_domain=memory_domain,
+                query_text=query_text,
+                files=files,
+                constraints=constraints,
+                acceptance_criteria=acceptance_criteria,
+            )
+            if richness < self._retrieval_min_summary_signal:
+                continue
+            record_terms = set(self._tokenize(document))
+            term_similarity = self._semantic_similarity(query_terms, list(record_terms))
+            vector = metadata.get("semantic_vector")
+            if not isinstance(vector, list) or not vector:
+                vector = self._hashed_vector(document)
+            vector_similarity = max(0.0, self._cosine_similarity(query_vector, [float(item) for item in vector]))
+            reuse_bonus = 0.05 if str(payload.get("reuse_hint") or "").strip() else 0.0
+            score = quality * 0.32 + richness * 0.23 + term_similarity * 0.2 + vector_similarity * 0.18 + reuse_bonus + self._trained_memory_rank(record, position=position) * 0.07
+            if term_similarity < self._retrieval_min_semantic_similarity and vector_similarity < self._retrieval_min_vector_similarity:
+                continue
+            filtered.append((score, record, domain or memory_domain))
+        filtered.sort(key=lambda item: item[0], reverse=True)
+        return [record for _, record, _ in filtered[:max(1, int(top_k))]]
 
     def retrieve_trained_memory_brief(
         self,
@@ -578,11 +704,16 @@ class HybridMemory:
         token_limit: int = 900,
         task_type: str | None = None,
         allow_trained_memory: bool = True,
+        query_text: str = '',
+        files: list[str] | None = None,
+        constraints: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
     ) -> str:
         normalized_task_type = str(task_type or memory_domain.split(":", 1)[-1]).lower()
         if not allow_trained_memory or self._trained_memory_degraded(session_id=session_id, task_type=normalized_task_type):
             return ""
         quality_threshold = self._trained_quality_threshold_for_domain(memory_domain)
+        query_signature = self._trained_query_signature(memory_domain=memory_domain, query_text=query_text, files=files, constraints=constraints, acceptance_criteria=acceptance_criteria)
         cached = self._trained_cache_get(
             session_id=session_id,
             agent_id=agent_id,
@@ -590,6 +721,7 @@ class HybridMemory:
             top_k=top_k,
             token_limit=token_limit,
             quality_threshold=quality_threshold,
+            query_signature=query_signature,
         )
         if cached is not None:
             self.record_trained_memory_outcome(session_id=session_id, task_type=normalized_task_type, accepted=True, threshold=quality_threshold, reason="cache_hit")
@@ -608,7 +740,7 @@ class HybridMemory:
                 records = []
         if not records:
             return ""
-        records = self._rank_trained_memories(records, top_k=top_k, quality_threshold=quality_threshold)
+        records = self._rank_trained_memories(records, top_k=top_k, quality_threshold=quality_threshold, memory_domain=memory_domain, query_text=query_text, files=files, constraints=constraints, acceptance_criteria=acceptance_criteria)
         if not records:
             self.record_trained_memory_outcome(session_id=session_id, task_type=normalized_task_type, accepted=False, threshold=quality_threshold, reason="quality_threshold")
             return ""
@@ -617,19 +749,9 @@ class HybridMemory:
         used = len(lines[0])
         budget_chars = max(200, token_limit * 4)
         for record in records:
-            if isinstance(record, dict):
-                content = record.get("content")
-                source_ids = record.get("source_memory_ids") or []
-                score = float(record.get("quality_score", 0.0) or 0.0)
-                domain = str(record.get("memory_domain", memory_domain))
-                label = f"[Quality: {score:.2f}] [Domain: {domain}] [Sources: {source_ids}]"
-            else:
-                content = getattr(record, "content", None)
-                source_ids = getattr(record, "source_memory_ids", [])
-                score = float(getattr(record, "quality_score", 0.0) or 0.0)
-                domain = str(getattr(record, "memory_domain", memory_domain))
-                label = f"[Quality: {score:.2f}] [Domain: {domain}] [Sources: {source_ids}]"
-            payload = str(content)
+            payload_dict, metadata, score, domain, source_ids, _ = self._trained_memory_payload(record)
+            label = f"[Quality: {score:.2f}] [Domain: {domain or memory_domain}] [Sources: {source_ids}]"
+            payload = str(payload_dict.get('summary') or payload_dict.get('outcome') or payload_dict.get('problem') or payload_dict)
             if len(payload) > 500:
                 payload = payload[:497] + "..."
             line = f"{label} {payload}"
@@ -646,6 +768,7 @@ class HybridMemory:
             token_limit=token_limit,
             quality_threshold=quality_threshold,
             brief=brief,
+            query_signature=query_signature,
         )
         return brief
 
@@ -656,19 +779,73 @@ class HybridMemory:
         agent_id: str,
         memory_domain: str,
         top_k: int = 3,
+        query_text: str = '',
+        files: list[str] | None = None,
+        constraints: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
     ) -> dict[str, Any]:
+        normalized_task_type = str(memory_domain.split(":", 1)[-1]).lower()
+        quality_threshold = self._trained_quality_threshold_for_domain(memory_domain)
         brief = self.retrieve_trained_memory_brief(
             session_id=session_id,
             agent_id=agent_id,
             memory_domain=memory_domain,
             top_k=top_k,
+            query_text=query_text,
+            files=files,
+            constraints=constraints,
+            acceptance_criteria=acceptance_criteria,
         )
+        records: list[Any] = []
+        if brief and hasattr(self.persistent, "retrieve_trained_memories"):
+            try:
+                records = self.persistent.retrieve_trained_memories(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    memory_domain=memory_domain,
+                    top_k=max(1, int(top_k)) * 3,
+                )
+            except Exception:
+                records = []
+        ranked = self._rank_trained_memories(records, top_k=top_k, quality_threshold=quality_threshold, memory_domain=memory_domain, query_text=query_text, files=files, constraints=constraints, acceptance_criteria=acceptance_criteria) if records else []
+        provenance: list[Any] = []
+        confidence_score = 0.0
+        age_sec: float | None = None
+        if ranked:
+            source_ids: list[Any] = []
+            scores: list[float] = []
+            ages: list[float] = []
+            now = datetime.now(UTC)
+            for record in ranked:
+                if isinstance(record, dict):
+                    source_ids.extend(list(record.get("source_memory_ids") or []))
+                    scores.append(float(record.get("quality_score", 0.0) or 0.0))
+                    created_at = record.get("created_at")
+                else:
+                    source_ids.extend(list(getattr(record, "source_memory_ids", []) or []))
+                    scores.append(float(getattr(record, "quality_score", 0.0) or 0.0))
+                    created_at = getattr(record, "created_at", None)
+                if created_at:
+                    try:
+                        ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                    except Exception:
+                        ts = None
+                    if ts is not None:
+                        ages.append(max(0.0, (now - ts).total_seconds()))
+            provenance = source_ids or [f"trained_memory:{memory_domain}"]
+            confidence_score = round(sum(scores) / len(scores), 4) if scores else 0.0
+            age_sec = min(ages) if ages else None
         return {
             "brief": brief,
             "memory_domain": memory_domain,
             "session_id": session_id,
             "agent_id": agent_id,
             "has_trained_memory": bool(brief),
+            "provenance": provenance,
+            "confidence_score": confidence_score,
+            "age_sec": age_sec,
+            "quality_threshold": quality_threshold,
+            "task_type": normalized_task_type,
         }
 
     def use_trained_memory(
@@ -698,6 +875,64 @@ class HybridMemory:
         text = re.sub(r"[^a-z0-9_./:#\-\s]+", " ", text)
         text = re.sub(r"\s+", " ", text)
         return text.strip()
+
+    @staticmethod
+    def _summary_signal_score(text: Any) -> float:
+        normalized = HybridMemory._normalize_reuse_text(text)
+        if not normalized:
+            return 0.0
+        tokens = [token for token in normalized.split() if token]
+        if not tokens:
+            return 0.0
+        unique_ratio = len(set(tokens)) / len(tokens)
+        informative_ratio = sum(1 for token in tokens if len(token) >= 4) / len(tokens)
+        alpha_ratio = sum(1 for char in normalized if char.isalnum()) / max(1, len(normalized))
+        length_score = min(1.0, len(tokens) / 14.0)
+        return max(0.0, min(1.0, 0.3 * length_score + 0.3 * unique_ratio + 0.25 * informative_ratio + 0.15 * alpha_ratio))
+
+    def _semantic_text_for_entry(self, entry: HotEntry) -> str:
+        parts = [entry.key, " ".join(entry.tags), str(entry.value)[:1200]]
+        if entry.stub and entry.stub.summary:
+            parts.append(entry.stub.summary[:240])
+        return "\n".join(part for part in parts if part)
+
+    def _hashed_vector(self, text: Any, *, dims: int | None = None) -> list[float]:
+        normalized = self._normalize_reuse_text(text)
+        width = max(8, int(dims or self.settings.semantic_vector_dims or 48))
+        vector = [0.0] * width
+        if not normalized:
+            return vector
+        tokens = normalized.split()
+        counts = Counter(tokens)
+        for token, count in counts.items():
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:2], "big") % width
+            sign = 1.0 if digest[2] % 2 == 0 else -1.0
+            weight = (1.0 + min(2.0, len(token) / 12.0)) * (1.0 + min(1.5, math.log1p(count)))
+            vector[idx] += sign * weight
+        compact = normalized.replace(" ", "")
+        if len(compact) >= 3:
+            for start in range(0, len(compact) - 2):
+                trigram = compact[start:start + 3]
+                digest = hashlib.sha256(f"tri:{trigram}".encode("utf-8")).digest()
+                idx = int.from_bytes(digest[:2], "big") % width
+                sign = 1.0 if digest[2] % 2 == 0 else -1.0
+                vector[idx] += sign * 0.35
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm <= 1e-9:
+            return vector
+        return [round(value / norm, 6) for value in vector]
+
+    @staticmethod
+    def _cosine_similarity(left: list[float], right: list[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+        dot = sum(a * b for a, b in zip(left, right))
+        left_norm = math.sqrt(sum(a * a for a in left))
+        right_norm = math.sqrt(sum(b * b for b in right))
+        if left_norm <= 1e-9 or right_norm <= 1e-9:
+            return 0.0
+        return max(-1.0, min(1.0, dot / (left_norm * right_norm)))
 
     def _reuse_terms(self, *, objective: str, files: list[str], constraints: list[str], acceptance_criteria: list[str]) -> list[str]:
         buckets = [objective, *files, *constraints, *acceptance_criteria]
@@ -843,6 +1078,14 @@ class HybridMemory:
         query_set = set(query_terms)
         file_set = {item.lower() for item in files}
         domain = f"reuse:{task_type}"
+        query_vector = self._hashed_vector(
+            "\n".join([
+                description,
+                " ".join(str(item) for item in files),
+                " ".join(str(item) for item in constraints),
+                " ".join(str(item) for item in acceptance_criteria),
+            ])
+        )
         ranked: list[tuple[float, Any, dict[str, Any], dict[str, Any]]] = []
         for record in records:
             record_domain = str(getattr(record, "memory_domain", "") or "")
@@ -866,24 +1109,42 @@ class HybridMemory:
                 ))
             if not record_set:
                 continue
-            overlap = len(query_set & record_set) / max(1, len(query_set | record_set))
+            shared_terms = query_set & record_set
+            overlap = len(shared_terms) / max(1, len(query_set | record_set))
+            query_coverage = len(shared_terms) / max(1, len(query_set))
             record_files = {str(item).lower() for item in (content.get("files") or []) if str(item).strip()}
             file_overlap = len(file_set & record_files) / max(1, len(file_set | record_files)) if file_set and record_files else 0.0
             record_capability = str(metadata.get("capability") or content.get("capability") or "")
-            score = overlap * 0.6
+            summary_text = str(content.get("summary") or content.get("objective") or "")
+            summary_signal = self._summary_signal_score(summary_text)
+            record_vector = self._hashed_vector(
+                "\n".join([
+                    str(content.get("objective") or ""),
+                    summary_text,
+                    " ".join(str(item) for item in (content.get("files") or [])),
+                    " ".join(str(item) for item in (content.get("constraints") or [])),
+                    " ".join(str(item) for item in (content.get("acceptance_criteria") or [])),
+                ])
+            )
+            vector_similarity = max(0.0, self._cosine_similarity(query_vector, record_vector))
+            score = overlap * 0.28 + query_coverage * 0.2 + vector_similarity * 0.22 + summary_signal * 0.08
             if file_overlap:
-                score += file_overlap * 0.15
+                score += file_overlap * 0.1
             if project and record_project == project:
-                score += 0.1
+                score += 0.08
             if capability and record_capability == capability:
-                score += 0.1
+                score += 0.08
             if str(metadata.get("fingerprint") or content.get("fingerprint") or "") == fingerprint:
-                score += 0.25
+                score += 0.2
             if agent_id and str(getattr(record, "agent_id", "")) == str(agent_id):
                 score += 0.05
             quality_score = float(getattr(record, "quality_score", 0.0) or 0.0)
-            score += min(0.1, quality_score * 0.1)
-            if score < 0.45:
+            score += min(0.09, quality_score * 0.09)
+            if summary_signal < self._retrieval_min_summary_signal and overlap < 0.2 and file_overlap < 0.25:
+                continue
+            if vector_similarity < self._retrieval_min_vector_similarity and overlap < 0.28:
+                continue
+            if score < self._retrieval_reuse_min_score:
                 continue
             ranked.append((score, record, metadata, content))
 
@@ -1039,6 +1300,12 @@ class HybridMemory:
         if not query_terms or not candidate_terms:
             return 0.0
         cset = set(candidate_terms)
-        intersection = len(query_terms.intersection(cset))
+        intersection_terms = query_terms.intersection(cset)
+        intersection = len(intersection_terms)
         union = max(1, len(query_terms.union(cset)))
-        return intersection / union
+        jaccard = intersection / union
+        coverage = intersection / max(1, len(query_terms))
+        informative_query_terms = {term for term in query_terms if len(term) >= 5}
+        informative_hits = len(intersection_terms.intersection(informative_query_terms))
+        informative_coverage = informative_hits / max(1, len(informative_query_terms)) if informative_query_terms else coverage
+        return min(1.0, jaccard * 0.45 + coverage * 0.35 + informative_coverage * 0.2)

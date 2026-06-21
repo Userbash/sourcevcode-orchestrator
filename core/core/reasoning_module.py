@@ -46,7 +46,7 @@ class ReasoningModule:
     name: str = "reasoning"
     _api: KernelAPI | None = None
     _client: Any | None = None
-    _default_model: str = "gpt-4o"
+    _default_model: str = "gpt-5.5"
     _provider: str = "openai"
     _last_failure: dict[str, Any] | None = None
     _call_stats: dict[str, int] | None = None
@@ -79,7 +79,7 @@ class ReasoningModule:
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY", "").strip()
             base_url = build_openai_client_kwargs(max_retries=1).get("base_url")
-            model = os.getenv("CODEX_OPENAI_MODEL", "gpt-4o")
+            model = os.getenv("CODEX_OPENAI_MODEL", "gpt-5.5")
             provider = "openai"
 
         if api_key:

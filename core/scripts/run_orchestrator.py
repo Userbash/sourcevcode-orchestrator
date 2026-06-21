@@ -19,10 +19,12 @@ from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
 from core.agents.local_llm_agent import LocalLLMAgent
 from core.agents.ai_kernel_agent import AIKernelAgent
+from core.agents.mimo_agent import MimoAgent
 from core.core.orchestration_config import OrchestrationConfig
 from core.core.dependency_manager import DependencyManager
 from core.core.orchestrator import Orchestrator
 from core.core.security import SecurityManager, SecurityPolicy
+from core.core.provider_credentials import has_usable_credential
 
 
 def _ensure_memory_dirs() -> None:
@@ -66,14 +68,21 @@ async def main(argv: list[str] | None = None) -> None:
 
     security_manager = SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=["agy -p", "antigravity -p"]))
 
+    codex_model = os.getenv("CODEX_OPENAI_MODEL", "gpt-5.5")
+    openai_key = has_usable_credential("OPENAI_API_KEY")
+
     orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="planner", critical=True, model_name="gpt-planner", provider="openai")
-    orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="codex", critical=True, model_name=os.getenv("CODEX_OPENAI_MODEL", "gpt-4o"), provider="openai")
+    orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="codex", critical=True, model_name=codex_model, provider="openai")
+    orchestrator.sync_openai_template_workers(enabled=openai_key, primary_model=codex_model)
     orchestrator.attach_local_agent("antigravity-cli-1", AntigravityCLIAgent("antigravity-cli-1", security_manager), agent_type="external_ai", critical=False, model_name="antigravity-cli", provider="google")
     orchestrator.attach_local_agent("mistral-1", MistralAgent("mistral-1", security_manager), agent_type="external_ai", critical=False, model_name="mistral-large-latest", provider="mistral")
     orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
     orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
     orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")), agent_type="custom", critical=False, model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"), provider="local")
     orchestrator.attach_local_agent("ai-kernel-qwen36-1", AIKernelAgent("ai-kernel-qwen36-1"), agent_type="custom", critical=False, model_name=os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"), provider="ai_kernel")
+    if MimoAgent("mimo-router-1")._cli_path():
+        mimo_default_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto")
+        orchestrator.attach_local_agent("mimo-router-1", MimoAgent("mimo-router-1", default_model=mimo_default_model), agent_type="external_ai", critical=False, model_name=mimo_default_model, provider="mimo")
 
     print(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")
     try:

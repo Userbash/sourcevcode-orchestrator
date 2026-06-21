@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import base64
+import math
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +68,39 @@ def normalize_database_url(database_url: str) -> str:
 
 def normalize_session_id(session_id: str) -> str:
     return f"sess-{hashlib.sha256(session_id.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _semantic_terms(text: str, *, limit: int = 64) -> list[str]:
+    normalized = re.sub(r"[^a-z0-9_./:#\-\s]+", " ", str(text or "").lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return []
+    seen: set[str] = set()
+    terms: list[str] = []
+    for token in normalized.split(" "):
+        if len(token) < 3:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        terms.append(token)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
+def _semantic_vector(text: str, *, dims: int = 64) -> list[float]:
+    width = max(16, int(dims))
+    vector = [0.0] * width
+    for token in _semantic_terms(text, limit=width * 2):
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        idx = int.from_bytes(digest[:2], "big") % width
+        sign = 1.0 if digest[2] % 2 == 0 else -1.0
+        vector[idx] += sign * (1.0 + min(2.0, len(token) / 12.0))
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm <= 1e-9:
+        return vector
+    return [round(value / norm, 6) for value in vector]
 
 
 def ensure_storage_schema(database_url: str) -> bool:
@@ -873,18 +908,76 @@ class PersistentMemoryManager:
     ) -> str | None:
         normalized_task_type = str(task_type).strip().lower()
         memory_domain = TASK_TRAINED_MEMORY_DOMAINS.get(normalized_task_type, f"prompt:{normalized_task_type}")
+        metadata = dict(metadata or {})
+        problem = str(metadata.get("problem") or metadata.get("objective") or metadata.get("task_description") or "").strip()
+        constraints = [str(item).strip() for item in list(metadata.get("constraints") or []) if str(item).strip()]
+        files = [str(item).strip() for item in list(metadata.get("files") or []) if str(item).strip()]
+        acceptance = [str(item).strip() for item in list(metadata.get("acceptance_criteria") or []) if str(item).strip()]
+        outcome = str(metadata.get("outcome") or metadata.get("status") or "done").strip().lower()
+        failure_mode = str(metadata.get("failure_mode") or "").strip()
+        provider = str(metadata.get("provider") or "").strip().lower()
+        model_name = str(metadata.get("model_name") or metadata.get("model") or "").strip()
+        semantic_document = "\n".join(
+            item for item in [
+                normalized_task_type,
+                memory_domain,
+                problem,
+                summary,
+                " ".join(files),
+                " ".join(constraints),
+                " ".join(acceptance),
+                failure_mode,
+            ]
+            if item
+        )
+        signal_components = {
+            "summary_chars": len(summary.strip()),
+            "has_problem": bool(problem),
+            "files_count": len(files),
+            "constraints_count": len(constraints),
+            "acceptance_count": len(acceptance),
+            "has_failure_mode": bool(failure_mode),
+            "has_model_identity": bool(provider and model_name),
+            "source_count": len(source_memory_ids or []),
+        }
+        signal_score = 0.0
+        signal_score += min(0.35, max(0.0, len(summary.strip()) / 240.0) * 0.35)
+        signal_score += min(0.35, max(0.0, float(quality_score)) * 0.35)
+        signal_score += min(0.12, (len(files) + len(constraints) + len(acceptance)) * 0.02)
+        if problem:
+            signal_score += 0.08
+        if failure_mode:
+            signal_score += 0.05
+        if provider and model_name:
+            signal_score += 0.05
         payload = {
             "session_id": self.upsert_session(session_id, agent_id=agent_id),
             "source_session_id": session_id,
             "agent_id": agent_id,
             "task_type": normalized_task_type,
             "summary": summary,
+            "problem": problem,
+            "objective": problem,
+            "constraints": constraints,
+            "files": files,
+            "acceptance_criteria": acceptance,
+            "outcome": outcome,
+            "failure_mode": failure_mode,
+            "provider": provider,
+            "model_name": model_name,
+            "reuse_hint": str(metadata.get("reuse_hint") or "").strip(),
+            "provenance": str(metadata.get("source") or "consolidate_successful_task"),
+            "signal_score": round(min(1.0, signal_score), 4),
             "source_memory_ids": source_memory_ids or [],
             "quality_score": max(0.0, min(1.0, float(quality_score))),
         }
         merged_metadata = {"source": "consolidate_successful_task", "task_type": normalized_task_type}
-        if metadata:
-            merged_metadata.update(metadata)
+        merged_metadata.update(metadata)
+        merged_metadata["semantic_document"] = semantic_document[:4000]
+        merged_metadata["semantic_terms"] = _semantic_terms(semantic_document)
+        merged_metadata["semantic_vector"] = _semantic_vector(semantic_document)
+        merged_metadata["signal_components"] = signal_components
+        merged_metadata["signal_score"] = payload["signal_score"]
         self.store_trained_memory(
             session_id=session_id,
             agent_id=agent_id,

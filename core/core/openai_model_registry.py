@@ -5,8 +5,11 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from .openai_provider import build_openai_client_kwargs
+import requests
+
+from .openai_provider import resolve_openai_provider_config
 
 
 @dataclass(slots=True)
@@ -25,6 +28,9 @@ class OpenAIRegistryDiagnostics:
     ok: bool
     error_type: str | None = None
     error_message: str | None = None
+    status_code: int | None = None
+    endpoint: str | None = None
+    source: str = "live"
 
 
 class OpenAIModelRegistry:
@@ -42,36 +48,83 @@ class OpenAIModelRegistry:
         lowered = model_id.lower()
         if any(token in lowered for token in ("embedding", "moderation", "tts", "whisper", "image", "sora", "dall", "realtime", "audio", "transcribe")):
             return False
-        return lowered.startswith(("gpt-", "o", "codex")) or "codex" in lowered
+        return lowered.startswith(("gpt-", "o", "codex")) or "codex" in lowered or "claude" in lowered or "deepseek" in lowered or "qwen" in lowered or "kimi" in lowered or "glm" in lowered or "mimo" in lowered
+
+    @staticmethod
+    def _classify_status_code(status_code: int) -> tuple[str, str]:
+        if 300 <= status_code < 400:
+            return "redirect_status", f"unexpected_redirect_{status_code}"
+        if status_code in {401, 403}:
+            return "auth_fail", f"auth_status_{status_code}"
+        if status_code == 404:
+            return "endpoint_not_found", "models_endpoint_not_found"
+        if status_code == 429:
+            return "quota_exhaustion", "models_endpoint_rate_limited"
+        if 500 <= status_code < 600:
+            return "endpoint_unavailable", f"models_endpoint_unavailable_{status_code}"
+        return "http_error", f"models_endpoint_http_{status_code}"
 
     def _fetch_live(self) -> list[str]:
         key = self._api_key()
+        cfg = resolve_openai_provider_config()
+        endpoint = str(cfg.models_endpoint or "").strip()
         if not key:
-            self._last_diagnostics = OpenAIRegistryDiagnostics(ok=False, error_type="missing_api_key", error_message="OPENAI_API_KEY is not set")
+            self._last_diagnostics = OpenAIRegistryDiagnostics(ok=False, error_type="missing_api_key", error_message="OPENAI_API_KEY is not set", endpoint=endpoint)
+            return []
+        if not endpoint:
+            self._last_diagnostics = OpenAIRegistryDiagnostics(ok=False, error_type="missing_models_endpoint", error_message="OpenAI models endpoint is not configured", endpoint=None)
             return []
         try:
-            import logging
-            logging.getLogger("httpx").setLevel(logging.WARNING)
-            logging.getLogger("openai").setLevel(logging.WARNING)
+            response = requests.get(
+                endpoint,
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=10.0,
+                allow_redirects=False,
+            )
+        except Exception as exc:
+            from .external_ai_bridge import ExternalAIBridge
 
-            from openai import OpenAI
+            classified = ExternalAIBridge.classify_error(str(exc))
+            self._last_diagnostics = OpenAIRegistryDiagnostics(
+                ok=False,
+                error_type=classified,
+                error_message=str(exc),
+                endpoint=endpoint,
+                source="live",
+            )
+            return []
 
-            client = OpenAI(**build_openai_client_kwargs(max_retries=1))
-            models = client.models.list()
+        if response.status_code != 200:
+            error_type, error_message = self._classify_status_code(response.status_code)
+            self._last_diagnostics = OpenAIRegistryDiagnostics(
+                ok=False,
+                error_type=error_type,
+                error_message=error_message,
+                status_code=response.status_code,
+                endpoint=endpoint,
+                source="live",
+            )
+            return []
+
+        try:
+            payload = response.json() if response.content else {}
         except Exception as exc:
             self._last_diagnostics = OpenAIRegistryDiagnostics(
                 ok=False,
-                error_type=type(exc).__name__,
+                error_type="invalid_json",
                 error_message=str(exc),
+                status_code=response.status_code,
+                endpoint=endpoint,
+                source="live",
             )
             return []
 
         out: list[str] = []
-        for item in getattr(models, "data", []):
-            model_id = str(getattr(item, "id", "")).strip()
+        for item in payload.get("data", []) if isinstance(payload, dict) else []:
+            model_id = str((item or {}).get("id") or "").strip()
             if model_id and self._is_text_model(model_id):
                 out.append(model_id)
-        self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True)
+        self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True, status_code=response.status_code, endpoint=endpoint, source="live")
         return self._dedupe(out)
 
     @staticmethod
@@ -105,19 +158,32 @@ class OpenAIModelRegistry:
         if not force_refresh:
             cached = self._load_cache()
             if cached:
-                self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True)
+                self._last_diagnostics = OpenAIRegistryDiagnostics(ok=True, source="cache")
                 return cached
         live = self._fetch_live()
         if live:
             self._save_cache(live)
             return live
-        return self._load_cache()
+        cached = self._load_cache()
+        if cached:
+            self._last_diagnostics = OpenAIRegistryDiagnostics(
+                ok=True,
+                error_type=self._last_diagnostics.error_type,
+                error_message=self._last_diagnostics.error_message,
+                status_code=self._last_diagnostics.status_code,
+                endpoint=self._last_diagnostics.endpoint,
+                source="cache_fallback",
+            )
+        return cached
 
-    def diagnostics(self) -> dict[str, str | bool | None]:
+    def diagnostics(self) -> dict[str, str | bool | int | None]:
         return {
             "ok": self._last_diagnostics.ok,
             "error_type": self._last_diagnostics.error_type,
             "error_message": self._last_diagnostics.error_message,
+            "status_code": self._last_diagnostics.status_code,
+            "endpoint": self._last_diagnostics.endpoint,
+            "source": self._last_diagnostics.source,
         }
 
     def get_catalog(self, force_refresh: bool = False) -> OpenAIModelCatalog:

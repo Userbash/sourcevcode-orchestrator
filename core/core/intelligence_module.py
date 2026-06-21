@@ -57,7 +57,7 @@ Description: {task.input.description}
 Files involved: {len(task.input.files)}
 Acceptance Criteria count: {len(task.input.acceptance_criteria)}
 """
-        return reasoning.structured_call(prompt, ComplexityAnalysis, system_prompt="You are a technical project manager.", model="gpt-4o")
+        return reasoning.structured_call(prompt, ComplexityAnalysis, system_prompt="You are a technical project manager.", model="gpt-5.5")
 
     def diagnose_error(self, raw_error: str, task: Task, model_used: str) -> Optional[ErrorDiagnosis]:
         local_llm = self._api.get_module("local_llm") if self._api else None

@@ -250,3 +250,21 @@ def test_provider_budget_router_prefers_stronger_providers_for_noisy_input_profi
     providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
 
     assert providers[0] == "openai"
+
+
+def test_provider_budget_router_prefers_local_for_default_websocket_interactive_flow():
+    task = Task(
+        TaskType.DOCS,
+        TaskInput("Summarize release notes for the chat session"),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    task.routing_hints = {"source": "websocket"}
+
+    class _Choice:
+        provider = "openai"
+        complexity = None
+
+    providers = ProviderBudgetRouter().preferred_providers(task, _Choice())
+
+    assert providers[0] == "local"

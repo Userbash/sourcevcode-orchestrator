@@ -73,6 +73,56 @@ class MimoOrchestrationDirector:
         self.last_sync_at: str | None = None
         self._load_persisted_kpi_windows()
 
+    def _load_manifest_entries(self, manifest_path: Path) -> list[Path]:
+        try:
+            stat = manifest_path.stat()
+            self._profile_mtimes[manifest_path] = stat.st_mtime
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if not isinstance(manifest, dict):
+            return []
+        manifest_dir = manifest_path.parent
+        entries: list[Path] = []
+        for section in ("task_profiles", "provider_profiles", "model_profiles", "combo_profiles"):
+            values = manifest.get(section)
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                path = manifest_dir / str(item)
+                if path.is_file():
+                    entries.append(path)
+        return entries
+
+    def _iter_profile_files(self) -> list[Path]:
+        files: list[Path] = []
+        seen: set[Path] = set()
+
+        def add(path: Path) -> None:
+            if path in seen or not path.is_file():
+                return
+            seen.add(path)
+            files.append(path)
+
+        if self.profile_manifest_path.exists():
+            for path in self._load_manifest_entries(self.profile_manifest_path):
+                add(path)
+
+        generated_root = self.profile_dir / "generated"
+        if generated_root.exists():
+            for manifest_path in sorted(generated_root.rglob("manifest.json")):
+                for path in self._load_manifest_entries(manifest_path):
+                    add(path)
+
+        if files:
+            return files
+
+        for file in self.profile_dir.rglob("*.json"):
+            if file.name in {"rolling_kpi_store.json", "manifest.json"}:
+                continue
+            add(file)
+        return files
+
     def set_budget_module(self, budget_module: Any | None) -> None:
         self._budget_module = budget_module
 
@@ -278,22 +328,7 @@ class MimoOrchestrationDirector:
         profiles: dict[str, dict[str, Any]] = {}
         if not self.profile_dir.exists():
             return profiles
-        manifest_entries: list[str] = []
-        if self.profile_manifest_path.exists():
-            try:
-                stat = self.profile_manifest_path.stat()
-                self._profile_mtimes[self.profile_manifest_path] = stat.st_mtime
-                manifest = json.loads(self.profile_manifest_path.read_text(encoding="utf-8"))
-                if isinstance(manifest, dict):
-                    for section in ("task_profiles", "provider_profiles", "model_profiles", "combo_profiles"):
-                        entries = manifest.get(section)
-                        if isinstance(entries, list):
-                            manifest_entries.extend(str(item) for item in entries)
-            except Exception:
-                manifest_entries = []
-        files = [self.profile_dir / entry for entry in manifest_entries if (self.profile_dir / entry).is_file()]
-        if not files:
-            files = [file for file in self.profile_dir.rglob("*.json") if file.name != "rolling_kpi_store.json" and file.name != "manifest.json"]
+        files = self._iter_profile_files()
         for file in files:
             if file.name == "rolling_kpi_store.json" or file.name == "manifest.json":
                 continue
@@ -320,22 +355,21 @@ class MimoOrchestrationDirector:
         changed = False
         current_profiles: dict[str, dict[str, Any]] = {}
         current_mtimes: dict[Path, float] = {}
-        manifest_entries: list[Path] = []
-        if self.profile_manifest_path.exists():
+        files = self._iter_profile_files()
+        manifest_paths = [self.profile_manifest_path]
+        generated_root = self.profile_dir / "generated"
+        if generated_root.exists():
+            manifest_paths.extend(sorted(generated_root.rglob("manifest.json")))
+        for manifest_path in manifest_paths:
+            if not manifest_path.exists():
+                continue
             try:
-                stat = self.profile_manifest_path.stat()
-                current_mtimes[self.profile_manifest_path] = stat.st_mtime
-                if self._profile_mtimes.get(self.profile_manifest_path) != stat.st_mtime:
-                    changed = True
-                manifest = json.loads(self.profile_manifest_path.read_text(encoding="utf-8"))
-                if isinstance(manifest, dict):
-                    for section in ("task_profiles", "provider_profiles", "model_profiles", "combo_profiles"):
-                        entries = manifest.get(section)
-                        if isinstance(entries, list):
-                            manifest_entries.extend(self.profile_dir / str(item) for item in entries)
+                stat = manifest_path.stat()
             except Exception:
-                manifest_entries = []
-        files = manifest_entries or [file for file in self.profile_dir.rglob("*.json") if file.name not in {"rolling_kpi_store.json", "manifest.json"}]
+                continue
+            current_mtimes[manifest_path] = stat.st_mtime
+            if self._profile_mtimes.get(manifest_path) != stat.st_mtime:
+                changed = True
         for file in files:
             if file.name in {"rolling_kpi_store.json", "manifest.json"}:
                 continue
@@ -399,6 +433,8 @@ class MimoOrchestrationDirector:
             return "antigravity"
         if normalized in {"local_llm", "ollama"}:
             return "local"
+        if normalized in {"mimo", "mimo-cli", "xiaomi", "github-copilot", "github-models"}:
+            return "mimo"
         return normalized or "local"
 
     @staticmethod
@@ -582,9 +618,11 @@ class MimoOrchestrationDirector:
                 continue
             if allowed_names and not ({full_id, short_id} & allowed_names):
                 continue
+            execution_model = full_id if provider == "mimo" and full_id else short_id
             candidate = {
                 "provider": provider,
-                "model_name": short_id,
+                "model_name": execution_model,
+                "short_model_name": short_id,
                 "full_id": full_id,
                 "context_window": getattr(model, "context_window", None),
                 "capability_tags": sorted(tags),
@@ -592,13 +630,35 @@ class MimoOrchestrationDirector:
                 "source": "mimo_inventory",
             }
             value_score, diagnostics = self._candidate_value(task, candidate, advisory_context)
-            candidate["value_score"] = value_score
+            bias = self._mimo_routing_bias(candidate, str(getattr(getattr(task, "type", None), "value", None) or getattr(task, "type", "unknown")).lower())
+            candidate["value_score"] = value_score + bias
+            diagnostics["mimo_routing_bias"] = round(bias, 3)
             candidate["value_diagnostics"] = diagnostics
             candidates.append(candidate)
         if candidates:
             candidates.sort(key=lambda item: (-float(item.get("value_score") or 0.0), -float((item.get("value_diagnostics") or {}).get("cost_efficiency") or 0.0), -(int(item.get("context_window") or 0))))
             return candidates
         return self._fallback_options(task, advisory_context)
+
+    @staticmethod
+    def _mimo_routing_bias(candidate: dict[str, Any], task_type: str) -> float:
+        model_name = str(candidate.get("full_id") or candidate.get("model_name") or "").strip().lower()
+        bonus = 0.0
+        if model_name.startswith("xiaomi/mimo-v2.5-pro"):
+            bonus += 0.22
+        elif model_name.startswith("xiaomi/mimo-v2.5"):
+            bonus += 0.18
+        elif model_name.startswith("xiaomi/mimo-v2-pro"):
+            bonus += 0.15
+        elif model_name.startswith("xiaomi/mimo-v2"):
+            bonus += 0.1
+        elif model_name.startswith("mimo/mimo-auto"):
+            bonus += 0.08
+        if task_type in {"docs", "research", "review", "plan"}:
+            bonus += 0.04
+        if task_type in {"code", "test", "fix"} and "pro" in model_name:
+            bonus += 0.03
+        return bonus
 
     @staticmethod
     def _default_local_model(task_type: str) -> str:
@@ -635,7 +695,7 @@ class MimoOrchestrationDirector:
         preferred_local = str((local or {}).get("recommended_model") or self._default_local_model(str(task_type).lower())).strip()
         options = [{"provider": self._default_local_provider(str(task_type).lower()), "model_name": preferred_local}]
         if str(task_type).lower() in {"plan", "review", "research"}:
-            options.append({"provider": "openai", "model_name": "gpt-4o"})
+            options.append({"provider": "openai", "model_name": "gpt-5.5"})
         return options
 
     def _safe_fallback_recommendation(self, task: Any, advisory_context: dict[str, Any] | None = None) -> MimoRecommendation:
@@ -967,7 +1027,7 @@ class MimoOrchestrationDirector:
         if task_type in {"plan", "research"} and score >= 0.75:
             return requested_model
         if task_type == "review" and score < 0.65:
-            return "gpt-4o"
+            return "gpt-5.4-mini"
         if task_type in {"code", "test"} and avg_tokens > 1200:
             return "qwen2.5:32b-instruct-q4_k_m"
         if task_type == "docs" and score >= 0.8:
@@ -1100,9 +1160,9 @@ class MimoOrchestrationDirector:
 
         try:
             openai_catalog = OpenAIModelRegistry().get_catalog()
-            openai_models = openai_catalog.all_models or ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5-mini", "gpt-5.1", "gpt-5-codex"]
+            openai_models = openai_catalog.all_models or ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
         except Exception:
-            openai_models = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5-mini", "gpt-5.1", "gpt-5-codex"]
+            openai_models = ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
         for model_name in openai_models:
             fallback_models.append(("openai", model_name, 128000, "medium", ["docs", "code", "review", "research"]))
 

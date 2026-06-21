@@ -5,7 +5,7 @@
 # TARGET_ENVIRONMENT: "bazzite-linux-flatpak"
 # COMPATIBLE_APP: "com.visualstudio.code"
 # SUPPORTED_MODES: ["openai-emulation", "direct-passthrough", "multi-agent-mesh"]
-# AVAILABLE_MODELS: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-image-2", "gpt-4o-transcribe"]
+# AVAILABLE_MODELS: ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-image-2", "gpt-4o-transcribe"]
 # ORCHESTRATOR_METADATA_END
 # ==============================================================================
 

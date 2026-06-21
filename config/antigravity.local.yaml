@@ -1,0 +1,7 @@
+model_backend: litellm
+model:
+  url: "https://codex.sale/v1"
+  main_model: "gpt-5.4-mini"
+  fast_model: "gpt-5.4-mini"
+  reasoning_model: "gpt-5.5"
+

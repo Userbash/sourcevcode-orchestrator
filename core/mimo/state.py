@@ -44,7 +44,7 @@ class MimoStateContext:
         self.model_registry_score: dict[str, ModelRuntimeMetrics] = {}
         self.model_context_limits: dict[str, int] = {}
         self.scoped_budgets: dict[tuple[str, str], ScopedBudget] = {}
-        self.default_fallback_model = "gpt-4o"
+        self.default_fallback_model = "gpt-5.4-mini"
 
     def set_rate(self, model_name: str, rate_per_1k_tokens: float) -> None:
         with self._lock:

@@ -58,7 +58,7 @@ class ExternalAIBridge:
             for user_home in var_home.glob("*"):
                 if user_home.is_dir() and user_home not in search_roots:
                     search_roots.append(user_home)
-        for candidate in ("agy", "antigravity", "gemini"):
+        for candidate in ("agy", "antigravity"):
             resolved = shutil.which(candidate)
             if resolved:
                 candidate_paths.append(resolved)
@@ -207,7 +207,21 @@ class ExternalAIBridge:
             return "unsupported_client"
         if any(marker in text for marker in ["connecttimeout", "readtimeout", "timed out", "connection timed out", "tcp"]):
             return "tcp_timeout"
-        if any(marker in text for marker in ["deadline exceeded", "request timeout", "504", "gateway timeout", "api timeout"]):
+        if any(marker in text for marker in [
+            "deadline exceeded",
+            "request timeout",
+            "504",
+            "502",
+            "bad gateway",
+            "gateway timeout",
+            "api timeout",
+            "service temporarily unavailable",
+            "temporarily unavailable",
+            "stream disconnected before completion",
+            "connection closed before response completed",
+            "server disconnected",
+            "upstream connect error",
+        ]):
             return "api_timeout"
         if any(marker in text for marker in ["hang", "stuck", "did not finish", "no response"]):
             return "sdk_hang"

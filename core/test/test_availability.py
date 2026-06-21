@@ -186,6 +186,7 @@ def test_check_openai_uses_snapshot_models_when_registry_empty(monkeypatch) -> N
             return {"ok": False, "error_type": "RuntimeError", "error_message": "empty"}
 
     monkeypatch.setattr("core.core.availability.OpenAIModelRegistry", _Registry)
+    monkeypatch.setattr(ModelAvailability, "_probe_openai_endpoint", staticmethod(lambda name, url, api_key: {"name": name, "url": url, "ok": True, "status_code": 200}))
     avail = ModelAvailability()
     monkeypatch.setattr(avail.inventory, "provider_snapshot", lambda provider: {"provider": provider, "models": ["gpt-5-mini"], "source": "snapshot"})
 
@@ -194,3 +195,60 @@ def test_check_openai_uses_snapshot_models_when_registry_empty(monkeypatch) -> N
     assert health.status == ProviderStatus.HEALTHY
     assert health.diagnostics["models"] == ["gpt-5-mini"]
     assert health.diagnostics["inventory_source"] == "snapshot"
+
+
+
+def test_check_openai_marks_auth_failed_when_models_endpoint_returns_401(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: _FakeSocket())
+
+    class _Registry:
+        def get_models(self, force_refresh=False):
+            return []
+        def diagnostics(self):
+            return {"ok": False, "error_type": "auth_fail", "error_message": "auth_status_401", "status_code": 401, "endpoint": "https://codex.sale/v1/models", "source": "live"}
+
+    monkeypatch.setattr("core.core.availability.OpenAIModelRegistry", _Registry)
+    monkeypatch.setattr(ModelAvailability, "_probe_openai_endpoint", staticmethod(lambda name, url, api_key: {"name": name, "url": url, "ok": False, "status_code": 401, "error_type": "auth_fail"} if name == "models" else {"name": name, "url": url, "ok": True, "status_code": 405}))
+
+    health = ModelAvailability().check_openai()
+
+    assert health.status == ProviderStatus.AUTH_FAILED
+    assert health.error == "openai_auth_failed"
+
+
+def test_check_openai_degrades_when_non_models_endpoints_are_unavailable(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: _FakeSocket())
+
+    class _Registry:
+        def get_models(self, force_refresh=False):
+            return ["gpt-5.5"]
+        def diagnostics(self):
+            return {"ok": True, "status_code": 200, "endpoint": "https://codex.sale/v1/models", "source": "live"}
+
+    monkeypatch.setattr("core.core.availability.OpenAIModelRegistry", _Registry)
+    monkeypatch.setattr(ModelAvailability, "_probe_openai_endpoint", staticmethod(lambda name, url, api_key: {"name": name, "url": url, "ok": True, "status_code": 200} if name == "models" else {"name": name, "url": url, "ok": False, "status_code": 502, "error_type": "endpoint_unavailable"}))
+
+    health = ModelAvailability().check_openai()
+
+    assert health.status == ProviderStatus.DEGRADED
+    assert "messages" in health.diagnostics["endpoint_statuses"]
+
+
+def test_check_openai_exposes_endpoint_manifest(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setattr("socket.create_connection", lambda *args, **kwargs: _FakeSocket())
+
+    class _Registry:
+        def get_models(self, force_refresh=False):
+            return ["gpt-5.5"]
+        def diagnostics(self):
+            return {"ok": True, "status_code": 200, "endpoint": "https://codex.sale/v1/models", "source": "live"}
+
+    monkeypatch.setattr("core.core.availability.OpenAIModelRegistry", _Registry)
+    monkeypatch.setattr(ModelAvailability, "_probe_openai_endpoint", staticmethod(lambda name, url, api_key: {"name": name, "url": url, "ok": True, "status_code": 200}))
+
+    health = ModelAvailability().check_openai()
+
+    assert health.diagnostics["endpoint_manifest"]["endpoints"]["codex"].endswith("/backend-api/codex")

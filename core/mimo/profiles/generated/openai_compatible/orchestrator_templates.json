@@ -1,0 +1,958 @@
+{
+  "generated_at": 1782070507,
+  "provider": "openai",
+  "base_url": "https://codex.sale/v1",
+  "template_count": 48,
+  "roles": {
+    "code_parallel": [
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "claude-sonnet-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "deepseek-v4-pro",
+        "family": "deepseek",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.17
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "qwen3.7-max",
+        "family": "qwen",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.15
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "claude-opus-4-5",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "claude-opus-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "claude-opus-4-7",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "claude-opus-4-8",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      }
+    ],
+    "review_primary": [
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "claude-sonnet-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 1.24
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.2
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "deepseek-v4-pro",
+        "family": "deepseek",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.12
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "qwen3.7-max",
+        "family": "qwen",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.06
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-5",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.24
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.24
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-7",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.24
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-8",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.24
+      }
+    ],
+    "plan_primary": [
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "claude-sonnet-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "deepseek-v4-pro",
+        "family": "deepseek",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.06
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "qwen3.7-max",
+        "family": "qwen",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.06
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-5",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-7",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-8",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      }
+    ],
+    "test_primary": [
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "deepseek-v4-pro",
+        "family": "deepseek",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "qwen3.7-max",
+        "family": "qwen",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.17
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.14
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "claude-sonnet-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-5",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-7",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-8",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.1
+      }
+    ],
+    "docs_primary": [
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.18
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "claude-sonnet-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 1.16
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "deepseek-v4-pro",
+        "family": "deepseek",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.05
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-5",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.16
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.16
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-7",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.16
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-8",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.16
+      }
+    ],
+    "research_primary": [
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "claude-sonnet-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.2
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "deepseek-v4-pro",
+        "family": "deepseek",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.06
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "qwen3.7-max",
+        "family": "qwen",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "test_generation"
+        ],
+        "score": 1.06
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-5",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-6",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-7",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "claude-opus-4-8",
+        "family": "claude",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "review",
+          "plan",
+          "code",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.22
+      }
+    ]
+  },
+  "defaults": {
+    "code_parallel_branch_count": 4,
+    "review_model": "claude-sonnet-4-6",
+    "planning_model": "claude-sonnet-4-6"
+  }
+}

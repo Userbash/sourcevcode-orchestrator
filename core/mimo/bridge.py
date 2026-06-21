@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import asyncio
 import json
 import logging
+import subprocess
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,12 @@ class MimoAsyncBridge:
         self._cached_models: list[MimoModelSnapshot] = []
         self.is_cli_alive = True
 
+    def _finalize_models(self, output: str) -> list[MimoModelSnapshot]:
+        models = self._parse_models_output(output)
+        self._cached_models = models
+        self.is_cli_alive = True
+        return models
+
     async def get_models(self) -> list[MimoModelSnapshot]:
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -39,10 +46,30 @@ class MimoAsyncBridge:
                 self.is_cli_alive = False
                 logger.critical("MIMO CLI failed: %s", stderr.decode("utf-8", errors="ignore").strip())
                 return []
-            models = self._parse_models_output(stdout.decode("utf-8", errors="ignore"))
-            self._cached_models = models
-            self.is_cli_alive = True
-            return models
+            return self._finalize_models(stdout.decode("utf-8", errors="ignore"))
+        except FileNotFoundError:
+            self.is_cli_alive = False
+            logger.critical("MIMO CLI not found in PATH")
+            return []
+        except Exception as exc:
+            self.is_cli_alive = False
+            logger.critical("Unexpected MIMO bridge failure: %s", exc)
+            return []
+
+    def get_models_sync(self) -> list[MimoModelSnapshot]:
+        try:
+            proc = subprocess.run(
+                ["mimo", "models", "--verbose"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if proc.returncode != 0:
+                self.is_cli_alive = False
+                logger.critical("MIMO CLI failed: %s", (proc.stderr or proc.stdout).strip())
+                return []
+            return self._finalize_models(proc.stdout)
         except FileNotFoundError:
             self.is_cli_alive = False
             logger.critical("MIMO CLI not found in PATH")
@@ -75,6 +102,9 @@ class MimoAsyncBridge:
 
     async def refresh_cache(self) -> list[MimoModelSnapshot]:
         return await self.get_models()
+
+    def refresh_cache_sync(self) -> list[MimoModelSnapshot]:
+        return self.get_models_sync()
 
     def _parse_models_output(self, output: str) -> list[MimoModelSnapshot]:
         if not output.strip():

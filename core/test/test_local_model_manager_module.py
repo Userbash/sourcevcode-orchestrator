@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from core.core.local_model_manager_module import LocalModelManagerModule
 from core.core.local_model_runtime import LocalModelResidentInfo
+from core.core.hybrid_memory import HybridMemory
 
 
 class _Api:
@@ -23,6 +24,23 @@ class _Api:
     def get_memory(self):
         return None
 
+
+
+
+class _PersistentTrainedMemory:
+    def retrieve_trained_memories(self, *, session_id: str, agent_id: str, memory_domain: str, top_k: int = 8):
+        return [
+            {
+                'trained_memory_id': 1,
+                'session_id': session_id,
+                'agent_id': agent_id,
+                'source_memory_ids': [11, 12],
+                'memory_domain': memory_domain,
+                'content': {'summary': 'trusted memory'},
+                'quality_score': 1.0,
+                'created_at': '2026-06-20T15:42:23.836627+00:00',
+            }
+        ]
 
 class _FakeRuntime:
     def __init__(self) -> None:
@@ -123,3 +141,18 @@ def test_manager_uses_schema_memory_policy_without_env(monkeypatch):
     assert state['policy']['budget_limit_gb'] == 9.0
     assert state['policy']['idle_unload_sec'] == 11
     assert any(row['estimated_memory_gb'] == 7.5 for row in state['models'] if row['model_name'] == 'qwen2.5:32b-instruct-q4_k_m')
+
+
+def test_trained_memory_context_exposes_provenance_and_confidence():
+    hybrid = HybridMemory(persistent=_PersistentTrainedMemory())
+    ctx = hybrid.get_trained_memory_context(
+        session_id='sess-1',
+        agent_id='planner-1',
+        memory_domain='prompt:plan',
+        top_k=1,
+    )
+
+    assert ctx['has_trained_memory'] is True
+    assert ctx['provenance'] == [11, 12]
+    assert ctx['confidence_score'] == 1.0
+    assert isinstance(ctx['age_sec'], float)

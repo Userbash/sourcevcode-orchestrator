@@ -41,6 +41,7 @@ if not hasattr(local_model_runtime.LocalModelRuntimeConfig, "generate_timeout_se
 
 from core.core.local_llm_module import LocalLLMModule
 from core.core.orchestrator import Orchestrator
+from core.core.models import Task, TaskContext, TaskInput, TaskType
 
 
 class _Console:
@@ -357,3 +358,32 @@ def test_task_decomposer_seeds_kpi_floor_from_local_llm(monkeypatch):
     root_task = plan.atomic_tasks[0]
     assert root_task.routing_hints["kpi_floor_source"] == "local_llm"
     assert root_task.routing_hints["kpi_floor"] >= 0.8
+
+
+def test_build_decomposition_advisory_uses_fast_plan_path(monkeypatch):
+    orchestrator = Orchestrator.__new__(Orchestrator)
+    orchestrator.log = lambda *args, **kwargs: None
+
+    local_llm = LocalLLMModule.__new__(LocalLLMModule)
+    local_llm._advisory_base = lambda task, context=None: {"enabled": True, "ready": True, "should_delegate": False, "task_family": "planning"}
+    local_llm._heuristic_decomposition_draft = lambda task, context=None: {"status": "heuristic", "layers": [{"name": "intake"}]}
+    local_llm.build_decomposition_draft = lambda task, context=None: (_ for _ in ()).throw(AssertionError("fast plan path should skip model-generated decomposition draft"))
+
+    class _SourceCraft:
+        def build_delegation_profile(self, task, context=None):
+            return {"enabled": True, "should_delegate": False, "task_family": "general"}
+
+        def ensure_ready(self, repo_path='.'):
+            raise AssertionError("fast plan path should skip sourcecraft runtime readiness")
+
+    sourcecraft = _SourceCraft()
+    orchestrator.module_manager = SimpleNamespace(
+        get_module=lambda name: local_llm if name == 'local_llm' else sourcecraft if name == 'sourcecraft' else None
+    )
+
+    monkeypatch.setattr(Orchestrator, '_testing_mode', staticmethod(lambda: False))
+    task = Task(TaskType.PLAN, TaskInput('plan implementation checklist'), TaskContext('proj', '.', 'main'))
+
+    advisory = Orchestrator._build_decomposition_advisory(orchestrator, task)
+
+    assert advisory['local_llm']['decomposition_source'] == 'heuristic_fast_plan'

@@ -189,6 +189,10 @@ class PromptOptimizerModule:
                     agent_id=agent_id,
                     memory_domain=domain,
                     top_k=top_k,
+                    query_text=str(task.input.description or ''),
+                    files=[str(item).strip() for item in list(task.input.files or []) if str(item).strip()],
+                    constraints=[str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()],
+                    acceptance_criteria=[str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()],
                 )
                 brief = str(ctx.get("brief") or "").strip()
                 memory_domain = str(ctx.get("memory_domain") or domain)
@@ -207,6 +211,10 @@ class PromptOptimizerModule:
                     memory_domain=domain,
                     top_k=top_k,
                     token_limit=self._memory_token_budget(task),
+                    query_text=str(task.input.description or ''),
+                    files=[str(item).strip() for item in list(task.input.files or []) if str(item).strip()],
+                    constraints=[str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()],
+                    acceptance_criteria=[str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()],
                 )
                 ctx = {
                     "brief": brief,

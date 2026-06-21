@@ -351,7 +351,7 @@ class ModelSelector:
         risk = evaluate_risk_context(self._task_text(task))
 
         if self._should_escalate_to_cloud(task, complexity, risk):
-            choice = self._apply_experience_policy(task, self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-4o"))
+            choice = self._apply_experience_policy(task, self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-5.5"))
             return self._attach_selection_trace(choice, task, advisory_context)
 
         local_choice = self._local_policy_choice(task, complexity, advisory_context)
@@ -361,7 +361,7 @@ class ModelSelector:
 
         choice = self._apply_experience_policy(
             task,
-            self._openai_choice(task, complexity, False, "local_models_unavailable", "gpt-4o-mini"),
+            self._openai_choice(task, complexity, False, "local_models_unavailable", "gpt-5.4-mini"),
         )
         return self._attach_selection_trace(choice, task, advisory_context)
 

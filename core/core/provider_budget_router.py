@@ -195,6 +195,13 @@ class ProviderBudgetRouter:
                 base = ["openai", "antigravity", "mistral", "local"]
             else:
                 base = [preferred, "openai", "antigravity", "mistral", "local"]
+        elif source == "websocket":
+            if is_high_risk:
+                base = [preferred, "openai", "antigravity", "mistral", "local"]
+            elif preferred in {"local", "ai_kernel"}:
+                base = [preferred, "local", "mistral", "antigravity", "openai"]
+            else:
+                base = ["local", "mistral", "antigravity", preferred, "openai"]
         elif trusted_profile and profile_risk == "high":
             base = ["openai", "antigravity", "mistral", "local", preferred]
         elif profile_quality in {"noisy_but_usable", "sparse"}:

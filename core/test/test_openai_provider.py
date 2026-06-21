@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.core.openai_provider import default_openai_tcp_probe_hosts, resolve_openai_provider_config
+from core.core.openai_provider import default_openai_tcp_probe_hosts, openai_endpoint_manifest, resolve_openai_provider_config
 
 
 def test_openai_provider_resolves_codex_sale_base_url(monkeypatch) -> None:
@@ -17,6 +17,21 @@ def test_openai_provider_resolves_codex_sale_base_url(monkeypatch) -> None:
     assert cfg.models_endpoint == "https://codex.sale/v1/models"
     assert cfg.chat_completions_endpoint == "https://codex.sale/v1/chat/completions"
     assert cfg.responses_endpoint == "https://codex.sale/v1/responses"
+    assert cfg.messages_endpoint == "https://codex.sale/v1/messages"
+    assert cfg.messages_count_tokens_endpoint == "https://codex.sale/v1/messages/count_tokens"
+    assert cfg.codex_endpoint == "https://codex.sale/backend-api/codex"
+
+
+def test_openai_endpoint_manifest_includes_new_routes(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://codex.sale/v1")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_CODEX_ENDPOINT", "https://codex.sale/backend-api/codex")
+
+    manifest = openai_endpoint_manifest()
+
+    assert manifest["endpoints"]["models"] == "https://codex.sale/v1/models"
+    assert manifest["endpoints"]["messages"] == "https://codex.sale/v1/messages"
+    assert manifest["endpoints"]["messages_count_tokens"] == "https://codex.sale/v1/messages/count_tokens"
+    assert manifest["endpoints"]["codex"] == "https://codex.sale/backend-api/codex"
 
 
 def test_default_openai_tcp_probe_hosts_uses_custom_base_url(monkeypatch) -> None:

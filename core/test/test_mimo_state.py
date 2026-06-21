@@ -11,7 +11,7 @@ def test_state_penalizes_repeated_failures():
         score = state.update_score("model-a", is_successful=False, latency=1200.0)
 
     assert score < 0.4
-    assert state.get_allowed_model("model-a", "medium", remaining_budget=10.0) == "gpt-4o"
+    assert state.get_allowed_model("model-a", "medium", remaining_budget=10.0) == "gpt-5.4-mini"
 
 
 def test_state_allows_model_when_budget_and_score_ok():
