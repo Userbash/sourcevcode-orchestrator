@@ -16,6 +16,7 @@ from core.core.env_loader import load_env_file
 from core.core.external_ai_bridge import ExternalAIBridge
 from core.core.integrations.antigravity_manager import AntigravityManager
 from core.core.integrations.mistral_manager import MistralManager
+from core.core.openai_compatible_inventory import is_text_compatible_model
 from core.core.openai_provider import resolve_openai_provider_config
 from core.mimo.bridge import MimoAsyncBridge
 
@@ -109,6 +110,23 @@ def classify_mistral_skip_reason(model_id: str) -> str:
     return 'non_chat_model'
 
 
+def classify_openai_skip_reason(model_id: str) -> str:
+    name = (model_id or '').strip().lower()
+    if 'image' in name or 'dall' in name or 'sora' in name:
+        return 'image_or_media_model'
+    if 'transcribe' in name or 'whisper' in name or 'audio' in name:
+        return 'transcription_model'
+    if 'tts' in name or 'speech' in name:
+        return 'speech_model'
+    if 'embedding' in name:
+        return 'embedding_model'
+    if 'moderation' in name:
+        return 'moderation_model'
+    if 'realtime' in name:
+        return 'realtime_model'
+    return 'non_text_model'
+
+
 def resolve_mimo_cli() -> str | None:
     found = shutil.which('mimo')
     if found:
@@ -179,6 +197,8 @@ def provider_error_result(provider: str, error: Exception | str) -> dict[str, An
     }
 
 
+def provider_not_selected(provider: str) -> dict[str, Any]:
+    return {'provider': provider, 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
 
 
 async def ping_ai_kernel_models(prompt: str) -> dict[str, Any]:
@@ -213,7 +233,7 @@ async def ping_ai_kernel_models(prompt: str) -> dict[str, Any]:
     return result
 async def ping_openai_models(prompt: str) -> dict[str, Any]:
     config = resolve_openai_provider_config()
-    result = {'provider': 'openai', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False}
+    result = {'provider': 'openai', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False, 'skipped_non_text': 0}
     if not config.api_key:
         result.update({'skipped': True, 'error': 'missing_api_key'})
         return result
@@ -227,7 +247,15 @@ async def ping_openai_models(prompt: str) -> dict[str, Any]:
             if isinstance(model_id, str) and model_id.strip():
                 models.append(model_id.strip())
         print(f'[openai] discovered {len(models)} models', flush=True)
+        runnable: list[str] = []
+        rows: list[dict[str, Any]] = []
         for model in models:
+            if not is_text_compatible_model(model):
+                rows.append({'model': model, 'ok': False, 'skipped': True, 'skip_reason': classify_openai_skip_reason(model)})
+                result['skipped_non_text'] += 1
+            else:
+                runnable.append(model)
+        for model in runnable:
             row = {'model': model}
             try:
                 response = await client.post(
@@ -248,8 +276,9 @@ async def ping_openai_models(prompt: str) -> dict[str, Any]:
                 row['ok'] = False
                 row['error'] = str(exc)
                 result['failed'] += 1
-            result['models'].append(row)
-        print(f"[openai] ok={result['ok']} failed={result['failed']}", flush=True)
+            rows.append(row)
+        result['models'] = rows
+        print(f"[openai] ok={result['ok']} failed={result['failed']} skipped_non_text={result['skipped_non_text']}", flush=True)
     return result
 
 
@@ -473,53 +502,30 @@ async def run_all_models(prompt: str, output_dir: Path, *, skip_mistral_non_chat
     report: dict[str, Any] = {}
     selected = str(only_provider or '').strip() or None
 
-    if selected in {None, 'openai'}:
+    async def _run_provider(provider: str):
+        if selected not in {None, provider}:
+            return provider, provider_not_selected(provider)
         try:
-            report['openai'] = await ping_openai_models(prompt)
+            if provider == 'openai':
+                return provider, await ping_openai_models(prompt)
+            if provider == 'mistral':
+                return provider, await ping_mistral_models(prompt, skip_non_chat=skip_mistral_non_chat)
+            if provider == 'local_llm':
+                return provider, await ping_local_llm_models(prompt)
+            if provider == 'mimo':
+                return provider, await ping_mimo_models(prompt, output_dir)
+            if provider == 'antigravity':
+                return provider, await ping_antigravity(prompt)
+            if provider == 'ai_kernel':
+                return provider, await ping_ai_kernel_models(prompt)
+            return provider, provider_error_result(provider, 'unsupported_provider')
         except Exception as exc:
-            report['openai'] = provider_error_result('openai', exc)
-    else:
-        report['openai'] = {'provider': 'openai', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+            return provider, provider_error_result(provider, exc)
 
-    if selected in {None, 'mistral'}:
-        try:
-            report['mistral'] = await ping_mistral_models(prompt, skip_non_chat=skip_mistral_non_chat)
-        except Exception as exc:
-            report['mistral'] = provider_error_result('mistral', exc)
-    else:
-        report['mistral'] = {'provider': 'mistral', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
-
-    if selected in {None, 'local_llm'}:
-        try:
-            report['local_llm'] = await ping_local_llm_models(prompt)
-        except Exception as exc:
-            report['local_llm'] = provider_error_result('local_llm', exc)
-    else:
-        report['local_llm'] = {'provider': 'local_llm', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
-
-    if selected in {None, 'mimo'}:
-        try:
-            mimo_report = await ping_mimo_models(prompt, output_dir)
-        except Exception as exc:
-            mimo_report = provider_error_result('mimo', exc)
-    else:
-        mimo_report = {'provider': 'mimo', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
-
-    if selected in {None, 'antigravity'}:
-        try:
-            report['antigravity'] = await ping_antigravity(prompt)
-        except Exception as exc:
-            report['antigravity'] = provider_error_result('antigravity', exc)
-    else:
-        report['antigravity'] = {'provider': 'antigravity', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
-
-    if selected in {None, 'ai_kernel'}:
-        try:
-            report['ai_kernel'] = await ping_ai_kernel_models(prompt)
-        except Exception as exc:
-            report['ai_kernel'] = provider_error_result('ai_kernel', exc)
-    else:
-        report['ai_kernel'] = {'provider': 'ai_kernel', 'models': [], 'ok': 0, 'failed': 0, 'skipped': True, 'error': 'not_selected'}
+    results = await asyncio.gather(*(_run_provider(provider) for provider in PROVIDER_CHOICES))
+    by_provider = {provider: payload for provider, payload in results}
+    mimo_report = by_provider.pop('mimo')
+    report.update(by_provider)
 
     failed, usable = build_artifacts(report, mimo_report)
     return report, mimo_report, {'failed': failed, 'mimo_usable': usable}

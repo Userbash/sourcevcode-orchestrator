@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional dependency
+    OpenAI = None  # type: ignore[assignment]
+
 
 from .base_agent import BaseAgent
 from core.core.env_loader import load_env_file
-from core.core.models import AgentHealth, AgentStatus, Task, TaskStatus
+from core.core.models import AgentHealth, AgentResult, AgentStatus, Task, TaskStatus
 
 
 class AIKernelAgent(BaseAgent):
@@ -21,20 +26,54 @@ class AIKernelAgent(BaseAgent):
         self.api_key = (os.getenv('AI_KERNEL_API_KEY') or 'local').strip()
         self.model_name = (os.getenv('AI_KERNEL_MODEL_ALIAS') or 'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m').strip()
         self.timeout_sec = float(os.getenv('AI_KERNEL_TIMEOUT_SEC', '120'))
-        self._provider = self.provider
-        self._model = self.model_name
+        self.set_identity(provider=self.provider, model_name=self.model_name)
+
+    def _candidate_base_urls(self) -> list[str]:
+        raw = self.base_url.rstrip('/')
+        candidates: list[str] = []
+
+        def _push(url: str) -> None:
+            item = url.rstrip('/')
+            if item and item not in candidates:
+                candidates.append(item)
+
+        _push(raw)
+        parsed = urlsplit(raw)
+        if parsed.scheme and parsed.netloc:
+            host = parsed.hostname or ''
+            netloc = parsed.netloc
+            variants: list[str] = []
+            if host == '127.0.0.1':
+                variants.extend(['host.containers.internal', 'localhost'])
+            elif host == 'localhost':
+                variants.extend(['127.0.0.1', 'host.containers.internal'])
+            elif host == 'host.containers.internal':
+                variants.extend(['127.0.0.1', 'localhost'])
+            for variant in variants:
+                swapped_netloc = netloc.replace(host, variant, 1)
+                _push(urlunsplit((parsed.scheme, swapped_netloc, parsed.path, parsed.query, parsed.fragment)))
+        return candidates
 
     def health(self) -> AgentHealth:
         try:
             with httpx.Client(timeout=5.0) as client:
-                response = client.get(f'{self.base_url}/models', headers={'Authorization': f'Bearer {self.api_key}'})
-            if response.status_code == 200:
-                return AgentHealth(agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities)
-            return AgentHealth(agent_id=self.agent_id, status=AgentStatus.DEGRADED, capabilities=self.capabilities, last_error=f'ai_kernel_status_{response.status_code}')
+                last_error: str | None = None
+                for base_url in self._candidate_base_urls():
+                    try:
+                        response = client.get(f'{base_url}/models', headers={'Authorization': f'Bearer {self.api_key}'})
+                    except Exception as exc:
+                        last_error = f'{exc}@{base_url}'
+                        continue
+                    if response.status_code == 200:
+                        self.base_url = base_url
+                        return AgentHealth(agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities)
+                    last_error = f'ai_kernel_status_{response.status_code}@{base_url}'
+            status = AgentStatus.FAILED if last_error and 'refused' in last_error.lower() else AgentStatus.DEGRADED
+            return AgentHealth(agent_id=self.agent_id, status=status, capabilities=self.capabilities, last_error=last_error)
         except Exception as exc:
             return AgentHealth(agent_id=self.agent_id, status=AgentStatus.FAILED, capabilities=self.capabilities, last_error=str(exc))
 
-    def run(self, task: Task, memory_context: dict | None = None):
+    def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
         prompt_parts = [f'OBJECTIVE: {task.input.description}']
         if task.input.files:
             prompt_parts.append(f"FILES: {', '.join(task.input.files)}")
@@ -48,6 +87,8 @@ class AIKernelAgent(BaseAgent):
         prompt = '\n'.join(prompt_parts)
         model_name = str(getattr(task, 'assigned_model', '') or self.model_name).strip()
         self._record_execution_prompt(task, prompt, memory_context, provider=self.provider, model_name=model_name)
+        if OpenAI is None:
+            return self.result(task, "OpenAI SDK is not installed", TaskStatus.FAILED, 0.0, ["openai_sdk_missing"], provider=self.provider, model_name=model_name)
         client = OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=1)
         try:
             response = client.chat.completions.create(

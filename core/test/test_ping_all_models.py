@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from core.scripts import ping_all_models
-from core.scripts.ping_all_models import classify_mistral_skip_reason, is_mistral_chat_model, parse_mimo_models
+from core.scripts.ping_all_models import classify_mistral_skip_reason, classify_openai_skip_reason, is_mistral_chat_model, parse_mimo_models
 
 
 class _FakeResponse:
@@ -63,6 +63,8 @@ def test_classify_mistral_skip_reason_is_specific():
     assert classify_mistral_skip_reason('mistral-ocr-latest') == 'ocr_model'
     assert classify_mistral_skip_reason('voxtral-mini-tts-latest') == 'tts_model'
     assert classify_mistral_skip_reason('voxtral-mini-transcribe-realtime-2602') == 'transcription_model'
+    assert classify_openai_skip_reason('gpt-4o-transcribe') == 'transcription_model'
+    assert classify_openai_skip_reason('gpt-image-2') == 'image_or_media_model'
 
 
 def test_parse_mimo_models_reads_verbose_inventory_blocks():
@@ -88,7 +90,7 @@ mimo/mimo-auto
     assert parse_mimo_models(raw) == ['openai/gpt-5.4', 'mimo/mimo-auto']
 
 
-def test_ping_openai_models_pings_each_discovered_model(monkeypatch):
+def test_ping_openai_models_skips_non_text_and_pings_chat_models(monkeypatch):
     models_endpoint = "https://example.test/v1/models"
     chat_endpoint = "https://example.test/v1/chat/completions"
     monkeypatch.setattr(
@@ -118,7 +120,7 @@ def test_ping_openai_models_pings_each_discovered_model(monkeypatch):
             get_map={
                 models_endpoint: _FakeResponse(
                     200,
-                    payload={"data": [{"id": "gpt-ok"}, {"id": "gpt-fail"}]},
+                    payload={"data": [{"id": "gpt-ok"}, {"id": "gpt-4o-transcribe"}, {"id": "gpt-image-2"}, {"id": "gpt-fail"}]},
                 )
             },
             post_handler=post_handler,
@@ -130,9 +132,13 @@ def test_ping_openai_models_pings_each_discovered_model(monkeypatch):
     assert seen_models == ["gpt-ok", "gpt-fail"]
     assert report["ok"] == 1
     assert report["failed"] == 1
-    assert [row["model"] for row in report["models"]] == ["gpt-ok", "gpt-fail"]
-    assert report["models"][0]["response_sample"] == "pong from gpt-ok"
-    assert report["models"][1]["error"] == "rate limit"
+    assert report["skipped_non_text"] == 2
+    assert report["models"] == [
+        {"model": "gpt-4o-transcribe", "ok": False, "skipped": True, "skip_reason": "transcription_model"},
+        {"model": "gpt-image-2", "ok": False, "skipped": True, "skip_reason": "image_or_media_model"},
+        {"model": "gpt-ok", "ok": True, "response_sample": "pong from gpt-ok", "status_code": 200},
+        {"model": "gpt-fail", "ok": False, "error": "rate limit", "status_code": 429},
+    ]
 
 
 def test_ping_mistral_models_skips_non_chat_and_pings_chat_models(monkeypatch):

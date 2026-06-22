@@ -102,12 +102,14 @@ class LocalLLMBridge:
                 deploy_local_llm.run_command = original_run_command
 
         quoted_model = shlex.quote(model_name)
+        gpu_exports = deploy_local_llm.gpu_env_exports() if hasattr(deploy_local_llm, 'gpu_env_exports') else ''
         boot_cmd = (
             "set -euo pipefail; "
-            f"export OLLAMA_HOST={shlex.quote(self.ollama_host)} OLLAMA_ORIGINS='*'; "
-            "if ! pgrep -x ollama >/dev/null 2>&1; then nohup ollama serve > /tmp/ollama.log 2>&1 & fi; "
-            "sleep 2; "
-            f"ollama pull {quoted_model}"
+            + (f"{gpu_exports}; " if gpu_exports else "")
+            + f"export OLLAMA_HOST={shlex.quote(self.ollama_host)} OLLAMA_ORIGINS='*'; "
+            + "if ! pgrep -x ollama >/dev/null 2>&1; then nohup ollama serve > /tmp/ollama.log 2>&1 & fi; "
+            + "sleep 2; "
+            + f"ollama pull {quoted_model}"
         )
         result = self._run(["distrobox", "enter", self.container_name, "--", "bash", "-lc", boot_cmd])
         if result.returncode != 0:

@@ -14,6 +14,39 @@ MIMO_CLI_CANDIDATES = (
 )
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def mimo_enabled() -> bool:
+    return _env_flag('AI_BRIDGE_MIMO_ENABLED', True)
+
+
+def mimo_failure_threshold() -> int:
+    return _env_int('AI_BRIDGE_MIMO_SUPPRESS_AFTER_FAILURES', 3, minimum=1)
+
+
+def mimo_failure_window_sec() -> int:
+    return _env_int('AI_BRIDGE_MIMO_FAILURE_WINDOW_SEC', 900, minimum=60)
+
+
+def mimo_suppression_ttl_sec() -> int:
+    return _env_int('AI_BRIDGE_MIMO_SUPPRESSION_TTL_SEC', 1800, minimum=60)
+
+
 def resolve_mimo_cli() -> str | None:
     found = shutil.which('mimo')
     if found:
@@ -123,6 +156,47 @@ def build_mimo_runtime_status(
     last_sync_at: str | None = None,
     profiles_loaded: int | None = None,
 ) -> dict[str, Any]:
+    if not mimo_enabled():
+        return {
+            'provider': 'mimo',
+            'status': 'disabled',
+            'ready': False,
+            'disabled_by_env': True,
+            'disable_env': 'AI_BRIDGE_MIMO_ENABLED',
+            'cli_available': bool(resolve_mimo_cli()),
+            'cli_path': resolve_mimo_cli(),
+            'bridge_cli_alive': bool(getattr(bridge, 'is_cli_alive', False)) if bridge is not None else bool(resolve_mimo_cli()),
+            'status_source_configured': bool(status_source_configured),
+            'failure_reason': 'mimo_disabled_by_env',
+            'recovery_attempts': int(recovery_attempts or 0),
+            'last_sync_at': last_sync_at,
+            'profiles_loaded': int(profiles_loaded or 0),
+            'report_present': False,
+            'report_path': str((Path(report_dir) if report_dir is not None else default_report_dir()) / 'mimo_model_ping_report.json'),
+            'report_updated_at': None,
+            'usable_artifact_present': False,
+            'usable_artifact_path': str((Path(report_dir) if report_dir is not None else default_report_dir()) / 'mimo_usable_models.json'),
+            'usable_artifact_updated_at': None,
+            'inventory_count': 0,
+            'usable_count': 0,
+            'failed_count': 0,
+            'usable_models_sample': [],
+            'failed_models_sample': [],
+            'auth_categories': {},
+            'provider_breakdown': {},
+            'cached_models_count': 0,
+            'cached_models_sample': [],
+            'inventory_snapshot_present': False,
+            'inventory_snapshot_models_sample': [],
+            'live_inventory_count': 0,
+            'live_inventory_sample': [],
+            'live_inventory_error': 'mimo_disabled_by_env',
+            'suppression_policy': {
+                'failure_threshold': mimo_failure_threshold(),
+                'failure_window_sec': mimo_failure_window_sec(),
+                'suppression_ttl_sec': mimo_suppression_ttl_sec(),
+            },
+        }
     cli_path = resolve_mimo_cli()
     report = load_mimo_ping_report(report_dir)
     usable_artifact = load_mimo_usable_report(report_dir)
@@ -202,9 +276,14 @@ def build_mimo_runtime_status(
             if model_name not in cached_names:
                 cached_names.append(model_name)
 
+    auth_only_failure = failed_count > 0 and usable_count == 0 and bool(auth_categories) and sum(auth_categories.values()) >= failed_count
+
     if usable_count > 0:
         status = 'degraded' if failed_count > 0 else 'ready'
         ready = True
+    elif auth_only_failure:
+        status = 'failed'
+        ready = False
     elif live_inventory and not live_inventory_error:
         status = 'ready'
         ready = True
@@ -222,6 +301,8 @@ def build_mimo_runtime_status(
         'provider': 'mimo',
         'status': status,
         'ready': ready,
+        'disabled_by_env': False,
+        'disable_env': 'AI_BRIDGE_MIMO_ENABLED',
         'cli_available': bool(cli_path),
         'cli_path': cli_path,
         'bridge_cli_alive': cli_alive,
@@ -253,4 +334,9 @@ def build_mimo_runtime_status(
         'live_inventory_count': len(live_inventory),
         'live_inventory_sample': live_inventory[:12],
         'live_inventory_error': live_inventory_error,
+        'suppression_policy': {
+            'failure_threshold': mimo_failure_threshold(),
+            'failure_window_sec': mimo_failure_window_sec(),
+            'suppression_ttl_sec': mimo_suppression_ttl_sec(),
+        },
     }

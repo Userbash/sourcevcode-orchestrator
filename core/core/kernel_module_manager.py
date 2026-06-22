@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from typing import Any
 
-from .kernel_protocol import KernelAPI, KernelModule
+from .kernel_protocol import KernelAPI, KernelModule, ModuleStateMap, TaskContextMap
+from .models import AgentResult, Task
 
 
 @dataclass(slots=True)
@@ -22,7 +23,7 @@ class KernelModuleManager:
         self._modules[module.name] = module
 
     @staticmethod
-    def _run_coroutine_blocking(coro: Any) -> None:
+    def _run_coroutine_blocking(coro: Coroutine[object, object, None]) -> None:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -90,20 +91,20 @@ class KernelModuleManager:
     def loaded_modules(self) -> list[str]:
         return sorted(self._loaded)
 
-    def before_task(self, task: Any, context: dict[str, Any]) -> None:
+    def before_task(self, task: Task, context: TaskContextMap) -> None:
         for name in self.loaded_modules():
             module = self._modules[name]
             if hasattr(module, "before_task"):
                 module.before_task(task, context)
 
-    def after_task(self, task: Any, result: Any, context: dict[str, Any]) -> None:
+    def after_task(self, task: Task, result: AgentResult, context: TaskContextMap) -> None:
         for name in self.loaded_modules():
             module = self._modules[name]
             if hasattr(module, "after_task"):
                 module.after_task(task, result, context)
 
-    def finalize(self) -> dict[str, Any]:
-        data: dict[str, Any] = {}
+    def finalize(self) -> dict[str, ModuleStateMap]:
+        data: dict[str, ModuleStateMap] = {}
         for name in self.loaded_modules():
             module = self._modules[name]
             if hasattr(module, "finalize"):

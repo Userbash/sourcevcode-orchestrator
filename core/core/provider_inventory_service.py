@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import subprocess
@@ -12,9 +13,11 @@ from typing import Any
 from core.core.gemini_model_registry import AntigravityModelRegistry
 from core.core.mistral_model_registry import MistralModelRegistry
 from core.core.openai_model_registry import OpenAIModelRegistry
-from core.core.openai_compatible_inventory import sync_openai_compatible_artifacts
+from core.core.openai_compatible_inventory import is_text_compatible_model, sync_openai_compatible_artifacts
 from core.core.openai_provider import resolve_openai_provider_config
 from core.mimo.bridge import MimoAsyncBridge
+from core.core.mimo_status import mimo_enabled
+import httpx
 import requests
 
 
@@ -31,13 +34,22 @@ class ProviderInventoryEntry:
 
 
 class ProviderInventoryService:
+    @staticmethod
+    def _read_int_env(name: str, default: int) -> int:
+        raw = str(os.getenv(name, str(default)) or str(default)).strip()
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+
     def __init__(self) -> None:
         self.snapshot_path = Path(os.getenv("PROVIDER_INVENTORY_SNAPSHOT_PATH", "core/.cache/provider_inventory_snapshot.json"))
         self.openai = OpenAIModelRegistry()
         self.antigravity = AntigravityModelRegistry()
         self.mistral = MistralModelRegistry()
         self.mimo_bridge = MimoAsyncBridge()
-        self.mimo_auto_ping_enabled = os.getenv("AI_BRIDGE_MIMO_AUTO_PING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self.mimo_enabled = mimo_enabled()
+        self.mimo_auto_ping_enabled = self.mimo_enabled and os.getenv("AI_BRIDGE_MIMO_AUTO_PING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
         try:
             self.mimo_auto_ping_interval_sec = max(60, int(os.getenv("AI_BRIDGE_MIMO_AUTO_PING_INTERVAL_SEC", "1800") or "1800"))
         except ValueError:
@@ -47,6 +59,7 @@ class ProviderInventoryService:
             self.snapshot_refresh_interval_sec = max(60, int(os.getenv("AI_BRIDGE_PROVIDER_INVENTORY_REFRESH_INTERVAL_SEC", "1800") or "1800"))
         except ValueError:
             self.snapshot_refresh_interval_sec = 1800
+        self.openai_runtime_inventory_path = Path(os.getenv("OPENAI_RUNTIME_INVENTORY_PATH", "core/.cache/openai_runtime_inventory.json"))
 
     @staticmethod
     def _normalize_provider(provider: str) -> str:
@@ -91,14 +104,22 @@ class ProviderInventoryService:
     @staticmethod
     def _generated_mimo_models() -> list[str]:
         path = Path(os.getenv("OPENAI_MODELS_FULL_CACHE_PATH", "core/.cache/openai_models_full.json"))
-        models: list[str] = []
+        cache_models: list[str] = []
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             rows = payload.get("models") if isinstance(payload, dict) else []
             if isinstance(rows, list):
-                models.extend(str(item).strip() for item in rows if str(item).strip())
+                cache_models.extend(str(item).strip() for item in rows if str(item).strip())
         except Exception:
             pass
+
+        # Prefer the explicit cache when it already contains MIMO rows. Pulling in
+        # the generated catalog on top of a live cache makes restart-time inventory
+        # drift and broke the inventory contract in tests.
+        if any(str(model).lower().startswith("mimo-") for model in cache_models):
+            models = cache_models
+        else:
+            models = []
 
         generated_root = Path(os.getenv("OPENAI_GENERATED_PROFILE_DIR", "core/mimo/profiles/generated/openai_compatible"))
         manifest_path = generated_root / "manifest.json"
@@ -107,25 +128,27 @@ class ProviderInventoryService:
         except Exception:
             manifest = {}
 
-        manifest_models = manifest.get("models") if isinstance(manifest, dict) else []
-        if isinstance(manifest_models, list):
-            models.extend(str(item).strip() for item in manifest_models if str(item).strip())
+        if not models:
+            manifest_models = manifest.get("models") if isinstance(manifest, dict) else []
+            if isinstance(manifest_models, list):
+                models.extend(str(item).strip() for item in manifest_models if str(item).strip())
 
         model_profiles = manifest.get("model_profiles") if isinstance(manifest, dict) else []
-        for rel_path in model_profiles if isinstance(model_profiles, list) else []:
-            profile_path = generated_root / str(rel_path)
-            try:
-                profile = json.loads(profile_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            profile_key = str(profile.get("profile_key") or "").strip()
-            if not profile_key.startswith("model::"):
-                continue
-            metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
-            family = str(metadata.get("model_family") or "").strip().lower()
-            model_name = profile_key.split("model::", 1)[1].strip()
-            if model_name and (family == "mimo" or model_name.lower().startswith("mimo-")):
-                models.append(model_name)
+        if not models:
+            for rel_path in model_profiles if isinstance(model_profiles, list) else []:
+                profile_path = generated_root / str(rel_path)
+                try:
+                    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                profile_key = str(profile.get("profile_key") or "").strip()
+                if not profile_key.startswith("model::"):
+                    continue
+                metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
+                family = str(metadata.get("model_family") or "").strip().lower()
+                model_name = profile_key.split("model::", 1)[1].strip()
+                if model_name and (family == "mimo" or model_name.lower().startswith("mimo-")):
+                    models.append(model_name)
 
         seen: set[str] = set()
         generated: list[str] = []
@@ -172,6 +195,181 @@ class ProviderInventoryService:
                 seen.add(model_name)
                 merged.append(model_name)
         return merged
+
+    @classmethod
+    def _openai_probe_limit(cls) -> int:
+        return cls._read_int_env("AI_BRIDGE_OPENAI_RUNTIME_PROBE_LIMIT", 8)
+
+    @staticmethod
+    def _openai_probe_prompt() -> str:
+        return str(os.getenv("AI_BRIDGE_OPENAI_RUNTIME_PROBE_PROMPT", "reply with ok") or "reply with ok").strip() or "reply with ok"
+
+    @staticmethod
+    def _select_openai_probe_models(models: list[str], *, default_model: str = "", limit: int = 8) -> list[str]:
+        preferred: list[str] = []
+        if default_model and is_text_compatible_model(default_model):
+            preferred.append(default_model)
+        for env_name in ("CODEX_OPENAI_MODEL", "OPENAI_HIGH_MODELS", "OPENAI_MEDIUM_MODELS", "OPENAI_LOW_MODELS", "OPENAI_EXTRA_MODELS"):
+            raw = str(os.getenv(env_name, "") or "").strip()
+            if not raw:
+                continue
+            preferred.extend(item.strip() for item in raw.split(",") if item.strip() and is_text_compatible_model(item.strip()))
+
+        ordered = ProviderInventoryService._merge_model_names(preferred, [model for model in models if is_text_compatible_model(model)])
+        if limit <= 0:
+            return ordered
+        return ordered[:limit]
+
+    @staticmethod
+    def _extract_openai_probe_text(payload: Any) -> str:
+        if isinstance(payload, dict):
+            choices = payload.get("choices") or []
+            if isinstance(choices, list) and choices:
+                message = (choices[0] or {}).get("message") or {}
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()[:160]
+            output = payload.get("output") or []
+            if isinstance(output, list):
+                parts: list[str] = []
+                for item in output:
+                    if not isinstance(item, dict):
+                        continue
+                    for content in item.get("content") or []:
+                        if not isinstance(content, dict):
+                            continue
+                        text_part = content.get("text") or content.get("output_text")
+                        if isinstance(text_part, str) and text_part.strip():
+                            parts.append(text_part.strip())
+                if parts:
+                    return " ".join(parts)[:160]
+        return ""
+
+    async def _probe_openai_runtime_matrix_async(
+        self,
+        *,
+        model_names: list[str],
+        api_key: str,
+        chat_endpoint: str,
+        responses_endpoint: str,
+        prompt: str,
+        max_parallel: int,
+    ) -> list[dict[str, Any]]:
+        timeout = httpx.Timeout(30.0)
+        semaphore = asyncio.Semaphore(max(1, max_parallel))
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async def _call(endpoint_name: str, endpoint_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+                async with semaphore:
+                    try:
+                        response = await client.post(endpoint_url, headers=headers, json=payload)
+                    except Exception as exc:
+                        return {"ok": False, "status_code": None, "error": str(exc), "response_sample": "", "endpoint": endpoint_name}
+                    try:
+                        body: Any = response.json() if response.content else {}
+                    except Exception:
+                        body = {}
+                    if response.status_code < 400:
+                        return {
+                            "ok": True,
+                            "status_code": int(response.status_code),
+                            "error": None,
+                            "response_sample": self._extract_openai_probe_text(body),
+                            "endpoint": endpoint_name,
+                        }
+                    return {
+                        "ok": False,
+                        "status_code": int(response.status_code),
+                        "error": str(response.text[:240]),
+                        "response_sample": "",
+                        "endpoint": endpoint_name,
+                    }
+
+            async def _probe_model(model_name: str) -> dict[str, Any]:
+                chat_payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
+                responses_payload = {"model": model_name, "input": prompt, "max_output_tokens": 8}
+                chat_result, responses_result = await asyncio.gather(
+                    _call("chat_completions", chat_endpoint, chat_payload),
+                    _call("responses", responses_endpoint, responses_payload),
+                )
+                return {
+                    "model": model_name,
+                    "chat_completions": chat_result,
+                    "responses": responses_result,
+                    "fully_routable": bool(chat_result.get("ok") and responses_result.get("ok")),
+                }
+
+            return await asyncio.gather(*(_probe_model(model_name) for model_name in model_names))
+
+    def refresh_openai_runtime_inventory(self, *, force_refresh: bool = False, probe_limit: int | None = None) -> dict[str, Any]:
+        models = self.openai.get_models(force_refresh=force_refresh)
+        diagnostics = dict(self.openai.diagnostics())
+        cfg = resolve_openai_provider_config()
+        sync_summary: dict[str, Any] = {}
+        if models:
+            try:
+                sync_summary = sync_openai_compatible_artifacts(models, base_url=str(cfg.base_url or "").strip())
+            except Exception as exc:
+                sync_summary = {"ok": False, "error": str(exc)}
+
+        selected = self._select_openai_probe_models(
+            models,
+            default_model=str(getattr(cfg, "default_model", "") or ""),
+            limit=self._openai_probe_limit() if probe_limit is None else int(probe_limit),
+        )
+        probe_rows: list[dict[str, Any]] = []
+        execution_mode = "skipped"
+        if selected and str(getattr(cfg, "api_key", "") or "").strip():
+            runner = lambda: asyncio.run(
+                self._probe_openai_runtime_matrix_async(
+                    model_names=selected,
+                    api_key=str(cfg.api_key),
+                    chat_endpoint=str(cfg.chat_completions_endpoint),
+                    responses_endpoint=str(cfg.responses_endpoint),
+                    prompt=self._openai_probe_prompt(),
+                    max_parallel=max(2, min(16, len(selected) * 2)),
+                )
+            )
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                execution_mode = "asyncio_run"
+                probe_rows = runner()
+            else:
+                execution_mode = "threadpool_asyncio_run"
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    probe_rows = pool.submit(runner).result()
+
+        fully_routable = [row for row in probe_rows if bool(row.get("fully_routable"))]
+        chat_ready = [row for row in probe_rows if bool(((row.get("chat_completions") or {}).get("ok")))]
+        responses_ready = [row for row in probe_rows if bool(((row.get("responses") or {}).get("ok")))]
+        payload = {
+            "provider": "openai",
+            "fetched_at": int(time.time()),
+            "force_refresh": bool(force_refresh),
+            "registry_diagnostics": diagnostics,
+            "models": models,
+            "model_count": len(models),
+            "selected_models": selected,
+            "selected_model_count": len(selected),
+            "validated_models": probe_rows,
+            "validated_model_count": len(probe_rows),
+            "fully_routable_models": [str(row.get("model") or "") for row in fully_routable],
+            "fully_routable_count": len(fully_routable),
+            "chat_ready_count": len(chat_ready),
+            "responses_ready_count": len(responses_ready),
+            "artifact_sync": sync_summary,
+            "base_url": str(getattr(cfg, "base_url", "") or ""),
+            "models_endpoint": str(getattr(cfg, "models_endpoint", "") or ""),
+            "chat_completions_endpoint": str(getattr(cfg, "chat_completions_endpoint", "") or ""),
+            "responses_endpoint": str(getattr(cfg, "responses_endpoint", "") or ""),
+            "default_model": str(getattr(cfg, "default_model", "") or ""),
+            "execution_mode": execution_mode,
+        }
+        self.openai_runtime_inventory_path.parent.mkdir(parents=True, exist_ok=True)
+        self.openai_runtime_inventory_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        return payload
 
     def _artifact_mimo_models(self) -> dict[str, list[str]]:
         artifacts = self._ping_artifacts()
@@ -273,6 +471,8 @@ class ProviderInventoryService:
         return unique[:limit]
 
     def refresh_mimo_usable_snapshot(self, *, force_refresh: bool = False, prompt: str = 'reply with pong only') -> dict[str, Any]:
+        if not self.mimo_enabled:
+            return {'status': 'disabled', 'reason': 'mimo_disabled_by_env', 'disable_env': 'AI_BRIDGE_MIMO_ENABLED'}
         report_dir = self._report_dir()
         report_dir.mkdir(parents=True, exist_ok=True)
         now = time.time()
@@ -339,7 +539,25 @@ class ProviderInventoryService:
         return {'status': 'ok', 'inventory_count': len(inventory), 'probed_count': len(selected), 'usable_count': len(usable_rows), 'report_dir': str(report_dir)}
 
     def _openai_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
-        models = self.openai.get_models(force_refresh=force_refresh)
+        runtime_inventory: dict[str, Any] | None = None
+        if force_refresh:
+            runtime_inventory = self.refresh_openai_runtime_inventory(force_refresh=True)
+            diag = runtime_inventory.get("registry_diagnostics") if isinstance(runtime_inventory, dict) else {}
+            models = list(runtime_inventory.get("models") or []) if isinstance(runtime_inventory, dict) else []
+            diagnostics = dict(diag) if isinstance(diag, dict) else {}
+            diagnostics["artifact_sync"] = (runtime_inventory or {}).get("artifact_sync", {}) if isinstance(runtime_inventory, dict) else {}
+            diagnostics["runtime_inventory"] = runtime_inventory or {}
+            return ProviderInventoryEntry(
+                provider="openai",
+                fetched_at=int(time.time()),
+                ok=bool(models),
+                source=str(diagnostics.get("source") or "live"),
+                models=models,
+                error=str(diagnostics.get("error_message") or "") or None,
+                diagnostics=diagnostics,
+            )
+
+        models = self.openai.get_models(force_refresh=False)
         diag = self.openai.diagnostics()
         sync_summary: dict[str, Any] = {}
         if models:
@@ -354,7 +572,7 @@ class ProviderInventoryService:
             provider="openai",
             fetched_at=int(time.time()),
             ok=bool(models),
-            source=str(diag.get("source") or ("live" if force_refresh else "cache")),
+            source=str(diag.get("source") or "cache"),
             models=models,
             error=str(diag.get("error_message") or "") or None,
             diagnostics=diagnostics,
@@ -418,6 +636,16 @@ class ProviderInventoryService:
         )
 
     def _mimo_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
+        if not self.mimo_enabled:
+            return ProviderInventoryEntry(
+                provider="mimo",
+                fetched_at=int(time.time()),
+                ok=False,
+                source="disabled_by_env",
+                models=[],
+                error="mimo_disabled_by_env",
+                diagnostics={"enabled": False, "disable_env": "AI_BRIDGE_MIMO_ENABLED"},
+            )
         models: list[str] = []
         error: str | None = None
         source = "bridge_cache"
@@ -458,9 +686,9 @@ class ProviderInventoryService:
         else:
             generated_models = [f"xiaomi/{name}" if "/" not in name else name for name in generated_models]
 
-        models = self._merge_model_names(models, usable_models, ping_models, generated_models)
+        models = self._merge_model_names(models, usable_models, ping_models)
 
-        if source != "generated_manifest_fallback" and (usable_models or ping_models or generated_models):
+        if source != "generated_manifest_fallback" and (usable_models or ping_models):
             source = f"{source}+artifact_merge"
 
         return ProviderInventoryEntry(
@@ -538,6 +766,8 @@ class ProviderInventoryService:
             return skip_reason, "excluded_from_chat_routing"
         if "personal access tokens are not supported" in lowered:
             return "github_pat_not_supported", "use GitHub user/OAuth session instead of PAT or keep provider disabled"
+        if any(marker in lowered for marker in ("invalid api key", "unauthorized", "authentication required", "auth failed")) or row.get("status_code") == 401:
+            return "auth_failed", "refresh provider credentials or keep the provider globally suppressed"
         if "labs model" in lowered or "labs_not_enabled" in lowered:
             return "labs_not_enabled", "enable the Labs model in Mistral organization settings or keep it excluded"
         if "invalid model" in lowered or row.get("status_code") == 400:
@@ -549,8 +779,8 @@ class ProviderInventoryService:
     def build_participation_snapshot(self, agent_records: list[Any] | None = None) -> dict[str, Any]:
         artifacts = self._ping_artifacts()
         model_ping = artifacts.get("model_ping", {})
-        mimo_ping = artifacts.get("mimo_ping", {})
-        mimo_usable = artifacts.get("mimo_usable", {})
+        mimo_ping = artifacts.get("mimo_ping", {}) if self.mimo_enabled else {}
+        mimo_usable = artifacts.get("mimo_usable", {}) if self.mimo_enabled else {}
 
         successful_direct: dict[str, set[str]] = {}
         active_now: list[dict[str, Any]] = []

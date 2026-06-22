@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import subprocess
 import sys
@@ -21,6 +22,65 @@ def run_command(cmd: list[str], *, check: bool = True) -> subprocess.CompletedPr
     return subprocess.run(cmd, check=check, capture_output=True, text=True)
 
 
+
+
+def detect_gpu_runtime() -> dict[str, object]:
+    forced = os.getenv('AI_BRIDGE_LOCAL_LLM_GPU_BACKEND', 'auto').strip().lower()
+    if forced not in {'auto', 'nvidia', 'amd', 'intel', 'cpu'}:
+        forced = 'auto'
+
+    def _has_command(cmd: list[str]) -> bool:
+        try:
+            result = run_command(cmd, check=False)
+        except Exception:
+            return False
+        return result.returncode == 0 and bool((result.stdout or '').strip())
+
+    def _has_path(pattern: str) -> bool:
+        return any(Path(item).exists() for item in glob.glob(pattern))
+
+    backend = forced
+    if backend == 'auto':
+        if _has_command(['nvidia-smi', '-L']):
+            backend = 'nvidia'
+        elif _has_path('/dev/kfd') or _has_command(['rocminfo']):
+            backend = 'amd'
+        elif _has_path('/dev/dri/renderD*'):
+            backend = 'intel'
+        else:
+            backend = 'cpu'
+
+    flags: list[str] = [f'--publish {OLLAMA_PORT}:{OLLAMA_PORT}']
+    env: dict[str, str] = {'AI_BRIDGE_LOCAL_LLM_GPU_BACKEND_DETECTED': backend}
+    if backend == 'nvidia':
+        env['OLLAMA_GPU_ENABLED'] = '1'
+        env['NVIDIA_VISIBLE_DEVICES'] = 'all'
+        env['NVIDIA_DRIVER_CAPABILITIES'] = 'compute,utility'
+        flags.extend([
+            '--security-opt=label=disable',
+            '--group-add keep-groups',
+            '--device nvidia.com/gpu=all',
+        ])
+        return {'backend': backend, 'container_args': [], 'additional_flags': flags, 'env': env}
+    if backend == 'amd':
+        env['OLLAMA_GPU_ENABLED'] = '1'
+        flags.extend(['--device /dev/kfd', '--device /dev/dri', '--group-add keep-groups'])
+        return {'backend': backend, 'container_args': [], 'additional_flags': flags, 'env': env}
+    if backend == 'intel':
+        env['OLLAMA_GPU_ENABLED'] = '1'
+        flags.extend(['--device /dev/dri', '--group-add keep-groups'])
+        return {'backend': backend, 'container_args': [], 'additional_flags': flags, 'env': env}
+    env['OLLAMA_GPU_ENABLED'] = '0'
+    return {'backend': 'cpu', 'container_args': [], 'additional_flags': flags, 'env': env}
+
+
+def gpu_env_exports() -> str:
+    runtime = detect_gpu_runtime()
+    env = runtime.get('env', {}) if isinstance(runtime.get('env'), dict) else {}
+    parts = [f"export {key}={value}" for key, value in env.items() if str(key).strip()]
+    return '; '.join(parts)
+
+
 def distrobox_exists(container_name: str) -> bool:
     result = run_command(["distrobox", "list", "--no-color"], check=False)
     if result.returncode != 0:
@@ -31,7 +91,8 @@ def distrobox_exists(container_name: str) -> bool:
 def ensure_container(container_name: str) -> None:
     if distrobox_exists(container_name):
         return
-    run_command([
+    runtime = detect_gpu_runtime()
+    cmd = [
         "distrobox",
         "create",
         "--name",
@@ -39,10 +100,12 @@ def ensure_container(container_name: str) -> None:
         "--image",
         "docker.io/library/debian:bookworm",
         "--yes",
-        "--nvidia",
-        "--additional-flags",
-        f"--publish {OLLAMA_PORT}:{OLLAMA_PORT}",
-    ])
+    ]
+    cmd.extend(str(item) for item in runtime.get('container_args', []) if str(item).strip())
+    additional_flags = ' '.join(str(item).strip() for item in runtime.get('additional_flags', []) if str(item).strip())
+    if additional_flags:
+        cmd.extend(["--additional-flags", additional_flags])
+    run_command(cmd)
 
 
 def install_ollama(container_name: str) -> None:
@@ -57,11 +120,13 @@ def install_ollama(container_name: str) -> None:
 
 
 def start_service(container_name: str) -> None:
+    gpu_exports = gpu_env_exports()
     serve_cmd = (
         f"set -euo pipefail; "
-        f"OLLAMA_HOST={OLLAMA_HOST} OLLAMA_ORIGINS='*' nohup ollama serve > /tmp/ollama.log 2>&1 & "
-        "sleep 5; "
-        f"ollama pull {MODEL_NAME}"
+        + (f"{gpu_exports}; " if gpu_exports else "")
+        + f"OLLAMA_HOST={OLLAMA_HOST} OLLAMA_ORIGINS='*' nohup ollama serve > /tmp/ollama.log 2>&1 & "
+        + "sleep 5; "
+        + f"ollama pull {MODEL_NAME}"
     )
     run_command(["distrobox", "enter", container_name, "--", "bash", "-lc", serve_cmd])
 

@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -24,7 +25,7 @@ from .env_loader import load_env_file
 from .external_ai_bridge import ExternalAIBridge
 from .provider_credentials import credential_snapshot
 from .antigravity_status_module import shared_antigravity_snapshot
-from .mimo_status import build_mimo_runtime_status
+from .mimo_status import build_mimo_runtime_status, mimo_enabled
 from .integrations.antigravity_manager import AntigravityManager
 from .integrations.mistral_manager import MistralManager
 from .openai_model_registry import OpenAIModelRegistry
@@ -66,6 +67,35 @@ class ProviderHealth:
 
 
 class ModelAvailability:
+    @staticmethod
+    def _endpoint_candidates(base_url: str) -> list[str]:
+        raw = str(base_url or '').strip().rstrip('/')
+        if not raw:
+            return []
+        candidates: list[str] = []
+
+        def _push(url: str) -> None:
+            item = url.rstrip('/')
+            if item and item not in candidates:
+                candidates.append(item)
+
+        _push(raw)
+        parsed = urlsplit(raw)
+        if parsed.scheme and parsed.netloc:
+            host = parsed.hostname or ''
+            netloc = parsed.netloc
+            variants: list[str] = []
+            if host == '127.0.0.1':
+                variants.extend(['host.containers.internal', 'localhost'])
+            elif host == 'localhost':
+                variants.extend(['127.0.0.1', 'host.containers.internal'])
+            elif host == 'host.containers.internal':
+                variants.extend(['127.0.0.1', 'localhost'])
+            for variant in variants:
+                swapped_netloc = netloc.replace(host, variant, 1)
+                _push(urlunsplit((parsed.scheme, swapped_netloc, parsed.path, parsed.query, parsed.fragment)))
+        return candidates
+
     @staticmethod
     def _normalize_provider(provider: str) -> str:
         p = provider.strip().lower()
@@ -355,6 +385,11 @@ class ModelAvailability:
             "provider": "mimo",
             "credential": credential_snapshot(("GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN")),
         }
+        if not mimo_enabled():
+            latency = (datetime.now(UTC) - start).total_seconds() * 1000
+            diagnostics["disabled_by_env"] = True
+            diagnostics["disable_env"] = "AI_BRIDGE_MIMO_ENABLED"
+            return self._cache(ProviderHealth("mimo", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error="mimo_disabled_by_env", diagnostics=diagnostics))
         snapshot = build_mimo_runtime_status()
         diagnostics["snapshot"] = snapshot
         inventory_snapshot = self._snapshot_inventory("mimo")
@@ -512,28 +547,44 @@ class ModelAvailability:
 
     def check_ai_kernel(self, *, live: bool | None = None) -> ProviderHealth:
         start = datetime.now(UTC)
+        base_url = (os.getenv("AI_KERNEL_BASE_URL") or "http://127.0.0.1:8012/v1").rstrip('/')
         diagnostics: dict[str, Any] = {
             "provider": "ai_kernel",
-            "base_url": (os.getenv("AI_KERNEL_BASE_URL") or "http://127.0.0.1:8012/v1").rstrip('/'),
+            "base_url": base_url,
             "model_alias": (os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip(),
         }
+        diagnostics["candidate_base_urls"] = self._endpoint_candidates(base_url)
         tcp = self._tcp_probe("ai_kernel")
         diagnostics["tcp"] = tcp
         latency = (datetime.now(UTC) - start).total_seconds() * 1000
         if not tcp.get("ok"):
             health = ProviderHealth("ai_kernel", ProviderStatus.TIMEOUT, latency, datetime.now(UTC), error="tcp_probe_failed", diagnostics=diagnostics)
             return self._cache(health)
-        import requests
         try:
-            response = requests.get(f"{diagnostics['base_url']}/models", headers={"Authorization": f"Bearer {os.getenv('AI_KERNEL_API_KEY', 'local')}"}, timeout=5.0)
-            diagnostics["status_code"] = response.status_code
-            payload = response.json() if response.content else {}
-            models = [str(item.get("id") or "").strip() for item in (payload.get("data") or []) if str(item.get("id") or "").strip()] if isinstance(payload, dict) else []
-            diagnostics["models"] = models
+            last_error = "ai_kernel_models_unavailable"
+            last_status_code: int | None = None
+            for candidate_url in diagnostics["candidate_base_urls"]:
+                try:
+                    response = requests.get(f"{candidate_url}/models", headers={"Authorization": f"Bearer {os.getenv('AI_KERNEL_API_KEY', 'local')}"}, timeout=5.0)
+                except Exception as exc:
+                    last_error = f"{exc}@{candidate_url}"
+                    continue
+                last_status_code = response.status_code
+                payload = response.json() if response.content else {}
+                models = [str(item.get("id") or "").strip() for item in (payload.get("data") or []) if str(item.get("id") or "").strip()] if isinstance(payload, dict) else []
+                diagnostics["status_code"] = response.status_code
+                diagnostics["models"] = models
+                diagnostics["resolved_base_url"] = candidate_url
+                latency = (datetime.now(UTC) - start).total_seconds() * 1000
+                if response.status_code == 200 and models:
+                    diagnostics["base_url"] = candidate_url
+                    return self._cache(ProviderHealth("ai_kernel", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics))
+                last_error = f"ai_kernel_status_{response.status_code}@{candidate_url}"
             latency = (datetime.now(UTC) - start).total_seconds() * 1000
-            if response.status_code == 200 and models:
-                return self._cache(ProviderHealth("ai_kernel", ProviderStatus.HEALTHY, latency, datetime.now(UTC), diagnostics=diagnostics))
-            return self._cache(ProviderHealth("ai_kernel", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="ai_kernel_models_unavailable", diagnostics=diagnostics))
+            if last_status_code is not None:
+                diagnostics["status_code"] = last_status_code
+            status = ProviderStatus.OFFLINE if last_error and 'refused' in last_error.lower() else ProviderStatus.DEGRADED
+            return self._cache(ProviderHealth("ai_kernel", status, latency, datetime.now(UTC), error=last_error, diagnostics=diagnostics))
         except Exception as exc:
             latency = (datetime.now(UTC) - start).total_seconds() * 1000
             return self._cache(ProviderHealth("ai_kernel", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error=str(exc), diagnostics=diagnostics))

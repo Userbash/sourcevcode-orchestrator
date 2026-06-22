@@ -7,6 +7,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 
@@ -57,6 +58,19 @@ class AIKernelBridge:
     @staticmethod
     def _auto_install_enabled() -> bool:
         return os.getenv('AI_BRIDGE_AI_KERNEL_AUTO_INSTALL', 'true').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    @staticmethod
+    def _manage_remote_enabled() -> bool:
+        return os.getenv('AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def _targets_local_runtime(self) -> bool:
+        parsed = urlsplit(self.base_url)
+        host = (parsed.hostname or '').strip().lower()
+        if host in {'127.0.0.1', 'localhost', '0.0.0.0', ''}:
+            return True
+        if host == 'host.containers.internal':
+            return self._manage_remote_enabled()
+        return self._manage_remote_enabled()
 
     def _headers(self) -> dict[str, str]:
         return {'Authorization': f'Bearer {self.api_key}'}
@@ -130,6 +144,9 @@ class AIKernelBridge:
             return True
         if not self._autostart_enabled():
             logger.warning('AI kernel autostart disabled; readiness check failed for %s.', target_model)
+            return False
+        if not self._targets_local_runtime():
+            logger.warning('AI kernel base_url points to external runtime %s; local autostart/install skipped for %s.', self.base_url, target_model)
             return False
         if not self._ensure_dependencies():
             logger.warning('AI kernel dependencies are not ready for %s.', target_model)

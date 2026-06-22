@@ -250,7 +250,9 @@ class PersistentMemoryManager:
             self.storage_dir = Path(configured_dir)
         else:
             app_dir = Path("/app")
-            self.storage_dir = app_dir / "memory_store" if app_dir.exists() and os.access(app_dir, os.W_OK) else Path.cwd() / "memory_store" / f"run_{uuid4().hex}"
+            # Use a stable local fallback so memory survives restarts during
+            # developer runs instead of silently rotating to a fresh run_<uuid>.
+            self.storage_dir = app_dir / "memory_store" if app_dir.exists() and os.access(app_dir, os.W_OK) else Path.cwd() / "memory_store"
 
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         (self.storage_dir / "memories").mkdir(exist_ok=True)

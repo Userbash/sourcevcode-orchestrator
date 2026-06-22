@@ -1,0 +1,16 @@
+{
+  "include": [
+    "core/core/kernel_api.py",
+    "core/core/kernel_protocol.py",
+    "core/core/kernel_module_manager.py",
+    "core/core/ports",
+    "core/adapters/runtime",
+    "core/adapters/event_bus",
+    "core/adapters/state",
+    "core/agents/base_agent.py"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingImports": false,
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.11"
+}

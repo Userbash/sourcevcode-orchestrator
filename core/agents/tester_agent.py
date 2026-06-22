@@ -10,19 +10,12 @@ class TesterAgent(BaseAgent):
     __test__ = False
 
     def __init__(self, agent_id: str = "testeragent") -> None:
-        super().__init__(agent_id, ['test', 'ci'])
-
-    @staticmethod
-    def _trusted_summary(memory_context: dict | None = None) -> str:
-        memory = memory_context or {}
-        if not memory.get("trained_memory_trusted"):
-            return ""
-        brief = str(memory.get("trained_memory_brief", "") or "").strip()
-        return brief[:180] if len(brief) >= 40 else ""
+        super().__init__(agent_id, ["test", "ci"])
+        self.set_identity(provider="openai", model_name="gpt-test-standard")
 
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
-        trained = self._trusted_summary(memory_context)
-        summary = "Created and ran tests for acceptance criteria."
+        trained = self._trusted_memory_summary(memory_context)
+        summary = "Tester placeholder response generated; no test commands were executed and no runtime assertions were verified."
         if trained:
             summary = f"{summary} Trained memory used: {trained}"
         return self.result(task, summary)

@@ -43,6 +43,7 @@ def test_openai_registry_uses_cached_text_models(tmp_path, monkeypatch):
 
 def test_openai_registry_exposes_fetch_error_diagnostics(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("OPENAI_MODELS_CACHE_PATH", str(tmp_path / "openai_models.json"))
 
     def fake_fetch(self):
@@ -180,6 +181,7 @@ def test_openai_runtime_router_uses_websocket_economy_models(monkeypatch):
 
 def test_openai_registry_reports_http_endpoint_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("OPENAI_MODELS_CACHE_PATH", str(tmp_path / "openai_models.json"))
 
     class _Response:
@@ -192,3 +194,70 @@ def test_openai_registry_reports_http_endpoint_failure(tmp_path, monkeypatch):
     assert registry.get_models(force_refresh=True) == []
     assert registry.diagnostics()["error_type"] == "endpoint_unavailable"
     assert registry.diagnostics()["status_code"] == 502
+
+
+def test_openai_runtime_router_filters_to_fully_routable_models(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "fully_routable_models": ["gpt-5.5", "gpt-5.4"],
+            "validated_models": [
+                {"model": "claude-opus-4-6", "chat_completions": {"ok": True}, "responses": {"ok": False}},
+                {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+                {"model": "gpt-5.4", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "claude-opus-4-6,gpt-5.5,gpt-5.4")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+
+    plan = router.build_plan(_task(complexity=Complexity.HIGH), "route only verified models")
+
+    assert "claude-opus-4-6" not in plan.models
+    assert plan.models[:2] == ["gpt-5.5", "gpt-5.4"]
+
+
+def test_openai_runtime_router_filters_non_chat_models_from_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "gpt-4o-transcribe,gpt-5.5,gpt-5.4")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+
+    plan = router.build_plan(_task(complexity=Complexity.HIGH), "route only chat models")
+
+    assert "gpt-4o-transcribe" not in plan.models
+    assert plan.models[0] in {"gpt-5.5", "gpt-5.4"}
+
+
+def test_openai_runtime_router_filters_runtime_incompatible_models(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "validated_models": [
+                {
+                    "model": "claude-sonnet-4-6",
+                    "chat_completions": {"ok": False, "error": "Claude pool has no eligible resources"},
+                    "responses": {"ok": False, "error": "Claude pool has no eligible resources"},
+                },
+                {
+                    "model": "gpt-5.5",
+                    "chat_completions": {"ok": True},
+                    "responses": {"ok": True},
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "claude-sonnet-4-6,gpt-5.5")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "false")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+
+    plan = router.build_plan(_task(complexity=Complexity.HIGH), "avoid runtime-incompatible models")
+
+    assert "claude-sonnet-4-6" not in plan.models
+    assert plan.models[0] == "gpt-5.5"

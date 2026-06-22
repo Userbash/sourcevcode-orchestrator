@@ -55,3 +55,18 @@ def test_ai_kernel_bridge_reports_false_when_autostart_disabled(monkeypatch, tmp
 
     assert bridge.ensure_ready('hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m') is False
     assert bridge.host_bridge.commands == []
+
+
+
+def test_ai_kernel_bridge_does_not_manage_remote_runtime_by_default(monkeypatch, tmp_path):
+    bridge = AIKernelBridge(
+        base_url='http://host.containers.internal:8012/v1',
+        serve_script=tmp_path / 'serve.sh',
+        install_script=tmp_path / 'install.sh',
+        host_bridge=_HostBridge(),
+    )
+    monkeypatch.setattr(AIKernelBridge, 'probe', lambda self: {'ok': False, 'status_code': None, 'models': [], 'error': 'connection refused'})
+    monkeypatch.setenv('AI_BRIDGE_AUTOSTART_AI_KERNEL', 'true')
+
+    assert bridge.ensure_ready('hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m') is False
+    assert bridge.host_bridge.commands == []

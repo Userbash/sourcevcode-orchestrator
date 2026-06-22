@@ -383,6 +383,38 @@ def test_refresh_provider_inventory_snapshot_records_worker_sync(monkeypatch):
 
 
 
+def test_refresh_provider_inventory_snapshot_suppresses_failed_provider(monkeypatch):
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.provider_budget_router.suppress_provider('openai', seconds=60, reason='stale')
+
+    def _fake_refresh(force_refresh=False):
+        return {
+            "openai": {"ok": True, "diagnostics": {}},
+            "mimo": {"ok": False, "error": "401 invalid api key", "diagnostics": {}},
+        }
+
+    def _fake_participation(records):
+        return {
+            "active_now": [{"provider": "openai", "model_name": "gpt-5.5", "source": "registered_agent"}],
+            "available_but_not_wired_directly": [],
+            "present_but_unusable": [{"provider": "mimo", "model_name": "mimo/mimo-auto", "reason": "github_pat_not_supported"}],
+        }
+
+    monkeypatch.setattr(orchestrator.provider_inventory, "refresh", _fake_refresh)
+    monkeypatch.setattr(orchestrator.provider_inventory, "build_participation_snapshot", _fake_participation)
+    monkeypatch.setattr(orchestrator, "sync_openai_template_workers", lambda **kwargs: {"attached": [], "removed": [], "kept": [], "enabled": True})
+    monkeypatch.setattr(orchestrator.availability, "cached_report", lambda: {
+        "mimo": {"status": "auth_failed", "error": "auth_failed"},
+        "openai": {"status": "healthy", "error": None},
+    })
+
+    snapshot = orchestrator._refresh_provider_inventory_snapshot(force_refresh=True)
+
+    assert 'mimo' in snapshot['provider_suppression']['suppressed']
+    assert snapshot['provider_suppression']['suppressed']['mimo']['error_type'] == 'auth_fail'
+    assert 'mimo' in snapshot['provider_budget_router']['global_suppression']
+    assert 'openai' not in snapshot['provider_budget_router']['global_suppression']
+
 def test_orchestrator_selects_mimo_agent_for_xiaomi_provider_alias():
     orchestrator = _orchestrator_with_agents()
     orchestrator.attach_local_agent("mimo-router-1", LocalCodeAgent("mimo-router-1"), model_name="mimo/mimo-auto", provider="mimo")

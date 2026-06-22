@@ -114,6 +114,40 @@ ensure_host_requirements() {
   fi
 }
 
+detect_local_llm_gpu_backend() {
+  if [ "${AI_BRIDGE_LOCAL_LLM_GPU_BACKEND:-auto}" = "cpu" ]; then
+    echo cpu
+    return 0
+  fi
+  if [ "${AI_BRIDGE_LOCAL_LLM_GPU_BACKEND:-auto}" = "nvidia" ]; then
+    echo nvidia
+    return 0
+  fi
+  if host_run bash -lc 'command -v nvidia-smi >/dev/null 2>&1'; then
+    echo nvidia
+    return 0
+  fi
+  echo cpu
+}
+
+ollama_container_has_nvidia_gpu() {
+  local inspect
+  inspect="$(host_run podman inspect "$OLLAMA_CONTAINER" --format '{{json .HostConfig.Devices}} {{json .HostConfig.SecurityOpt}} {{json .HostConfig.GroupAdd}}' 2>/dev/null || true)"
+  printf '%s' "$inspect" | grep -q 'nvidia.com/gpu=all' || return 1
+  printf '%s' "$inspect" | grep -q 'label=disable' || return 1
+  printf '%s' "$inspect" | grep -q 'keep-groups' || return 1
+}
+
+recreate_ollama_container_with_gpu() {
+  local backend="$1"
+  remove_container_if_exists "$OLLAMA_CONTAINER"
+  ensure_volume "$OLLAMA_VOLUME_NAME"
+  if [ "$backend" = "nvidia" ]; then
+    host_run podman run -d       --name "$OLLAMA_CONTAINER"       -p "${OLLAMA_PORT}:11434"       --security-opt=label=disable       --group-add keep-groups       --device nvidia.com/gpu=all       -e NVIDIA_VISIBLE_DEVICES=all       -e NVIDIA_DRIVER_CAPABILITIES=compute,utility       -v "${OLLAMA_VOLUME_NAME}:/root/.ollama"       docker.io/ollama/ollama >/dev/null
+    return 0
+  fi
+  host_run podman run -d     --name "$OLLAMA_CONTAINER"     -p "${OLLAMA_PORT}:11434"     -v "${OLLAMA_VOLUME_NAME}:/root/.ollama"     docker.io/ollama/ollama >/dev/null
+}
 
 ensure_volume() {
   local volume_name="$1"
@@ -207,26 +241,25 @@ start_rabbitmq() {
 }
 
 start_local_llm() {
+  local backend
+  backend="$(detect_local_llm_gpu_backend)"
   log "Ensuring local Ollama endpoint on 127.0.0.1:${OLLAMA_PORT}..."
-  if host_run curl -fsS "http://127.0.0.1:${OLLAMA_PORT}/api/tags" >/dev/null 2>&1; then
-    log "Existing Ollama endpoint is already reachable."
-  else
-    if ! host_run podman container exists "$OLLAMA_CONTAINER" >/dev/null 2>&1; then
-      ensure_volume "$OLLAMA_VOLUME_NAME"
-      host_run podman run -d \
-        --name "$OLLAMA_CONTAINER" \
-        -p "${OLLAMA_PORT}:11434" \
-        -v "${OLLAMA_VOLUME_NAME}:/root/.ollama" \
-        docker.io/ollama/ollama >/dev/null
+  if host_run podman container exists "$OLLAMA_CONTAINER" >/dev/null 2>&1; then
+    if [ "$backend" = "nvidia" ] && ! ollama_container_has_nvidia_gpu; then
+      warn "Existing Ollama container has no real NVIDIA passthrough; recreating it with GPU access."
+      recreate_ollama_container_with_gpu "$backend"
     else
       host_run podman start "$OLLAMA_CONTAINER" >/dev/null || true
     fi
-    wait_for_http "http://127.0.0.1:${OLLAMA_PORT}/api/tags" 45 1 || {
-      host_run podman logs --tail 120 "$OLLAMA_CONTAINER" >&2 || true
-      echo "[ERROR] Ollama endpoint is not reachable on port ${OLLAMA_PORT}." >&2
-      exit 1
-    }
+  else
+    recreate_ollama_container_with_gpu "$backend"
   fi
+
+  wait_for_http "http://127.0.0.1:${OLLAMA_PORT}/api/tags" 45 1 || {
+    host_run podman logs --tail 120 "$OLLAMA_CONTAINER" >&2 || true
+    echo "[ERROR] Ollama endpoint is not reachable on port ${OLLAMA_PORT}." >&2
+    exit 1
+  }
 
   log "Pulling local model ${LOCAL_MODEL}..."
   host_run podman exec "$OLLAMA_CONTAINER" ollama pull "$LOCAL_MODEL"
@@ -261,6 +294,11 @@ start_orchestrator() {
     -e AI_BRIDGE_LOCAL_LLM_ENDPOINT="http://host.containers.internal:${OLLAMA_PORT}" \
     -e AI_BRIDGE_LOCAL_LLM_PORT="${OLLAMA_PORT}" \
     -e AI_BRIDGE_LOCAL_LLM_MODEL="${LOCAL_MODEL}" \
+    -e AI_KERNEL_ENABLED="${AI_KERNEL_ENABLED:-true}" \
+    -e AI_KERNEL_BASE_URL="${AI_KERNEL_BASE_URL:-http://host.containers.internal:8012/v1}" \
+    -e AI_KERNEL_API_KEY="${AI_KERNEL_API_KEY:-local}" \
+    -e AI_KERNEL_MODEL_ALIAS="${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}" \
+    -e AI_KERNEL_TCP_PROBE_HOSTS="${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}" \
     -e AI_BRIDGE_WORKSPACE_ROOT=/workspace \
     -e AI_BRIDGE_EASY_DIFFUSION_START_ENABLED=false \
     -e AI_BRIDGE_MEMORY_ENABLED=true \

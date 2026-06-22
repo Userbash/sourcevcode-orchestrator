@@ -5,7 +5,8 @@ import os
 from .base_agent import BaseAgent
 from .gemini_agent import GeminiAgent
 from core.core.external_ai_bridge import ExternalAIBridge
-from core.core.models import Task, TaskStatus
+from core.core.integrations.antigravity_manager import AntigravityManager
+from core.core.models import AgentHealth, AgentStatus, Task, TaskStatus
 from core.core.security import SecurityManager
 
 
@@ -15,6 +16,32 @@ class AntigravityCLIAgent(BaseAgent):
         self.security = security_manager
         self.timeout_sec = self._resolve_timeout()
         self.provider = "antigravity"
+
+    def health(self) -> AgentHealth:
+        status_payload = AntigravityManager().status()
+        if bool(status_payload.get("ready")):
+            return AgentHealth(agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities)
+
+        api_probe = status_payload.get("api_probe") if isinstance(status_payload.get("api_probe"), dict) else {}
+        auth_probe = status_payload.get("auth_probe") if isinstance(status_payload.get("auth_probe"), dict) else {}
+        models_probe = status_payload.get("models_probe") if isinstance(status_payload.get("models_probe"), dict) else {}
+        last_error = (
+            str(api_probe.get("error") or "").strip()
+            or str(auth_probe.get("stderr") or auth_probe.get("error") or "").strip()
+            or str(models_probe.get("stderr") or models_probe.get("error") or "").strip()
+            or "antigravity_not_ready"
+        )
+        status = AgentStatus.DEGRADED if status_payload.get("inventory_ok") or api_probe or auth_probe or models_probe else AgentStatus.FAILED
+        return AgentHealth(
+            agent_id=self.agent_id,
+            status=status,
+            capabilities=self.capabilities,
+            active_tasks=self.active_tasks,
+            queue_depth=self.queue_depth,
+            avg_latency_ms=self.avg_latency_ms,
+            success_rate=1.0 if status == AgentStatus.READY else 0.0,
+            last_error=last_error,
+        )
 
     def run(self, task: Task, memory_context: dict | None = None):
         pytest_test = os.getenv("PYTEST_CURRENT_TEST", "")

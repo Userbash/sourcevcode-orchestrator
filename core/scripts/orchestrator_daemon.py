@@ -40,6 +40,46 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("orchestrator_daemon")
 
 
+def _attach_optional_degraded_agents() -> bool:
+    return os.getenv("AI_BRIDGE_ATTACH_OPTIONAL_DEGRADED_AGENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _attach_optional_local_agent(
+    orchestrator: Orchestrator,
+    agent_id: str,
+    agent,
+    *,
+    agent_type: str,
+    model_name: str,
+    provider: str,
+    critical: bool = False,
+) -> bool:
+    try:
+        health = agent.health()
+        status_value = str(getattr(getattr(health, "status", None), "value", getattr(health, "status", "unknown"))).strip().lower()
+        if status_value == "ready" or (_attach_optional_degraded_agents() and status_value == "degraded"):
+            orchestrator.attach_local_agent(
+                agent_id,
+                agent,
+                agent_type=agent_type,
+                critical=critical,
+                model_name=model_name,
+                provider=provider,
+            )
+            return True
+        logger.warning(
+            "[AGENTS] Skipping optional agent %s provider=%s status=%s error=%s",
+            agent_id,
+            provider,
+            status_value,
+            getattr(health, "last_error", None),
+        )
+        return False
+    except Exception as exc:
+        logger.warning("[AGENTS] Optional agent %s provider=%s startup healthcheck failed: %s", agent_id, provider, exc)
+        return False
+
+
 def _build_http_app(orchestrator: Orchestrator):
     from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
@@ -120,6 +160,14 @@ def _build_http_app(orchestrator: Orchestrator):
                 "provider_inventory": module_state.get("provider_inventory", {}),
             },
         }
+
+    @app.get("/providers/openai/runtime_inventory")
+    def openai_runtime_inventory(force_refresh: bool = False, probe_limit: int | None = None):
+        try:
+            payload = _orch.provider_inventory.refresh_openai_runtime_inventory(force_refresh=force_refresh, probe_limit=probe_limit)
+            return {"status": "ok", "data": payload}
+        except Exception as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.get("/health/local_models")
     def local_model_health():
@@ -350,15 +398,55 @@ async def main():
     worker_sync = orchestrator.sync_openai_template_workers(enabled=openai_key, primary_model=codex_model)
     if worker_sync.get("attached") or worker_sync.get("removed"):
         logger.info(f"[AGENTS] OpenAI-compatible worker sync: {worker_sync}")
-    orchestrator.attach_local_agent("antigravity-cli-1", AntigravityCLIAgent("antigravity-cli-1", security_manager), agent_type="external_ai", critical=False, model_name="antigravity-cli", provider="google")
-    orchestrator.attach_local_agent("mistral-1", MistralAgent("mistral-1", security_manager), agent_type="external_ai", critical=False, model_name="mistral-large-latest", provider="mistral")
+    _attach_optional_local_agent(
+        orchestrator,
+        "antigravity-cli-1",
+        AntigravityCLIAgent("antigravity-cli-1", security_manager),
+        agent_type="external_ai",
+        critical=False,
+        model_name="antigravity-cli",
+        provider="google",
+    )
+    _attach_optional_local_agent(
+        orchestrator,
+        "mistral-1",
+        MistralAgent("mistral-1", security_manager),
+        agent_type="external_ai",
+        critical=False,
+        model_name="mistral-large-latest",
+        provider="mistral",
+    )
     orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
     orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
-    orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")), agent_type="custom", critical=False, model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"), provider="local")
-    orchestrator.attach_local_agent("ai-kernel-qwen36-1", AIKernelAgent("ai-kernel-qwen36-1"), agent_type="custom", critical=False, model_name=os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"), provider="ai_kernel")
-    if MimoAgent("mimo-router-1")._cli_path():
-        mimo_default_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto")
-        orchestrator.attach_local_agent("mimo-router-1", MimoAgent("mimo-router-1", default_model=mimo_default_model), agent_type="external_ai", critical=False, model_name=mimo_default_model, provider="mimo")
+    _attach_optional_local_agent(
+        orchestrator,
+        "local-llm-1",
+        LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")),
+        agent_type="custom",
+        critical=False,
+        model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"),
+        provider="local",
+    )
+    _attach_optional_local_agent(
+        orchestrator,
+        "ai-kernel-qwen36-1",
+        AIKernelAgent("ai-kernel-qwen36-1"),
+        agent_type="custom",
+        critical=False,
+        model_name=os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"),
+        provider="ai_kernel",
+    )
+    mimo_agent = MimoAgent("mimo-router-1", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto"))
+    if mimo_agent._cli_path():
+        _attach_optional_local_agent(
+            orchestrator,
+            "mimo-router-1",
+            mimo_agent,
+            agent_type="external_ai",
+            critical=False,
+            model_name=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto"),
+            provider="mimo",
+        )
 
     _start_http_server(orchestrator)
 

@@ -14,9 +14,13 @@ class HealthChecker:
         self.rest_protocol = rest_protocol or RestProtocol()
         self.availability = ModelAvailability()
         self._module_state_source: Callable[[], dict[str, Any]] | None = None
+        self._local_health_resolver: Callable[[str], AgentHealth | None] | None = None
 
     def set_module_state_source(self, module_state_source: Callable[[], dict[str, Any]] | None) -> None:
         self._module_state_source = module_state_source
+
+    def set_local_health_resolver(self, local_health_resolver: Callable[[str], AgentHealth | None] | None) -> None:
+        self._local_health_resolver = local_health_resolver
 
     def module_state(self) -> dict[str, Any]:
         if callable(self._module_state_source):
@@ -35,6 +39,11 @@ class HealthChecker:
         return self.availability.check_all()
 
     def local_health(self, agent_id: str) -> AgentHealth:
+        if callable(self._local_health_resolver):
+            health = self._local_health_resolver(agent_id)
+            if isinstance(health, AgentHealth):
+                self.registry.update_health(health)
+                return health
         return self.registry.health_snapshot(agent_id)
 
     def check_agent(self, agent_id: str) -> AgentHealth:

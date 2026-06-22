@@ -32,7 +32,6 @@ def _check_imports() -> CheckResult:
         "core.core.memory_backend",
         "core.core.memory_policy",
         "core.core.memory_invalidator",
-        "core.core.external_core",
     ]
     failed: list[str] = []
     for module in modules:

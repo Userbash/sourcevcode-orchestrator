@@ -52,3 +52,24 @@ def test_ai_kernel_agent_health_ready(monkeypatch):
     monkeypatch.setattr('core.agents.ai_kernel_agent.httpx.Client.get', lambda *args, **kwargs: _Response())
     health = AIKernelAgent().health()
     assert health.status.value == 'ready'
+
+
+def test_ai_kernel_agent_health_falls_back_to_host_internal(monkeypatch):
+    urls: list[str] = []
+
+    class _Response:
+        status_code = 200
+
+    def _fake_get(_self, url, *args, **kwargs):
+        urls.append(url)
+        if url.startswith('http://127.0.0.1:8012/'):
+            raise RuntimeError('loopback refused')
+        return _Response()
+
+    monkeypatch.setenv('AI_KERNEL_BASE_URL', 'http://127.0.0.1:8012/v1')
+    monkeypatch.setattr('core.agents.ai_kernel_agent.httpx.Client.get', _fake_get)
+
+    health = AIKernelAgent().health()
+
+    assert health.status.value == 'ready'
+    assert any('host.containers.internal:8012' in url for url in urls)

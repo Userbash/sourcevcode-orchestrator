@@ -1,7 +1,7 @@
 {
-  "generated_at": 1782070507,
+  "generated_at": 1782114624,
   "provider": "openai",
-  "base_url": "https://codex.sale/v1",
+  "base_url": "",
   "models": [
     "gpt-5.5",
     "gpt-5.4",
@@ -88,15 +88,15 @@
   "orchestrator_templates": "orchestrator_templates.json",
   "endpoint_manifest": {
     "provider": "openai",
-    "base_url": "https://codex.sale/v1",
-    "default_model": "gpt-5.4-mini",
+    "base_url": "",
+    "default_model": "gpt-5.5",
     "endpoints": {
-      "models": "https://codex.sale/v1/models",
-      "chat_completions": "https://codex.sale/v1/chat/completions",
-      "responses": "https://codex.sale/v1/responses",
-      "messages": "https://codex.sale/v1/messages",
-      "messages_count_tokens": "https://codex.sale/v1/messages/count_tokens",
-      "codex": "https://codex.sale/backend-api/codex"
+      "models": "",
+      "chat_completions": "",
+      "responses": "",
+      "messages": "",
+      "messages_count_tokens": "",
+      "codex": ""
     },
     "endpoint_roles": {
       "inventory": "models",

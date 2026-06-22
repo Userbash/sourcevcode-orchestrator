@@ -1,15 +1,15 @@
 from __future__ import annotations
-from typing import Any, Callable
+
 from core.core.message_bus import MessageBus
+from core.core.ports.event_bus import EventHandler, EventPayload
+
 
 class LocalMessageBusAdapter:
     def __init__(self, bus: MessageBus) -> None:
         self.bus = bus
-        self._subs: dict[str, list[Callable[[dict[str, Any]], None]]] = {}
 
-    def publish(self, topic: str, payload: dict[str, Any]) -> None:
-        for handler in self._subs.get(topic, []):
-            handler(payload)
+    def publish(self, topic: str, payload: EventPayload) -> None:
+        self.bus.publish(topic, payload)
 
-    def subscribe(self, topic: str, handler: Callable[[dict[str, Any]], None]) -> None:
-        self._subs.setdefault(topic, []).append(handler)
+    def subscribe(self, topic: str, handler: EventHandler) -> None:
+        self.bus.subscribe(topic, handler)

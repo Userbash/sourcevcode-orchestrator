@@ -109,6 +109,24 @@ def test_autostart_ai_kernel_invokes_bridge(monkeypatch):
     assert any("[AI_KERNEL] Autostart complete" in message for _, message in orchestrator.console.messages)
 
 
+def test_nonblocking_autostarts_schedule_background_bootstraps(monkeypatch):
+    scheduled: list[tuple[str, object]] = []
+
+    orchestrator = Orchestrator.__new__(Orchestrator)
+
+    def fake_launch(name: str, target) -> None:
+        scheduled.append((name, target))
+
+    orchestrator._launch_background_bootstrap = fake_launch  # type: ignore[method-assign]
+    orchestrator._autostart_local_llm = lambda: None  # type: ignore[method-assign]
+    orchestrator._autostart_ai_kernel = lambda: None  # type: ignore[method-assign]
+    orchestrator._autostart_easy_diffusion = lambda: None  # type: ignore[method-assign]
+
+    Orchestrator._start_nonblocking_autostarts(orchestrator)
+
+    assert [name for name, _ in scheduled] == ["local_llm", "ai_kernel", "easy_diffusion"]
+
+
 
 def test_local_llm_decomposition_task_plan_uses_draft(monkeypatch):
     from core.core.models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
@@ -387,3 +405,28 @@ def test_build_decomposition_advisory_uses_fast_plan_path(monkeypatch):
     advisory = Orchestrator._build_decomposition_advisory(orchestrator, task)
 
     assert advisory['local_llm']['decomposition_source'] == 'heuristic_fast_plan'
+
+
+def test_deploy_local_llm_detects_cpu_when_no_gpu(monkeypatch):
+    from core.scripts import deploy_local_llm
+
+    monkeypatch.delenv('AI_BRIDGE_LOCAL_LLM_GPU_BACKEND', raising=False)
+    monkeypatch.setattr(deploy_local_llm, 'run_command', lambda cmd, check=False: SimpleNamespace(returncode=1, stdout='', stderr=''))
+    monkeypatch.setattr('core.scripts.deploy_local_llm.glob.glob', lambda pattern: [])
+
+    runtime = deploy_local_llm.detect_gpu_runtime()
+
+    assert runtime['backend'] == 'cpu'
+    assert runtime['env']['OLLAMA_GPU_ENABLED'] == '0'
+
+
+def test_deploy_local_llm_detects_nvidia_override(monkeypatch):
+    from core.scripts import deploy_local_llm
+
+    monkeypatch.setenv('AI_BRIDGE_LOCAL_LLM_GPU_BACKEND', 'nvidia')
+
+    runtime = deploy_local_llm.detect_gpu_runtime()
+
+    assert runtime['backend'] == 'nvidia'
+    assert '--nvidia' in runtime['container_args']
+    assert runtime['env']['OLLAMA_GPU_ENABLED'] == '1'

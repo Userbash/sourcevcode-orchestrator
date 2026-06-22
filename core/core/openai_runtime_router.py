@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from .models import Complexity, Task, TaskType
 from .openai_model_registry import OpenAIModelRegistry
@@ -9,6 +12,30 @@ from .openai_model_registry import OpenAIModelRegistry
 
 class OpenAIModelUnavailableError(RuntimeError):
     pass
+
+
+_NON_CHAT_MODEL_MARKERS = (
+    "embedding",
+    "moderation",
+    "tts",
+    "whisper",
+    "image",
+    "sora",
+    "dall",
+    "realtime",
+    "audio",
+    "transcribe",
+    "speech",
+)
+
+_RUNTIME_INCOMPATIBLE_ERROR_MARKERS = (
+    "no eligible resources",
+    "not supported when using codex with a chatgpt account",
+    "model is not supported",
+    "unsupported model",
+    "invalid model",
+    "does not exist",
+)
 
 
 @dataclass(slots=True)
@@ -59,7 +86,100 @@ class OpenAIRuntimeRouter:
         raw = os.getenv(key, "").strip()
         if not raw:
             return []
-        return [item.strip() for item in raw.split(",") if item.strip()]
+        return [
+            item.strip()
+            for item in raw.split(",")
+            if item.strip() and OpenAIRuntimeRouter.is_chat_routable_model(item.strip())
+        ]
+
+    @staticmethod
+    def is_chat_routable_model(model_name: str) -> bool:
+        lowered = str(model_name or "").strip().lower()
+        if not lowered:
+            return False
+        return not any(marker in lowered for marker in _NON_CHAT_MODEL_MARKERS)
+
+    @staticmethod
+    def _runtime_inventory_path() -> Path:
+        return Path(os.getenv("OPENAI_RUNTIME_INVENTORY_PATH", "core/.cache/openai_runtime_inventory.json"))
+
+    @classmethod
+    def _load_routable_allowlist(cls) -> set[str] | None:
+        path = cls._runtime_inventory_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        fully_routable = payload.get("fully_routable_models")
+        if isinstance(fully_routable, list) and fully_routable:
+            return {str(item).strip() for item in fully_routable if str(item).strip()}
+
+        validated_rows = payload.get("validated_models")
+        if not isinstance(validated_rows, list) or not validated_rows:
+            return None
+
+        allowed: set[str] = set()
+        for row in validated_rows:
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get("model") or "").strip()
+            chat_ok = bool(((row.get("chat_completions") or {}).get("ok")))
+            responses_ok = bool(((row.get("responses") or {}).get("ok")))
+            if model_name and chat_ok and responses_ok:
+                allowed.add(model_name)
+        return allowed or set()
+
+    @classmethod
+    def _load_runtime_blocklist(cls) -> set[str]:
+        path = cls._runtime_inventory_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return set()
+        if not isinstance(payload, dict):
+            return set()
+
+        blocked: set[str] = set()
+        validated_rows = payload.get("validated_models")
+        if not isinstance(validated_rows, list):
+            return blocked
+
+        for row in validated_rows:
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get("model") or "").strip()
+            if not model_name:
+                continue
+            if not cls.is_chat_routable_model(model_name):
+                blocked.add(model_name)
+                continue
+            for endpoint_name in ("chat_completions", "responses"):
+                endpoint_result = row.get(endpoint_name)
+                if not isinstance(endpoint_result, dict):
+                    continue
+                error_text = str(endpoint_result.get("error") or endpoint_result.get("response_sample") or "").strip().lower()
+                if any(marker in error_text for marker in _RUNTIME_INCOMPATIBLE_ERROR_MARKERS):
+                    blocked.add(model_name)
+                    break
+        return blocked
+
+    @classmethod
+    def _filter_models_by_runtime_inventory(cls, models: list[str]) -> list[str]:
+        filtered = [model for model in models if cls.is_chat_routable_model(model)]
+        blocked = cls._load_runtime_blocklist()
+        if blocked:
+            filtered = [model for model in filtered if model not in blocked]
+        require_routable = os.getenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if not require_routable:
+            return filtered
+        allowlist = cls._load_routable_allowlist()
+        if allowlist is None:
+            return filtered
+        allowlisted = [model for model in filtered if model in allowlist]
+        return allowlisted or filtered
 
     @staticmethod
     def _fallbacks(complexity: Complexity, task: Task) -> list[str]:
@@ -121,13 +241,16 @@ class OpenAIRuntimeRouter:
             reason = "critical_quality"
 
         models = [*self._env_models(env_key), *live, *self._fallbacks(complexity, task), *self._env_models("OPENAI_EXTRA_MODELS")]
-        return self._dedupe(models), reason
+        ordered = self._dedupe(models)
+        return self._filter_models_by_runtime_inventory(ordered), reason
 
     @staticmethod
     def _dedupe(models: list[str]) -> list[str]:
         seen: set[str] = set()
         deduped: list[str] = []
         for model in models:
+            if not OpenAIRuntimeRouter.is_chat_routable_model(model):
+                continue
             if model in seen:
                 continue
             seen.add(model)

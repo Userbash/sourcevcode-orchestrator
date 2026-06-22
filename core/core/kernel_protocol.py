@@ -1,56 +1,61 @@
 from __future__ import annotations
-from typing import Any, Protocol, runtime_checkable
+
+from collections.abc import Awaitable, Mapping
+from typing import Protocol, TypeAlias, runtime_checkable
+
+TaskContextMap: TypeAlias = dict[str, object]
+ModuleStateMap: TypeAlias = dict[str, object]
+MaybeAwaitableNone: TypeAlias = None | Awaitable[None]
+
 
 @runtime_checkable
 class KernelAPI(Protocol):
-    """
-    Standardized Internal API for Kernel Modules.
-    Provides secure, read-only access to orchestrator services
-    and a structured mechanism for event emission.
-    """
-    
-    def get_context(self, key: str) -> Any:
-        """Retrieve system context/orchestrator attributes safely."""
+    """Canonical internal API exposed by the orchestrator to kernel modules."""
+
+    def get_context(self, key: str) -> object | None:
         ...
 
-    def emit_event(self, event_name: str, payload: dict[str, Any]) -> None:
-        """Emit system-wide events for monitoring and logging."""
+    def emit_event(self, event_name: str, payload: Mapping[str, object]) -> None:
         ...
 
-    def query_module_state(self, module_name: str, key: str) -> Any:
-        """Query the finalized state of another module."""
+    def query_state(self, module_name: str, key: str) -> object | None:
+        ...
+
+    def query_module_state(self, module_name: str, key: str) -> object | None:
         ...
 
     def log(self, level: str, message: str) -> None:
-        """System-wide logging for module activities."""
         ...
 
-    def get_memory(self) -> Any:
-        """Retrieve the primary memory module (SessionMemory)."""
+    def get_module(self, name: str) -> object | None:
         ...
+
+    def get_memory(self) -> object:
+        ...
+
+    def load_module(self, name: str) -> None:
+        ...
+
+    def unload_module(self, name: str) -> None:
+        ...
+
 
 class KernelModule(Protocol):
-    """
-    Standardized Protocol for Kernel Modules with mandatory lifecycle hooks.
-    """
+    """Protocol implemented by loadable orchestrator kernel modules."""
+
     name: str
 
-    def on_load(self, api: KernelAPI) -> None:
-        """Lifecycle hook: Called when module is registered/loaded."""
+    def on_load(self, api: KernelAPI) -> MaybeAwaitableNone:
         ...
 
-    def on_unload(self) -> None:
-        """Lifecycle hook: Called when module is disabled/unloaded."""
+    def on_unload(self) -> MaybeAwaitableNone:
         ...
 
-    def before_task(self, task: Any, context: dict[str, Any]) -> None:
-        """Lifecycle hook: Pre-task interceptor."""
+    def before_task(self, task: object, context: TaskContextMap) -> None:
         ...
 
-    def after_task(self, task: Any, result: Any, context: dict[str, Any]) -> None:
-        """Lifecycle hook: Post-task interceptor."""
+    def after_task(self, task: object, result: object, context: TaskContextMap) -> None:
         ...
 
-    def finalize(self) -> dict[str, Any]:
-        """Finalize state and return summary for orchestration reporting."""
+    def finalize(self) -> ModuleStateMap:
         ...

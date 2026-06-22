@@ -7,8 +7,7 @@ from core.core.models import Task, TaskStatus
 class LocalLLMAgent(BaseAgent):
     def __init__(self, agent_id: str = "local-llm-1", model_name: str = "qwen2.5:32b-instruct-q4_k_m") -> None:
         super().__init__(agent_id, ["plan", "docs", "research", "review", "test"])
-        self._provider = "local"
-        self._model = model_name
+        self.set_identity(provider="local", model_name=model_name)
 
     def run(self, task: Task, memory_context: dict | None = None):
         orchestrator = getattr(self, "orchestrator", None)
@@ -39,7 +38,7 @@ class LocalLLMAgent(BaseAgent):
             "Do not claim file edits or commands you did not perform."
         )
         prompt = "\n".join(prompt_parts)
-        target_model = str(getattr(task, 'assigned_model', '') or getattr(local_llm, 'model_name', self._model) or self._model).strip()
+        target_model = str(getattr(task, "assigned_model", "") or getattr(local_llm, "model_name", self.model_name) or self.model_name).strip()
         self._record_execution_prompt(task, prompt, memory_context, provider="local", model_name=target_model)
         response = local_llm.query(prompt, model_name=target_model, system=system)
         if not response:

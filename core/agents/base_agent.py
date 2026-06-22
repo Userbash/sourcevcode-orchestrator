@@ -1,15 +1,35 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Protocol, runtime_checkable
+
 from core.core.host_bridge import HostBridge
 from core.core.kernel_api import KernelAPI
 from core.core.models import AgentHealth, AgentResult, AgentStatus, ResultOutput, Task, TaskStatus
 
 
+
+
+@runtime_checkable
+class PromptRecorder(Protocol):
+    def record_execution_prompt(
+        self,
+        task: Task,
+        *,
+        agent_id: str,
+        provider: str,
+        model_name: str,
+        prompt: str,
+        memory_context: dict | None = None,
+    ) -> None:
+        ...
+
 class BaseAgent(ABC):
     def __init__(self, agent_id: str, capabilities: list[str]) -> None:
         self.agent_id = agent_id
         self.capabilities = capabilities
+        self.provider = "local"
+        self.model_name = "unknown"
         self.active_tasks = 0
         self.queue_depth = 0
         self.avg_latency_ms = 0.0
@@ -38,6 +58,13 @@ class BaseAgent(ABC):
 
     def get_api(self) -> KernelAPI | None:
         return self._api
+
+    def set_identity(self, *, provider: str, model_name: str) -> None:
+        self.provider = provider
+        self.model_name = model_name
+        # Keep legacy fields in sync while older modules still reference them.
+        self._provider = provider
+        self._model = model_name
 
     @staticmethod
     def _memory_brief(memory_context: dict | None = None, *, max_chars: int = 1600) -> str:
@@ -68,21 +95,33 @@ class BaseAgent(ABC):
             return text
         return text[: max(0, max_chars - 3)].rstrip() + "..."
 
+    @staticmethod
+    def _trusted_memory_summary(memory_context: dict | None = None, *, max_chars: int = 180) -> str:
+        memory = memory_context or {}
+        if not memory.get("trained_memory_trusted"):
+            return ""
+        brief = str(memory.get("trained_memory_brief", "") or "").strip()
+        if len(brief) < 40:
+            return ""
+        return brief[:max_chars]
+
     def _record_execution_prompt(self, task: Task, prompt: str, memory_context: dict | None = None, *, provider: str | None = None, model_name: str | None = None) -> None:
         api = self.get_api()
         layered = api.get_context("layered_context_memory") if api and hasattr(api, "get_context") else None
-        if layered and hasattr(layered, "record_execution_prompt"):
+        if isinstance(layered, PromptRecorder):
             try:
                 layered.record_execution_prompt(
                     task,
                     agent_id=self.agent_id,
-                    provider=provider or getattr(self, "provider", None) or getattr(self, "_provider", "local"),
-                    model_name=model_name or getattr(self, "model_name", None) or getattr(self, "_model", "unknown"),
+                    provider=provider or self.provider,
+                    model_name=model_name or self.model_name,
                     prompt=prompt,
                     memory_context=memory_context,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Prompt journaling must not break task execution, but keep the
+                # agent health surface honest when telemetry recording fails.
+                self.last_error = f"prompt_record_failed: {exc}"
 
     @abstractmethod
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
@@ -113,8 +152,8 @@ class BaseAgent(ABC):
             test_results=[],
             diff="",
         )
-        resolved_provider = provider if provider is not None else getattr(self, "provider", None) or getattr(self, "_provider", None)
-        resolved_model_name = model_name if model_name is not None else getattr(self, "model_name", None) or getattr(self, "_model", None)
+        resolved_provider = provider if provider is not None else self.provider
+        resolved_model_name = model_name if model_name is not None else self.model_name
         return AgentResult(
             task_id=task.task_id,
             agent_id=self.agent_id,

@@ -168,6 +168,29 @@ def test_provider_inventory_service_normalizes_mimo_aliases():
     assert ProviderInventoryService._normalize_provider("github-models") == "mimo"
 
 
+def test_provider_inventory_service_marks_invalid_api_key_as_auth_failed():
+    reason, remediation = ProviderInventoryService._row_reason('mimo', {
+        'model': 'xiaomi/mimo-v2.5-pro',
+        'error': 'Invalid API Key: Please provide valid API Key',
+        'status_code': 401,
+    })
+
+    assert reason == 'auth_failed'
+    assert 'credentials' in remediation
+
+
+def test_provider_inventory_service_disables_mimo_via_env(monkeypatch):
+    monkeypatch.setenv('AI_BRIDGE_MIMO_ENABLED', 'false')
+
+    service = ProviderInventoryService()
+    entry = service._mimo_entry(force_refresh=True)
+
+    assert entry.source == 'disabled_by_env'
+    assert entry.error == 'mimo_disabled_by_env'
+    assert entry.diagnostics['enabled'] is False
+    assert service.refresh_mimo_usable_snapshot(force_refresh=True)['status'] == 'disabled'
+
+
 def test_provider_inventory_service_auto_refreshes_stale_snapshot(tmp_path, monkeypatch):
     snapshot = tmp_path / "provider_inventory_snapshot.json"
     snapshot.write_text(json.dumps({
@@ -256,3 +279,95 @@ def test_provider_inventory_service_stale_when_sources_newer_than_snapshot(tmp_p
     service = ProviderInventoryService()
 
     assert service._snapshot_is_stale({"updated_at": 100, "providers": {}}) is True
+
+
+def test_provider_inventory_service_selects_openai_probe_models_with_priority(monkeypatch):
+    monkeypatch.setenv("CODEX_OPENAI_MODEL", "gpt-5.4-mini")
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "claude-sonnet-4-6,gpt-5.5")
+
+    selected = ProviderInventoryService._select_openai_probe_models(
+        ["gpt-5.5", "claude-sonnet-4-6", "deepseek-v4-flash", "qwen3.7-max"],
+        default_model="gpt-5.4-mini",
+        limit=3,
+    )
+
+    assert selected == ["gpt-5.4-mini", "claude-sonnet-4-6", "gpt-5.5"]
+
+
+def test_provider_inventory_service_refreshes_openai_runtime_inventory(monkeypatch, tmp_path):
+    calls = {}
+
+    class _Registry:
+        def get_models(self, force_refresh=False):
+            calls["force_refresh"] = force_refresh
+            return ["gpt-5.5", "claude-sonnet-4-6", "deepseek-v4-flash"]
+
+        def diagnostics(self):
+            return {"ok": True, "source": "live", "endpoint": "https://codex.sale/v1/models"}
+
+    async def _fake_probe(self, **kwargs):
+        calls["probe_kwargs"] = kwargs
+        return [
+            {
+                "model": "gpt-5.5",
+                "chat_completions": {"ok": True, "status_code": 200, "error": None, "response_sample": "ok", "endpoint": "chat_completions"},
+                "responses": {"ok": True, "status_code": 200, "error": None, "response_sample": "ok", "endpoint": "responses"},
+                "fully_routable": True,
+            },
+            {
+                "model": "claude-sonnet-4-6",
+                "chat_completions": {"ok": True, "status_code": 200, "error": None, "response_sample": "ok", "endpoint": "chat_completions"},
+                "responses": {"ok": False, "status_code": 400, "error": "unsupported", "response_sample": "", "endpoint": "responses"},
+                "fully_routable": False,
+            },
+        ]
+
+    monkeypatch.setattr("core.core.provider_inventory_service.OpenAIModelRegistry", _Registry)
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._probe_openai_runtime_matrix_async", _fake_probe)
+    monkeypatch.setattr("core.core.provider_inventory_service.resolve_openai_provider_config", lambda: type("Cfg", (), {
+        "api_key": "openai_usable_key_value_1234567890",
+        "base_url": "https://codex.sale/v1",
+        "models_endpoint": "https://codex.sale/v1/models",
+        "chat_completions_endpoint": "https://codex.sale/v1/chat/completions",
+        "responses_endpoint": "https://codex.sale/v1/responses",
+        "default_model": "gpt-5.4-mini",
+    })())
+
+    def _fake_sync(models, *, base_url=""):
+        calls["models"] = list(models)
+        calls["base_url"] = base_url
+        return {"orchestrator_templates_path": "templates.json"}
+
+    monkeypatch.setattr("core.core.provider_inventory_service.sync_openai_compatible_artifacts", _fake_sync)
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(tmp_path / "openai_runtime_inventory.json"))
+
+    service = ProviderInventoryService()
+    payload = service.refresh_openai_runtime_inventory(force_refresh=True, probe_limit=2)
+
+    assert calls["force_refresh"] is True
+    assert calls["models"] == ["gpt-5.5", "claude-sonnet-4-6", "deepseek-v4-flash"]
+    assert payload["selected_model_count"] == 2
+    assert payload["validated_model_count"] == 2
+    assert payload["fully_routable_count"] == 1
+    assert payload["fully_routable_models"] == ["gpt-5.5"]
+    assert payload["artifact_sync"]["orchestrator_templates_path"] == "templates.json"
+
+
+def test_provider_inventory_service_openai_entry_embeds_runtime_inventory(monkeypatch):
+    monkeypatch.setattr(
+        ProviderInventoryService,
+        "refresh_openai_runtime_inventory",
+        lambda self, **kwargs: {
+            "registry_diagnostics": {"ok": True, "source": "live"},
+            "artifact_sync": {"orchestrator_templates_path": "templates.json"},
+            "models": ["gpt-5.5", "claude-sonnet-4-6"],
+            "validated_models": [],
+        },
+    )
+
+    service = ProviderInventoryService()
+    entry = service._openai_entry(force_refresh=True)
+
+    assert entry.models == ["gpt-5.5", "claude-sonnet-4-6"]
+    assert entry.source == "live"
+    assert entry.diagnostics["runtime_inventory"]["artifact_sync"]["orchestrator_templates_path"] == "templates.json"

@@ -49,6 +49,7 @@ from .qt_dev_box_module import QtDevBoxModule
 from .model_usage_module import ModelUsageModule
 from .local_model_manager_module import LocalModelManagerModule
 from .provider_budget_router import ProviderBudgetRouter
+from .mimo_status import mimo_enabled, mimo_failure_threshold, mimo_failure_window_sec, mimo_suppression_ttl_sec
 from .provider_inventory_service import ProviderInventoryService
 from .model_replacement_policy import ModelReplacementPolicy
 from .cold_boot_module import ColdBootModule
@@ -564,6 +565,21 @@ class Orchestrator:
         else:
             self.log("warning", "[EASY_DIFFUSION] Autostart could not confirm readiness.")
 
+    def _launch_background_bootstrap(self, name: str, target: Callable[[], None]) -> None:
+        def _runner() -> None:
+            try:
+                target()
+            except Exception as exc:
+                self.log("warning", f"[BOOTSTRAP:{name}] Background bootstrap failed: {exc}")
+
+        thread = threading.Thread(target=_runner, name=f"bootstrap-{name}", daemon=True)
+        thread.start()
+
+    def _start_nonblocking_autostarts(self) -> None:
+        self._launch_background_bootstrap("local_llm", self._autostart_local_llm)
+        self._launch_background_bootstrap("ai_kernel", self._autostart_ai_kernel)
+        self._launch_background_bootstrap("easy_diffusion", self._autostart_easy_diffusion)
+
     def __init__(self, registry: AgentRegistry | None = None, retry_limit: int = 3, idle_shutdown_sec: int = 900, verbose_orchestrator: bool = False, json_console: bool = False) -> None:
         self.local_agents: dict[str, BaseAgent] = {}
         self.results: dict[str, AgentResult] = {}
@@ -590,6 +606,7 @@ class Orchestrator:
         self.message_bus = components.message_bus
         self.healthcheck = components.healthcheck
         self.healthcheck.set_module_state_source(self.module_state)
+        self.healthcheck.set_local_health_resolver(self._local_agent_health)
         self.availability = ModelAvailability()
         self.provider_inventory = ProviderInventoryService()
         self.model_replacement_policy = ModelReplacementPolicy()
@@ -744,9 +761,7 @@ class Orchestrator:
         # advisory context and readiness checks during kernel boot.
         if not self._testing_mode():
             self.module_manager.load("local_llm")
-        self._autostart_local_llm()
-        self._autostart_ai_kernel()
-        self._autostart_easy_diffusion()
+        self._start_nonblocking_autostarts()
         # Register default orchestrator agent to handle sourcecraft and orchestrator capability tasks
         self.attach_local_agent("orchestrator", OrchestratorAgent("orchestrator"), agent_type="orchestrator", critical=True, model_name="orchestrator-core", provider="local")
         if not self._testing_mode():
@@ -922,6 +937,114 @@ class Orchestrator:
         self._provider_inventory_snapshot["replacement_policy"] = replacement
         return replacement
 
+    @staticmethod
+    def _suppression_reason_to_error_type(reason: str) -> str:
+        normalized = str(reason or "").strip().lower()
+        if normalized in {"auth_failed", "auth_fail", "github_pat_not_supported", "cli_missing_or_unready", "forbidden"}:
+            return "auth_fail"
+        if normalized in TIMEOUT_ERROR_TYPES or normalized in {"timeout", "offline", "tcp_probe_failed"}:
+            return "api_timeout"
+        if normalized == "quota_exceeded":
+            return "quota_exhaustion"
+        return "probe_failed"
+
+    def _sync_provider_suppression(self, providers: dict[str, Any], participation: dict[str, Any]) -> dict[str, Any]:
+        status_rows: dict[str, dict[str, Any]] = {}
+        cached = self.availability.cached_report() if hasattr(self.availability, "cached_report") else {}
+        if isinstance(cached, dict):
+            for provider_name, payload in cached.items():
+                if isinstance(payload, dict):
+                    status_rows[self._normalize_provider(provider_name)] = dict(payload)
+
+        active_providers: set[str] = set()
+        available_providers: set[str] = set()
+        unusable_by_provider: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+        for row in participation.get("active_now", []) if isinstance(participation, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            provider = self._normalize_provider(str(row.get("provider") or ""))
+            if provider:
+                active_providers.add(provider)
+
+        for row in participation.get("available_but_not_wired_directly", []) if isinstance(participation, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            provider = self._normalize_provider(str(row.get("provider") or ""))
+            if provider:
+                available_providers.add(provider)
+
+        for row in participation.get("present_but_unusable", []) if isinstance(participation, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            provider = self._normalize_provider(str(row.get("provider") or ""))
+            if provider:
+                unusable_by_provider[provider].append(row)
+
+        summary = {"suppressed": {}, "released": []}
+        known_providers = {
+            self._normalize_provider(name)
+            for name in list(providers.keys()) + list(status_rows.keys()) + list(unusable_by_provider.keys())
+        }
+        for provider in sorted(item for item in known_providers if item):
+            provider_payload = providers.get(provider, {}) if isinstance(providers, dict) else {}
+            provider_status = status_rows.get(provider, {})
+            status_value = str(provider_status.get("status") or "").strip().lower()
+            error_value = str(provider_status.get("error") or "").strip().lower()
+            diagnostics = provider_status.get("diagnostics") if isinstance(provider_status.get("diagnostics"), dict) else {}
+            suppress_reason = ""
+            ttl_seconds = 300
+
+            if provider == "mimo" and not mimo_enabled():
+                suppress_reason = "mimo_disabled_by_env"
+                ttl_seconds = mimo_suppression_ttl_sec()
+            elif provider == "mimo":
+                mimo_snapshot = diagnostics.get("snapshot") if isinstance(diagnostics.get("snapshot"), dict) else {}
+                failed_count = int(mimo_snapshot.get("failed_count") or 0) if isinstance(mimo_snapshot, dict) else 0
+                report_updated_at = str(mimo_snapshot.get("report_updated_at") or "") if isinstance(mimo_snapshot, dict) else ""
+                report_age_ok = True
+                if report_updated_at:
+                    try:
+                        report_age_ok = (datetime.now(UTC) - datetime.fromisoformat(report_updated_at)).total_seconds() <= mimo_failure_window_sec()
+                    except Exception:
+                        report_age_ok = True
+                if failed_count >= mimo_failure_threshold() and report_age_ok and status_value != "healthy":
+                    suppress_reason = error_value or f"mimo_failure_threshold_reached:{failed_count}"
+                    ttl_seconds = mimo_suppression_ttl_sec()
+
+            if not suppress_reason and status_value in {"auth_failed", "quota_exceeded", "timeout", "offline"}:
+                suppress_reason = error_value or status_value
+                ttl_seconds = 900 if status_value == "auth_failed" else 300
+            elif provider in unusable_by_provider and provider not in active_providers and provider not in available_providers:
+                reasons = [str(row.get("reason") or "").strip().lower() for row in unusable_by_provider[provider] if str(row.get("reason") or "").strip()]
+                if reasons:
+                    unique_reasons = list(dict.fromkeys(reasons))
+                    hard_reasons = {"github_pat_not_supported", "auth_failed", "forbidden", "cli_missing_or_unready"}
+                    if any(reason in hard_reasons for reason in unique_reasons):
+                        suppress_reason = unique_reasons[0]
+                        ttl_seconds = 900
+                    elif provider_payload and not bool(provider_payload.get("ok")):
+                        suppress_reason = unique_reasons[0]
+            elif provider_payload and not bool(provider_payload.get("ok")):
+                payload_error = str(provider_payload.get("error") or "").strip().lower()
+                if payload_error:
+                    suppress_reason = payload_error
+
+            if suppress_reason:
+                reason_key = self._suppression_reason_to_error_type(suppress_reason)
+                self.provider_budget_router.suppress_provider(provider, seconds=ttl_seconds, reason=suppress_reason)
+                summary["suppressed"][provider] = {
+                    "reason": suppress_reason,
+                    "error_type": reason_key,
+                    "ttl_seconds": ttl_seconds,
+                    "status": status_value or None,
+                }
+                continue
+
+            self.provider_budget_router.release_provider(provider)
+            summary["released"].append(provider)
+        return summary
+
     def _refresh_provider_inventory_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
         payload = self.provider_inventory.refresh(force_refresh=force_refresh)
         openai_entry = payload.get("openai", {}) if isinstance(payload, dict) else {}
@@ -933,6 +1056,13 @@ class Orchestrator:
                 diagnostics["worker_sync"] = template_sync
         participation = self.provider_inventory.build_participation_snapshot(self.registry.list_agents())
         self._provider_inventory_snapshot = {"updated_at": int(__import__("time").time()), "providers": payload, "participation": participation}
+        self._provider_inventory_snapshot["provider_suppression"] = self._sync_provider_suppression(
+            payload if isinstance(payload, dict) else {},
+            participation if isinstance(participation, dict) else {},
+        )
+        self._provider_inventory_snapshot["provider_budget_router"] = {
+            "global_suppression": self.provider_budget_router.suppression_snapshot(),
+        }
         self._update_model_replacement_snapshot()
         return self._provider_inventory_snapshot
 
@@ -1060,7 +1190,17 @@ class Orchestrator:
         if hasattr(self.message_bus, "register_pod"):
             self.message_bus.register_pod(agent_id, agent.capabilities)
         self._ensure_agent_worker(agent_id)
+        try:
+            self.registry.update_health(agent.health())
+        except Exception as exc:
+            self.log("warning", f"[KERNEL] Initial health probe failed for {agent_id}: {exc}")
         self.log("info", f"[KERNEL] Attached local agent pod: {agent_id} (TPP Enabled)")
+
+    def _local_agent_health(self, agent_id: str) -> AgentHealth | None:
+        agent = self.local_agents.get(agent_id)
+        if agent is None:
+            return None
+        return agent.health()
 
     def qt_dev_box(self) -> QtDevBoxModule | None:
         module = self.module_manager.get_module("qt_dev_box")
