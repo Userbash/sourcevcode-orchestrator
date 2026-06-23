@@ -17,6 +17,7 @@ from core.core.provider_credentials import credential_snapshot
 
 load_env_file(".env")
 load_env_file(".env.bridge", override=True)
+load_env_file(".env.local.secrets", override=True)
 load_env_file(".env.gemini.local", override=True)
 
 

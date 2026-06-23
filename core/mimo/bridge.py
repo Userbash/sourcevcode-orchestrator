@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
-import json
-import logging
-import subprocess
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from core.core.mimo_provider import configured_native_mimo_models, normalize_mimo_model_name
 
 
 @dataclass(slots=True)
@@ -26,79 +23,43 @@ class MimoModelSnapshot:
 class MimoAsyncBridge:
     def __init__(self) -> None:
         self._cached_models: list[MimoModelSnapshot] = []
-        self.is_cli_alive = True
+        self.is_catalog_available = False
 
-    def _finalize_models(self, output: str) -> list[MimoModelSnapshot]:
-        models = self._parse_models_output(output)
-        self._cached_models = models
-        self.is_cli_alive = True
-        return models
+    def _catalog(self) -> list[MimoModelSnapshot]:
+        return [
+            MimoModelSnapshot(
+                full_id=model,
+                id=normalize_mimo_model_name(model),
+                provider='mimo',
+                status='ONLINE',
+                context_window=None,
+                capability_tags=['code', 'review', 'plan', 'test', 'docs', 'research'],
+                cost_class='remote',
+                ready=True,
+                blocked=False,
+            )
+            for model in configured_native_mimo_models()
+        ]
 
     async def get_models(self) -> list[MimoModelSnapshot]:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "mimo", "models", "--verbose",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                self.is_cli_alive = False
-                logger.critical("MIMO CLI failed: %s", stderr.decode("utf-8", errors="ignore").strip())
-                return []
-            return self._finalize_models(stdout.decode("utf-8", errors="ignore"))
-        except FileNotFoundError:
-            self.is_cli_alive = False
-            logger.critical("MIMO CLI not found in PATH")
-            return []
-        except Exception as exc:
-            self.is_cli_alive = False
-            logger.critical("Unexpected MIMO bridge failure: %s", exc)
-            return []
+        self._cached_models = self._catalog()
+        self.is_catalog_available = bool(self._cached_models)
+        return list(self._cached_models)
 
     def get_models_sync(self) -> list[MimoModelSnapshot]:
-        try:
-            proc = subprocess.run(
-                ["mimo", "models", "--verbose"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-            if proc.returncode != 0:
-                self.is_cli_alive = False
-                logger.critical("MIMO CLI failed: %s", (proc.stderr or proc.stdout).strip())
-                return []
-            return self._finalize_models(proc.stdout)
-        except FileNotFoundError:
-            self.is_cli_alive = False
-            logger.critical("MIMO CLI not found in PATH")
-            return []
-        except Exception as exc:
-            self.is_cli_alive = False
-            logger.critical("Unexpected MIMO bridge failure: %s", exc)
-            return []
+        self._cached_models = self._catalog()
+        self.is_catalog_available = bool(self._cached_models)
+        return list(self._cached_models)
 
     def get_cached_models(self) -> list[MimoModelSnapshot]:
         return list(self._cached_models)
 
     async def ping_model(self, model_name: str) -> bool:
-        normalized = (model_name or "").strip().lower()
+        normalized = str(model_name or '').strip().lower()
         if not normalized:
             return False
-
-        # Current mimo CLI does not expose a dedicated `ping` subcommand.
-        # Treat model discovery as the compatibility health-check so the
-        # director can stay operational with the installed CLI.
-        cached = self.get_cached_models()
-        if not cached:
-            cached = await self.refresh_cache()
-        for model in cached:
-            full_id = (model.full_id or "").strip().lower()
-            short_id = (model.id or "").strip().lower()
-            if normalized in {full_id, short_id}:
-                return str(model.status or "").lower() not in {"offline", "error", "disabled"}
-        return False
+        cached = self.get_cached_models() or await self.refresh_cache()
+        return any(normalized in {str(item.full_id).lower(), str(item.id).lower()} for item in cached)
 
     async def refresh_cache(self) -> list[MimoModelSnapshot]:
         return await self.get_models()
@@ -107,47 +68,7 @@ class MimoAsyncBridge:
         return self.get_models_sync()
 
     def _parse_models_output(self, output: str) -> list[MimoModelSnapshot]:
-        if not output.strip():
-            return []
-        results: list[MimoModelSnapshot] = []
-        lines = output.strip().splitlines()
-        i = 0
-        while i < len(lines):
-            full_id = lines[i].strip()
-            i += 1
-            if not full_id:
-                continue
-            payload = []
-            depth = 0
-            started = False
-            while i < len(lines):
-                line = lines[i]
-                payload.append(line)
-                depth += line.count("{")
-                depth -= line.count("}")
-                started = started or "{" in line
-                i += 1
-                if started and depth <= 0:
-                    break
-            try:
-                data = json.loads("\n".join(payload))
-            except json.JSONDecodeError:
-                continue
-            capability_tags = data.get("capabilities") or data.get("capabilityTags") or []
-            if not isinstance(capability_tags, list):
-                capability_tags = []
-            results.append(MimoModelSnapshot(
-                full_id=full_id,
-                id=str(data.get("id", "")),
-                provider=str(data.get("providerID", "")),
-                status=str(data.get("status", "")),
-                context_window=(data.get("limit") or {}).get("context"),
-                capability_tags=[str(item).strip() for item in capability_tags if str(item).strip()],
-                cost_class=str(data.get("costClass") or data.get("cost_class") or "").strip() or None,
-                ready=bool(data.get("ready")) if "ready" in data else None,
-                blocked=bool(data.get("blocked", False)),
-            ))
-        return results
+        return self._catalog()
 
 
 class MimoHealthChecker:
@@ -171,9 +92,5 @@ class MimoHealthChecker:
 
     async def _run(self) -> None:
         while True:
-            models = await self.bridge.refresh_cache()
-            for model in models:
-                ok = await self.bridge.ping_model(model.id or model.full_id)
-                if not ok:
-                    model.status = "OFFLINE"
+            await self.bridge.refresh_cache()
             await asyncio.sleep(self.interval_sec)

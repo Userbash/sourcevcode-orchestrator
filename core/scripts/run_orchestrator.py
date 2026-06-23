@@ -27,6 +27,10 @@ def _load_runtime_env() -> None:
     load_env_file("/app/.env.bridge")
 
 
+def _attach_placeholder_agents() -> bool:
+    return os.getenv("AI_BRIDGE_ATTACH_PLACEHOLDER_AGENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _ensure_memory_dirs() -> None:
     configured_dir = os.getenv("AI_BRIDGE_MEMORY_STORE_DIR", "").strip()
     if configured_dir:
@@ -65,18 +69,20 @@ def _attach_default_agents(orchestrator: Orchestrator) -> None:
     local_model = os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")
     ai_kernel_model = os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m")
 
-    orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="planner", critical=True, model_name="gpt-planner", provider="openai")
+    if _attach_placeholder_agents():
+        orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="planner", critical=True, model_name="gpt-planner", provider="openai")
     orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="codex", critical=True, model_name=codex_model, provider="openai")
     orchestrator.sync_openai_template_workers(enabled=has_usable_credential("OPENAI_API_KEY"), primary_model=codex_model)
     orchestrator.attach_local_agent("antigravity-cli-1", AntigravityCLIAgent("antigravity-cli-1", security_manager), agent_type="external_ai", critical=False, model_name="antigravity-cli", provider="google")
     orchestrator.attach_local_agent("mistral-1", MistralAgent("mistral-1", security_manager), agent_type="external_ai", critical=False, model_name="mistral-large-latest", provider="mistral")
-    orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
-    orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
+    if _attach_placeholder_agents():
+        orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
+        orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
     orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", local_model), agent_type="custom", critical=False, model_name=local_model, provider="local")
     orchestrator.attach_local_agent("ai-kernel-qwen36-1", AIKernelAgent("ai-kernel-qwen36-1"), agent_type="custom", critical=False, model_name=ai_kernel_model, provider="ai_kernel")
 
     if shutil.which("mimo"):
-        mimo_default_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto")
+        mimo_default_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro")
         orchestrator.attach_local_agent("mimo-router-1", MimoAgent("mimo-router-1", default_model=mimo_default_model), agent_type="external_ai", critical=False, model_name=mimo_default_model, provider="mimo")
 
 

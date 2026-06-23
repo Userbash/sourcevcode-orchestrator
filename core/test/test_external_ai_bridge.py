@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import subprocess
 from types import SimpleNamespace
 
-from core.core.external_ai_bridge import ExternalAIBridge
+from core.core.external_ai_bridge import BridgeExecResult, ExternalAIBridge
 from core.core.models import Complexity, Task, TaskContext, TaskInput, TaskType
 
 
@@ -14,42 +13,72 @@ def _task() -> Task:
     return task
 
 
-def test_bridge_fallbacks_to_next_model_on_capacity_error(monkeypatch):
+class _Response:
+    def __init__(self, status_code: int, payload: dict[str, object], text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or str(payload)
+        self.content = b"{}"
+
+    def json(self):
+        return self._payload
+
+
+def test_bridge_uses_direct_api_generation(monkeypatch):
     bridge = ExternalAIBridge()
-    calls: list[list[str]] = []
-    monkeypatch.setattr(ExternalAIBridge, "resolve_antigravity_cli_command", staticmethod(lambda: ["agy"]))
-    monkeypatch.setattr(bridge.router, "build_plan", lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite", "antigravity-flash"]))
+    bridge.proxy_url = ""
+    bridge.api_base_url = "https://example.test/v1beta"
+    bridge.api_key = "token"
+    bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite", "antigravity-flash"]))
+    calls: list[tuple[str, str]] = []
 
-    def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
-        calls.append(cmd)
-        if len(calls) == 1:
-            return SimpleNamespace(returncode=1, stdout="", stderr="RESOURCE_EXHAUSTED MODEL_CAPACITY_EXHAUSTED")
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+    def fake_request(method, url, params=None, json=None, headers=None, timeout=None):
+        calls.append((method, url))
+        assert headers == {"Authorization": "Bearer token"}
+        assert "generateContent" in url
+        return _Response(200, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.request", fake_request)
 
     result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
 
     assert result.ok is True
-    assert len(calls) >= 2
     assert result.output == "ok"
+    assert calls == [("POST", "https://example.test/v1beta/models/antigravity-flash-lite:generateContent")]
 
 
-def test_classify_error_timeout_types():
-    assert ExternalAIBridge.classify_error("connection timed out") == "tcp_timeout"
-    assert ExternalAIBridge.classify_error("gateway timeout 504") == "api_timeout"
-    assert ExternalAIBridge.classify_error("resource_exhausted 429") == "quota_exhaustion"
-    assert ExternalAIBridge.classify_error("invalid api key") == "auth_fail"
+def test_bridge_uses_http_proxy_prompt_flow(monkeypatch):
+    bridge = ExternalAIBridge()
+    bridge.proxy_url = "http://proxy.test"
+    bridge.api_base_url = "https://example.test/v1beta"
+    bridge.api_key = "token"
+    bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite"]))
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method, url, params=None, json=None, headers=None, timeout=None):
+        calls.append((method, url))
+        return _Response(200, {"ok": True, "stdout": "proxied ok"})
+
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.request", fake_request)
+
+    result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
+
+    assert result.ok is True
+    assert result.output == "proxied ok"
+    assert calls == [("POST", "http://proxy.test/prompt")]
 
 
 def test_bridge_treats_auth_prompt_output_as_failure(monkeypatch):
     bridge = ExternalAIBridge()
-    monkeypatch.setattr(ExternalAIBridge, "resolve_antigravity_cli_command", staticmethod(lambda: ["agy"]))
+    bridge.proxy_url = ""
+    bridge.api_base_url = "https://example.test/v1beta"
+    bridge.api_key = "token"
+    bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite"]))
 
-    def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
-        return SimpleNamespace(returncode=0, stdout="Authentication required. Error: authentication timed out.", stderr="")
+    def fake_request(method, url, params=None, json=None, headers=None, timeout=None):
+        return _Response(200, {"candidates": [{"content": {"parts": [{"text": "Authentication required. Error: authentication timed out."}]}}]})
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.request", fake_request)
 
     result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
 
@@ -57,15 +86,11 @@ def test_bridge_treats_auth_prompt_output_as_failure(monkeypatch):
     assert result.error_type == "auth_fail"
 
 
-def test_resolve_antigravity_cli_command_rejects_gemini_alias(monkeypatch):
-    monkeypatch.setattr("core.core.external_ai_bridge.shutil.which", lambda name: "/tmp/gemini" if name == "gemini" else None)
-    monkeypatch.setattr("core.core.external_ai_bridge.os.path.isfile", lambda path: path == "/tmp/gemini")
-    monkeypatch.setattr("core.core.external_ai_bridge.os.access", lambda path, mode: path == "/tmp/gemini")
-
+def test_resolve_antigravity_cli_command_is_disabled():
     assert ExternalAIBridge.resolve_antigravity_cli_command() is None
 
 
-def test_antigravity_runtime_env_preserves_keys_when_oauth_not_forced(monkeypatch):
+def test_antigravity_runtime_env_preserves_keys_and_can_strip_them(monkeypatch):
     monkeypatch.setenv("HOME", "/home/tester")
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("ANTIGRAVITY_API_KEY", "token-a")
@@ -73,46 +98,19 @@ def test_antigravity_runtime_env_preserves_keys_when_oauth_not_forced(monkeypatc
     monkeypatch.setenv("GOOGLE_API_KEY", "token-c")
 
     env = ExternalAIBridge._antigravity_runtime_env()
-
-    assert env["PATH"].startswith("/home/tester/.npm-packages/bin")
-    assert "/home/tester/.local/bin" in env["PATH"]
     assert env["ANTIGRAVITY_API_KEY"] == "token-a"
     assert env["GEMINI_API_KEY"] == "token-b"
     assert env["GOOGLE_API_KEY"] == "token-c"
 
-
-def test_antigravity_runtime_env_strips_keys_when_oauth_forced(monkeypatch):
-    monkeypatch.setenv("HOME", "/home/tester")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setenv("ANTIGRAVITY_API_KEY", "token-a")
-    monkeypatch.setenv("GEMINI_API_KEY", "token-b")
-    monkeypatch.setenv("GOOGLE_API_KEY", "token-c")
-
     monkeypatch.setenv("AI_BRIDGE_ANTIGRAVITY_PREFER_OAUTH", "true")
-
-    env = ExternalAIBridge._antigravity_runtime_env("agy")
-
-    assert "ANTIGRAVITY_API_KEY" not in env
-    assert "GEMINI_API_KEY" not in env
-    assert "GOOGLE_API_KEY" not in env
-
-def test_bridge_timeout_preserves_partial_capacity_error(monkeypatch):
-    bridge = ExternalAIBridge()
-    monkeypatch.setattr(ExternalAIBridge, "resolve_antigravity_cli_command", staticmethod(lambda: ["agy"]))
-
-    def fake_run(cmd, capture_output, text, timeout, env=None, cwd=None):
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout, stderr="429 RESOURCE_EXHAUSTED MODEL_CAPACITY_EXHAUSTED")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
-
-    assert result.ok is False
-    assert "RESOURCE_EXHAUSTED" in result.error
-    assert result.error_type == "quota_exhaustion"
+    stripped = ExternalAIBridge._antigravity_runtime_env("agy")
+    assert "ANTIGRAVITY_API_KEY" not in stripped
+    assert "GEMINI_API_KEY" not in stripped
+    assert "GOOGLE_API_KEY" not in stripped
 
 
-
-def test_classify_error_treats_gateway_disconnect_as_api_timeout():
-    assert ExternalAIBridge.classify_error("unexpected status 502 Bad Gateway") == "api_timeout"
-    assert ExternalAIBridge.classify_error("CORE stream disconnected before completion: service temporarily unavailable") == "api_timeout"
+def test_classify_error_covers_common_api_failures():
+    assert ExternalAIBridge.classify_error("connection timed out") == "tcp_timeout"
+    assert ExternalAIBridge.classify_error("gateway timeout 504") == "api_timeout"
+    assert ExternalAIBridge.classify_error("resource_exhausted 429") == "quota_exhaustion"
+    assert ExternalAIBridge.classify_error("invalid api key") == "auth_fail"

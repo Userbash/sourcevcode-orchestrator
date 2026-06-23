@@ -126,8 +126,6 @@ class MessageBus:
                 if msg is not None:
                     if isinstance(msg, P2PMessage) and msg.requires_ack:
                         self.ack(msg.message_id, AckStatus.RECEIVED, agent_id)
-                    elif isinstance(msg, TaskEnvelope):
-                        self.ack(msg.task_id, AckStatus.RECEIVED, agent_id)
                     return msg
             except Exception:
                 pass
@@ -135,8 +133,6 @@ class MessageBus:
         message = self.consume(self.agent_topic(agent_id))
         if isinstance(message, P2PMessage) and message.requires_ack:
             self.ack(message.message_id, AckStatus.RECEIVED, agent_id)
-        elif isinstance(message, TaskEnvelope):
-            self.ack(message.task_id, AckStatus.RECEIVED, agent_id)
         return message
 
     def ack(self, message_id: str, status: AckStatus | TaskStatus | str, received_by: str, reason: str | None = None) -> MessageAck:

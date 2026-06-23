@@ -4,8 +4,8 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from .orchestrator import Orchestrator
 from .task_submission_api import create_standard_task, normalize_user_payload
@@ -37,12 +37,18 @@ class TaskListener:
 
         return [normalized]
 
-
     def _write_result_file(self, task_id: str, result: dict[str, Any]) -> None:
         Path(self.result_dir).mkdir(parents=True, exist_ok=True)
         out = Path(self.result_dir) / f"{task_id}.json"
         with out.open("w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=True)
+
+    @staticmethod
+    def _materialize_task_payload(raw_task: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        payload = dict(raw_task)
+        task = create_standard_task(payload)
+        payload["task_id"] = task.task_id
+        return task, payload
 
     async def _process_payload(self, payload: Any) -> None:
         task_payloads = self._extract_task_payloads(payload)
@@ -50,9 +56,9 @@ class TaskListener:
             return
 
         for raw_task in task_payloads:
-            task = create_standard_task(raw_task)
+            task, stable_payload = self._materialize_task_payload(raw_task)
             logger.info("[LISTENER] Processing task: %s", task.task_id)
-            result_data = self.orchestrator.submit_user_task(raw_task, source="queue")
+            result_data = await self.orchestrator.submit_user_task_async(stable_payload, source="queue")
             self._write_result_file(task.task_id, result_data)
             logger.info(
                 "[LISTENER] Task %s completed with status %s",
@@ -78,8 +84,9 @@ class TaskListener:
     async def submit_user_input(self, user_input: str) -> dict[str, Any]:
         """Direct intake path for interactive environments without file queue."""
         task_payload = normalize_user_payload(user_input)
-        result = self.orchestrator.submit_user_task(task_payload, source="direct_input")
-        maybe_id = task_payload.get("task_id") if isinstance(task_payload, dict) else None
-        if isinstance(maybe_id, str) and maybe_id:
-            self._write_result_file(maybe_id, result)
+        if not isinstance(task_payload, dict):
+            return await self.orchestrator.submit_user_task_async(task_payload, source="direct_input")
+        task, stable_payload = self._materialize_task_payload(task_payload)
+        result = await self.orchestrator.submit_user_task_async(stable_payload, source="direct_input")
+        self._write_result_file(task.task_id, result)
         return result

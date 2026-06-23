@@ -1,0 +1,53 @@
+{
+  "profile_type": "combo",
+  "profile_key": "combo::mimo::xiaomi/mimo-v2.5-tts-voicedesign",
+  "provider_weights": {
+    "mimo": {
+      "quality": 1.2,
+      "budget": 0.9,
+      "vfs": 0.96
+    },
+    "local": {
+      "quality": 1.0,
+      "budget": 1.0,
+      "vfs": 1.0
+    },
+    "openai": {
+      "quality": 1.0,
+      "budget": 1.0,
+      "vfs": 1.0
+    },
+    "mistral": {
+      "quality": 1.0,
+      "budget": 1.0,
+      "vfs": 1.0
+    }
+  },
+  "model_class_weights": {
+    "mimo": {
+      "quality": 1.12,
+      "budget": 0.92
+    }
+  },
+  "thresholds": {
+    "success_rate": 0.87,
+    "avg_latency_ms": 1840,
+    "quality_min_confidence": 0.86
+  },
+  "default_context_depth": 5,
+  "budget_pressure": {
+    "high": 2400,
+    "medium": 4800
+  },
+  "quality_pressure": {
+    "high": 0.92,
+    "medium": 0.84
+  },
+  "metadata": {
+    "model_family": "mimo",
+    "provider_family": "xiaomi_mimo_native",
+    "native_direct": true,
+    "generated": true,
+    "tier": "standard_plus"
+  }
+}

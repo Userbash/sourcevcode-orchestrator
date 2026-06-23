@@ -151,6 +151,8 @@ class QualityReport(CompatModel):
     score: float = 0.0
     issues: list[str] = Field(default_factory=list)
     requires_review: bool = False
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    truth_basis: list[str] = Field(default_factory=list)
 
 
 class RoleProfile(CompatModel):

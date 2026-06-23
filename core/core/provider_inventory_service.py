@@ -4,7 +4,6 @@ import asyncio
 import concurrent.futures
 import json
 import os
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -15,7 +14,7 @@ from core.core.mistral_model_registry import MistralModelRegistry
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.openai_compatible_inventory import is_text_compatible_model, sync_openai_compatible_artifacts
 from core.core.openai_provider import resolve_openai_provider_config
-from core.mimo.bridge import MimoAsyncBridge
+from core.core.mimo_provider import configured_native_mimo_models, extract_mimo_response_text, fetch_mimo_model_catalog, invoke_mimo_native, sync_mimo_native_artifacts
 from core.core.mimo_status import mimo_enabled
 import httpx
 import requests
@@ -47,7 +46,6 @@ class ProviderInventoryService:
         self.openai = OpenAIModelRegistry()
         self.antigravity = AntigravityModelRegistry()
         self.mistral = MistralModelRegistry()
-        self.mimo_bridge = MimoAsyncBridge()
         self.mimo_enabled = mimo_enabled()
         self.mimo_auto_ping_enabled = self.mimo_enabled and os.getenv("AI_BRIDGE_MIMO_AUTO_PING_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
         try:
@@ -64,7 +62,7 @@ class ProviderInventoryService:
     @staticmethod
     def _normalize_provider(provider: str) -> str:
         raw = str(provider or "").strip().lower()
-        if raw in {"google", "antigravity", "gemini", "agy"}:
+        if raw in {"google", "antigravity", "gemini"}:
             return "antigravity"
         if raw in {"local_llm", "ollama", "local"}:
             return "local"
@@ -103,7 +101,7 @@ class ProviderInventoryService:
 
     @staticmethod
     def _generated_mimo_models() -> list[str]:
-        path = Path(os.getenv("OPENAI_MODELS_FULL_CACHE_PATH", "core/.cache/openai_models_full.json"))
+        path = Path(os.getenv("MIMO_MODELS_FULL_CACHE_PATH", "core/.cache/mimo_models_full.json"))
         cache_models: list[str] = []
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -113,15 +111,8 @@ class ProviderInventoryService:
         except Exception:
             pass
 
-        # Prefer the explicit cache when it already contains MIMO rows. Pulling in
-        # the generated catalog on top of a live cache makes restart-time inventory
-        # drift and broke the inventory contract in tests.
-        if any(str(model).lower().startswith("mimo-") for model in cache_models):
-            models = cache_models
-        else:
-            models = []
-
-        generated_root = Path(os.getenv("OPENAI_GENERATED_PROFILE_DIR", "core/mimo/profiles/generated/openai_compatible"))
+        models = cache_models if any("mimo-" in str(model).lower() for model in cache_models) else []
+        generated_root = Path(os.getenv("MIMO_GENERATED_PROFILE_DIR", "core/mimo/profiles/generated/mimo_native"))
         manifest_path = generated_root / "manifest.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -133,8 +124,8 @@ class ProviderInventoryService:
             if isinstance(manifest_models, list):
                 models.extend(str(item).strip() for item in manifest_models if str(item).strip())
 
-        model_profiles = manifest.get("model_profiles") if isinstance(manifest, dict) else []
         if not models:
+            model_profiles = manifest.get("model_profiles") if isinstance(manifest, dict) else []
             for rel_path in model_profiles if isinstance(model_profiles, list) else []:
                 profile_path = generated_root / str(rel_path)
                 try:
@@ -147,23 +138,27 @@ class ProviderInventoryService:
                 metadata = profile.get("metadata") if isinstance(profile.get("metadata"), dict) else {}
                 family = str(metadata.get("model_family") or "").strip().lower()
                 model_name = profile_key.split("model::", 1)[1].strip()
-                if model_name and (family == "mimo" or model_name.lower().startswith("mimo-")):
+                if model_name and (family == "mimo" or "mimo-" in model_name.lower()):
                     models.append(model_name)
 
         seen: set[str] = set()
         generated: list[str] = []
         for model in models:
-            lowered = model.lower()
-            if not lowered.startswith("mimo-") or model in seen:
+            model_name = str(model).strip()
+            lowered = model_name.lower()
+            normalized = model_name.split("/", 1)[1] if "/" in model_name else model_name
+            if not normalized.lower().startswith("mimo-") or normalized in seen:
                 continue
-            seen.add(model)
-            generated.append(model)
+            seen.add(normalized)
+            generated.append(normalized)
         return generated
 
     @classmethod
     def _inventory_source_paths(cls) -> list[Path]:
         report_dir = cls._report_dir()
         paths = [
+            Path(os.getenv("MIMO_MODELS_FULL_CACHE_PATH", "core/.cache/mimo_models_full.json")),
+            Path(os.getenv("MIMO_GENERATED_PROFILE_DIR", "core/mimo/profiles/generated/mimo_native")) / "manifest.json",
             Path(os.getenv("OPENAI_MODELS_FULL_CACHE_PATH", "core/.cache/openai_models_full.json")),
             Path(os.getenv("OPENAI_GENERATED_PROFILE_DIR", "core/mimo/profiles/generated/openai_compatible")) / "manifest.json",
             report_dir / "model_ping_report.json",
@@ -449,7 +444,7 @@ class ProviderInventoryService:
             if candidate and candidate not in seen:
                 unique.append(candidate)
                 seen.add(candidate)
-        preferred_prefixes = ('xiaomi/mimo-v2.5-pro', 'xiaomi/mimo-v2.5', 'xiaomi/mimo-v2-pro', 'xiaomi/mimo-v2-omni', 'mimo/mimo-auto')
+        preferred_prefixes = ('xiaomi/mimo-v2.5-pro', 'xiaomi/mimo-v2.5', 'xiaomi/mimo-v2-pro', 'xiaomi/mimo-v2-omni', 'xiaomi/mimo-v2-flash')
         for prefix in preferred_prefixes:
             for model in models:
                 if model.startswith(prefix):
@@ -477,62 +472,26 @@ class ProviderInventoryService:
         report_dir.mkdir(parents=True, exist_ok=True)
         now = time.time()
         if not force_refresh and self._last_mimo_auto_ping_at and now - self._last_mimo_auto_ping_at < self.mimo_auto_ping_interval_sec:
-            return {
-                'status': 'skipped',
-                'reason': 'interval_not_elapsed',
-                'next_refresh_in_sec': max(0, int(self.mimo_auto_ping_interval_sec - (now - self._last_mimo_auto_ping_at))),
-            }
-        snapshots = self.mimo_bridge.refresh_cache_sync()
-        inventory = []
-        for item in snapshots:
-            model_name = str(getattr(item, 'full_id', '') or getattr(item, 'id', '')).strip()
-            if model_name:
-                inventory.append(model_name)
-        if not inventory:
-            generated = self._generated_mimo_models()
-            inventory = [f'xiaomi/{name}' if '/' not in name else name for name in generated]
+            return {'status': 'skipped', 'reason': 'interval_not_elapsed', 'next_refresh_in_sec': max(0, int(self.mimo_auto_ping_interval_sec - (now - self._last_mimo_auto_ping_at)))}
+        inventory = configured_native_mimo_models()
         selected = self._select_mimo_probe_models(inventory)
         rows: list[dict[str, Any]] = []
         usable_rows: list[dict[str, Any]] = []
         for model_name in selected:
             row: dict[str, Any] = {'model': model_name}
-            try:
-                proc = subprocess.run(
-                    ['timeout', '15s', 'mimo', 'run', '-m', model_name, '--format', 'json', prompt],
-                    capture_output=True,
-                    text=True,
-                    timeout=25,
-                    check=False,
-                )
-                text_output = self._parse_mimo_text_events(proc.stdout)
-                row['exit_code'] = proc.returncode
-                if text_output:
-                    row['ok'] = True
-                    row['response_sample'] = text_output[:120]
-                    usable_rows.append({'model': model_name, 'ok': True, 'response_sample': text_output[:120], 'exit_code': proc.returncode})
-                else:
-                    row['ok'] = False
-                    row['error'] = (proc.stderr or proc.stdout or ('timeout' if proc.returncode == 124 else 'no_text_events')).strip()[:240]
-            except Exception as exc:
+            payload, error, status_code = invoke_mimo_native(model_name, prompt + ' and no reasoning', timeout_sec=20.0, max_completion_tokens=128, temperature=0.0)
+            text_output = extract_mimo_response_text(payload) if payload else ''
+            row['status_code'] = status_code
+            if text_output:
+                row['ok'] = True
+                row['response_sample'] = text_output[:120]
+                usable_rows.append({'model': model_name, 'ok': True, 'response_sample': text_output[:120], 'status_code': status_code})
+            else:
                 row['ok'] = False
-                row['error'] = str(exc)
+                row['error'] = str(error or 'no_text_events')[:240]
             rows.append(row)
-        report_payload = {
-            'provider': 'mimo',
-            'generated_at': int(now),
-            'inventory_count': len(inventory),
-            'probed_count': len(selected),
-            'ok': sum(1 for row in rows if row.get('ok')),
-            'failed': sum(1 for row in rows if not row.get('ok')),
-            'models': rows,
-        }
-        usable_payload = {
-            'provider': 'mimo',
-            'generated_at': int(now),
-            'usable_count': len(usable_rows),
-            'total': len(selected),
-            'models': usable_rows,
-        }
+        report_payload = {'provider': 'mimo', 'generated_at': int(now), 'inventory_count': len(inventory), 'probed_count': len(selected), 'ok': sum(1 for row in rows if row.get('ok')), 'failed': sum(1 for row in rows if not row.get('ok')), 'models': rows}
+        usable_payload = {'provider': 'mimo', 'generated_at': int(now), 'usable_count': len(usable_rows), 'total': len(selected), 'models': usable_rows}
         (report_dir / 'mimo_model_ping_report.json').write_text(json.dumps(report_payload, ensure_ascii=True, indent=2), encoding='utf-8')
         (report_dir / 'mimo_usable_models.json').write_text(json.dumps(usable_payload, ensure_ascii=True, indent=2), encoding='utf-8')
         self._last_mimo_auto_ping_at = now
@@ -637,79 +596,45 @@ class ProviderInventoryService:
 
     def _mimo_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
         if not self.mimo_enabled:
-            return ProviderInventoryEntry(
-                provider="mimo",
-                fetched_at=int(time.time()),
-                ok=False,
-                source="disabled_by_env",
-                models=[],
-                error="mimo_disabled_by_env",
-                diagnostics={"enabled": False, "disable_env": "AI_BRIDGE_MIMO_ENABLED"},
-            )
-        models: list[str] = []
-        error: str | None = None
-        source = "bridge_cache"
-        snapshots = list(self.mimo_bridge.get_cached_models())
-        loop_running = False
-        try:
-            asyncio.get_running_loop()
-            loop_running = True
-        except RuntimeError:
-            loop_running = False
-
-        if force_refresh or not snapshots:
+            return ProviderInventoryEntry(provider="mimo", fetched_at=int(time.time()), ok=False, source="disabled_by_env", models=[], error="mimo_disabled_by_env", diagnostics={"enabled": False, "disable_env": "AI_BRIDGE_MIMO_ENABLED"})
+        live_catalog = fetch_mimo_model_catalog(force_refresh=force_refresh)
+        sync_summary: dict[str, Any] = {}
+        if force_refresh or live_catalog.get("source") == "live":
             try:
-                snapshots = self.mimo_bridge.refresh_cache_sync()
-                source = "bridge_live_sync" if force_refresh else "bridge_bootstrap_sync"
+                sync_summary = sync_mimo_native_artifacts(list(live_catalog.get("models") or []), force_refresh=False)
             except Exception as exc:
-                snapshots = []
-                error = str(exc)
-        elif snapshots:
-            source = "bridge_cache"
-
-        for item in snapshots:
-            model_name = str(getattr(item, "full_id", "") or getattr(item, "id", "")).strip()
-            if model_name:
-                models.append(model_name)
-
+                sync_summary = {"ok": False, "error": str(exc)}
         artifact_models = self._artifact_mimo_models()
-        usable_models = artifact_models["usable"]
-        ping_models = artifact_models["ping"]
-        generated_models = self._generated_mimo_models()
-        fallback_used = False
-        if not models and generated_models:
-            models = list(generated_models)
-            source = "generated_manifest_fallback"
-            fallback_used = True
-            if not error:
-                error = "live_inventory_unavailable_using_generated_manifest"
+        usable_models = [model for model in artifact_models["usable"] if str(model).startswith('xiaomi/')]
+        ping_models = [model for model in artifact_models["ping"] if str(model).startswith('xiaomi/')]
+        generated_models = [f'xiaomi/{name}' if '/' not in str(name) else str(name) for name in self._generated_mimo_models()]
+        live_models = [str(model).strip() for model in list(live_catalog.get("models") or []) if str(model).strip()]
+        configured_models = configured_native_mimo_models() if not live_models else []
+        merged = self._merge_model_names(live_models, configured_models, generated_models, usable_models, ping_models)
+        if live_models:
+            source = "direct_http_catalog"
+        elif generated_models:
+            source = "generated_manifest"
+        elif usable_models or ping_models:
+            source = "artifact_reports"
         else:
-            generated_models = [f"xiaomi/{name}" if "/" not in name else name for name in generated_models]
-
-        models = self._merge_model_names(models, usable_models, ping_models)
-
-        if source != "generated_manifest_fallback" and (usable_models or ping_models):
-            source = f"{source}+artifact_merge"
-
+            source = str(live_catalog.get("source") or "direct_http_catalog")
+        error = None if merged else str(live_catalog.get("error") or "native_model_catalog_empty")
         return ProviderInventoryEntry(
             provider="mimo",
             fetched_at=int(time.time()),
-            ok=bool(snapshots),
+            ok=bool(merged),
             source=source,
-            models=models,
+            models=merged,
             error=error,
+            status_code=int(live_catalog["status_code"]) if live_catalog.get("status_code") is not None else None,
             diagnostics={
-                "cli_alive": bool(getattr(self.mimo_bridge, "is_cli_alive", False)),
-                "loop_running": loop_running,
-                "generated_fallback_used": fallback_used,
+                "direct_http_only": True,
+                "live_catalog": live_catalog,
+                "artifact_sync": sync_summary,
                 "generated_models_count": len(generated_models),
                 "usable_artifact_models_count": len(usable_models),
                 "ping_artifact_models_count": len(ping_models),
-                "auto_added_models_count": max(0, len(models) - len({
-                    str(getattr(item, "full_id", "") or getattr(item, "id", "")).strip()
-                    for item in snapshots
-                    if str(getattr(item, "full_id", "") or getattr(item, "id", "")).strip()
-                })),
             },
         )
 
@@ -851,7 +776,7 @@ class ProviderInventoryService:
             if direct_ok or mimo_ok:
                 add(active_now, seen_active, provider=provider, model_name=model_name, source="registered_agent", wired=True)
             elif provider == "antigravity":
-                add(unusable, seen_unusable, provider=provider, model_name=model_name, source="registered_agent", reason="cli_missing_or_unready", remediation="install/configure agy or keep Antigravity disabled", wired=True)
+                add(unusable, seen_unusable, provider=provider, model_name=model_name, source="registered_agent", reason="direct_api_missing_or_unready", remediation="configure ANTIGRAVITY_API_KEY or keep Antigravity disabled", wired=True)
 
         for provider, models in successful_direct.items():
             for model_name in sorted(models):

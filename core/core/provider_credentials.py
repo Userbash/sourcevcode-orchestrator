@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 _ANTIGRAVITY_KEY_ENV_NAMES = (
     "ANTIGRAVITY_API_KEY",
+    "ANTIGRAVITY_API_TOKEN",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
 )

@@ -19,3 +19,5 @@ Supported profiles now include base task types and more granular variants such a
 - `research`, `research_deep`, `research_compare`
 
 The director resolves the most specific matching profile first, then falls back to the base task type.
+
+Antigravity profiles are direct API only and assume `ANTIGRAVITY_API_KEY`; they do not describe or require the legacy CLI bridge.

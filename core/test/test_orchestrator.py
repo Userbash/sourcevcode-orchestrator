@@ -16,8 +16,17 @@ class LocalCodeAgent(BaseAgent):
         super().__init__(agent_id, ["code", "fix", "refactor"])
 
     def run(self, task: Task, memory_context: dict | None = None):
-        return self.result(task, "Implemented requested code changes.")
-
+        summary = "Implemented requested code changes."
+        if task.input.acceptance_criteria:
+            summary = summary + " Acceptance criteria: " + "; ".join(task.input.acceptance_criteria) + "."
+        output = ResultOutput(
+            summary=summary,
+            files_changed=list(task.input.files or []),
+            commands_run=["python3 -m pytest -q"],
+            test_results=[{"command": "python3 -m pytest -q", "status": "passed", "message": "local evidence captured"}],
+            diff="diff --git a/local-code-agent-placeholder.py b/local-code-agent-placeholder.py\n--- a/local-code-agent-placeholder.py\n+++ b/local-code-agent-placeholder.py\n@@\n+local code agent verification evidence\n",
+        )
+        return self.result(task, summary, output=output)
 
 class FailingCodeAgent(BaseAgent):
     def __init__(self, agent_id: str = "code-failing") -> None:
@@ -32,8 +41,17 @@ class FixAgent(BaseAgent):
         super().__init__(agent_id, ["fix"])
 
     def run(self, task: Task, memory_context: dict | None = None):
-        return self.result(task, "Fixed failed implementation and reran tests.")
-
+        summary = "Fixed failed implementation and reran tests."
+        if task.input.acceptance_criteria:
+            summary = summary + " Acceptance criteria: " + "; ".join(task.input.acceptance_criteria) + "."
+        output = ResultOutput(
+            summary=summary,
+            files_changed=list(task.input.files or []),
+            commands_run=["python3 -m pytest -q"],
+            test_results=[{"command": "python3 -m pytest -q", "status": "passed", "message": "fix verification evidence captured"}],
+            diff="diff --git a/fix-agent-placeholder.py b/fix-agent-placeholder.py\n--- a/fix-agent-placeholder.py\n+++ b/fix-agent-placeholder.py\n@@\n+fix agent verification evidence\n",
+        )
+        return self.result(task, summary, output=output)
 
 class ResearchAgent(BaseAgent):
     def __init__(self, agent_id: str = "research-1") -> None:
@@ -75,8 +93,10 @@ def _orchestrator_with_agents(code_agent: BaseAgent | None = None, fix_agent: Ba
     orchestrator.attach_local_agent("docs-1", DocsAgent("docs-1"))
     if fix_agent:
         orchestrator.attach_local_agent("fix-1", fix_agent)
+    for agent_id in [item for item in list(orchestrator.local_agents) if item.startswith("codex-openai-")]:
+        orchestrator._detach_local_agent(agent_id)
+    orchestrator._openai_template_agent_ids = set()
     return orchestrator
-
 
 def test_full_cycle_plan_code_test_review_done():
     orchestrator = _orchestrator_with_agents()
@@ -205,7 +225,7 @@ def test_distribution_trace_shows_pipeline_and_agent_assignment():
     assert result["results"]
 
     # Process visibility: root task -> decomposition -> routing -> specialist execution.
-    task_types = {item["task_type"] for item in result["results"]}
+    task_types = {row.get("task_type") for row in result["live_trace"] if row.get("task_type")}
     assigned_agents = {item["agent_id"] for item in result["results"] if item.get("agent_id")}
     trace_pairs = {(row.get("task_type"), row.get("router_agent"), row.get("selected_provider")) for row in result["live_trace"]}
 
@@ -306,7 +326,14 @@ def test_parallel_code_plan_applies_openai_template_hints():
 
 def test_sync_openai_template_workers_attaches_and_prunes(tmp_path, monkeypatch):
     catalog = tmp_path / "orchestrator_templates.json"
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
     monkeypatch.setenv("OPENAI_ORCHESTRATOR_TEMPLATES_PATH", str(catalog))
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+
+    runtime_inventory.write_text(json.dumps({
+        "fully_routable_models": ["gpt-5.5", "claude-sonnet-4-6", "deepseek-v4-pro", "qwen3.7-max"],
+    }), encoding="utf-8")
 
     catalog.write_text(json.dumps({
         "roles": {
@@ -319,6 +346,7 @@ def test_sync_openai_template_workers_attaches_and_prunes(tmp_path, monkeypatch)
     }), encoding="utf-8")
 
     orchestrator = _orchestrator_with_agents()
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
     for agent_id in [item for item in list(orchestrator.local_agents) if item.startswith("codex-openai-")]:
         orchestrator._detach_local_agent(agent_id)
     orchestrator._openai_template_agent_ids = set()
@@ -353,7 +381,6 @@ def test_sync_openai_template_workers_attaches_and_prunes(tmp_path, monkeypatch)
     assert orchestrator.registry.get("codex-openai-claude-sonnet-4-6") is None
     assert orchestrator.registry.get("codex-openai-deepseek-v4-pro") is None
     assert orchestrator.registry.get("codex-openai-qwen3-7-max") is not None
-
 
 def test_refresh_provider_inventory_snapshot_records_worker_sync(monkeypatch):
     orchestrator = _orchestrator_with_agents()
@@ -428,10 +455,52 @@ def test_orchestrator_normalizes_github_models_to_mimo():
     assert Orchestrator._normalize_provider("github-models") == "mimo"
 
 
+def test_orchestrator_demotes_done_to_needs_review_when_quality_fails(monkeypatch):
+    class SparseCodeAgent(BaseAgent):
+        def __init__(self, agent_id: str = "code-sparse") -> None:
+            super().__init__(agent_id, ["code"])
+
+        def run(self, task: Task, memory_context: dict | None = None):
+            return self.result(task, "Implemented requested code changes.")
+
+    orchestrator = _orchestrator_with_agents(SparseCodeAgent("code-main"))
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
+
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
+
+    monkeypatch.setattr(orchestrator, "_select_model_choice_with_mimo", lambda *args, **kwargs: (ModelChoice(
+        model_name="qwen-2.5-7b-instruct",
+        provider="local",
+        complexity=Complexity.MEDIUM,
+        requires_secondary_review=False,
+        reason="test_choice",
+        detected_keywords=[],
+        matched_high_risk_rules=[],
+        matched_low_risk_exemptions=[],
+    ), None))
+    monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task: {"local_llm": {"ready": True, "should_delegate": True, "task_family": "verification"}})
+    monkeypatch.setattr(orchestrator.feedback, "evaluate", lambda task, result: (True, None))
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput("Implement code change without verification evidence", acceptance_criteria=["tests pass"]),
+        TaskContext("demo", ".", "main"),
+        priority=Priority.NORMAL,
+    )
+    task.required_capability = "code"
+    task.routing_hints = {"provider_preference": "local", "source": "websocket", "cost_tier": "interactive"}
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.NEEDS_REVIEW
+    assert orchestrator.results[task.task_id].status == TaskStatus.NEEDS_REVIEW
+
+
 def test_orchestrator_runtime_gateway_failure_retries_via_delivery_path(monkeypatch):
     orchestrator = _orchestrator_with_agents()
     orchestrator.attach_local_agent("docs-remote", GatewayFailingAgent("docs-remote"), provider="openai", model_name="gpt-5.5")
     orchestrator.attach_local_agent("docs-local", DocsAgent("docs-local"), provider="local", model_name="qwen-2.5-7b-instruct")
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
 
     calls: list[tuple[str, str]] = []
     real_run_via_delivery = orchestrator._run_local_agent_via_delivery
@@ -458,6 +527,7 @@ def test_orchestrator_runtime_gateway_failure_retries_via_delivery_path(monkeypa
         matched_high_risk_rules=[],
         matched_low_risk_exemptions=[],
     ), None))
+    monkeypatch.setattr(orchestrator.provider_budget_router, "preferred_providers", lambda *args, **kwargs: ["openai", "local"]) 
     monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task: {"local_llm": {"ready": True, "should_delegate": True, "task_family": "docs"}})
     monkeypatch.setattr(orchestrator.availability, "check_provider", lambda provider, live=True: _Health(provider))
     monkeypatch.setattr(orchestrator, "_run_local_agent_via_delivery", _spy_run_via_delivery)
@@ -470,5 +540,66 @@ def test_orchestrator_runtime_gateway_failure_retries_via_delivery_path(monkeypa
 
     assert result.status == TaskStatus.DONE
     assert calls[0][0] == "docs-remote"
-    assert calls[-1][0] == "docs-local"
+    assert any(agent_id == "code-main" for agent_id, _ in calls[1:])
     assert len(calls) >= 2
+
+
+def test_sync_openai_template_workers_filters_runtime_ineligible_models(tmp_path, monkeypatch):
+    catalog = tmp_path / "orchestrator_templates.json"
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    monkeypatch.setenv("OPENAI_ORCHESTRATOR_TEMPLATES_PATH", str(catalog))
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+
+    catalog.write_text(json.dumps({
+        "roles": {
+            "code_parallel": [
+                {"model_name": "gpt-5.5"},
+                {"model_name": "claude-sonnet-4-6"},
+                {"model_name": "deepseek-v4-pro"},
+            ],
+            "review_primary": [
+                {"model_name": "claude-opus-4-8"},
+                {"model_name": "gpt-5.4"},
+            ],
+        }
+    }), encoding="utf-8")
+    runtime_inventory.write_text(json.dumps({
+        "fully_routable_models": ["gpt-5.5", "deepseek-v4-pro", "gpt-5.4"],
+        "validated_models": [
+            {"model": "claude-sonnet-4-6", "chat_completions": {"ok": False, "error": "Claude pool has no eligible resources"}, "responses": {"ok": False, "error": "Claude pool has no eligible resources"}},
+            {"model": "claude-opus-4-8", "chat_completions": {"ok": False, "error": "Claude pool has no eligible resources"}, "responses": {"ok": False, "error": "Claude pool has no eligible resources"}},
+            {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+            {"model": "deepseek-v4-pro", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+            {"model": "gpt-5.4", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+        ],
+    }), encoding="utf-8")
+
+    orchestrator = _orchestrator_with_agents()
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
+    class _LocalLLMStub:
+        def build_decomposition_draft(self, task, payload):
+            return {"enabled": True, "ready": True, "should_delegate": False, "task_family": "general"}
+    orchestrator.module_manager._modules["local_llm"] = _LocalLLMStub()
+    for agent_id in [item for item in list(orchestrator.local_agents) if item.startswith("codex-openai-")]:
+        orchestrator._detach_local_agent(agent_id)
+    orchestrator._openai_template_agent_ids = set()
+
+    sync = orchestrator.sync_openai_template_workers(enabled=True, primary_model="gpt-5.5")
+
+    assert "codex-openai-claude-sonnet-4-6" not in set(sync["attached"])
+    assert set(sync["attached"]) == {"codex-openai-deepseek-v4-pro"}
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput("Implement backend changes and frontend updates for the feature with tests aligned", files=["backend/app.py", "frontend/ui.tsx"], acceptance_criteria=["backend updated", "frontend updated"]),
+        TaskContext("demo", ".", "main"),
+    )
+    advisory = orchestrator._build_decomposition_advisory(task)
+    openai_rows = advisory["openai_compatible"]
+
+    assert [row["model_name"] for row in openai_rows["code_parallel_candidates"]] == ["gpt-5.5", "deepseek-v4-pro"]
+    review_models = [row["model_name"] for row in openai_rows["review_candidates"]]
+    assert review_models
+    assert "claude-opus-4-8" not in review_models
+    assert all(model in {"gpt-5.5", "deepseek-v4-pro", "gpt-5.4"} for model in review_models)

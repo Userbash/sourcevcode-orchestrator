@@ -134,8 +134,10 @@ class DeliverySupervisor:
             record.handshake_state = "invalid"
             self.refresh(task_id)
             return ack
-        ack = self.message_bus.ack(task_id, status=AckStatus.ACCEPTED, received_by=agent_id)
+        ack = self.message_bus.ack(task_id, status=AckStatus.RECEIVED, received_by=agent_id)
         record.handshake_state = "established"
+        record.last_progress_at = self._now()
+        self._audit("delivery.established", record)
         self.refresh(task_id)
         return ack
 

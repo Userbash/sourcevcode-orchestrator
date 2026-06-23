@@ -7,6 +7,7 @@ from typing import Any
 from .input_text_normalizer import normalize_text, normalize_text_list
 from .input_text_quantizer import quantize_input_text
 from .models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
+from .openai_runtime_router import OpenAIRuntimeRouter
 
 
 _TASK_TYPE_ALIASES: dict[str, str] = {
@@ -264,8 +265,12 @@ def create_standard_task(data: dict[str, Any]) -> Task:
         if provider:
             task.routing_hints["provider_preference"] = provider
         if requested_model:
-            task.assigned_model = requested_model
-            task.routing_hints["requested_model"] = requested_model
+            sanitized_model = OpenAIRuntimeRouter.sanitize_model(requested_model, require_allowlist=False)
+            if sanitized_model:
+                task.assigned_model = sanitized_model
+                task.routing_hints["requested_model"] = sanitized_model
+            else:
+                task.routing_hints["requested_model_rejected"] = requested_model
         task.routing_hints.setdefault("input_validation", {"status": "ok", "issues": []})
         return task
     except Exception as e:

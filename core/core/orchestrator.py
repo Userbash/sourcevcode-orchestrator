@@ -51,6 +51,7 @@ from .local_model_manager_module import LocalModelManagerModule
 from .provider_budget_router import ProviderBudgetRouter
 from .mimo_status import mimo_enabled, mimo_failure_threshold, mimo_failure_window_sec, mimo_suppression_ttl_sec
 from .provider_inventory_service import ProviderInventoryService
+from .openai_runtime_router import OpenAIRuntimeRouter
 from .model_replacement_policy import ModelReplacementPolicy
 from .cold_boot_module import ColdBootModule
 from .voice_listener_module import VoiceListenerModule
@@ -268,15 +269,17 @@ class Orchestrator:
             memory_context = dict(runtime.get("memory_context") or {})
             agent = self.local_agents.get(agent_id)
             if agent is None:
+                self.ack_delivery(task.task_id, TaskStatus.FAILED, agent_id, reason="no_local_executor")
                 if not future.done():
                     future.set_result(AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "No local executor for routed agent", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["No local executor"], []))
                 continue
             if not self.confirm_delivery_payload(task_id, agent_id, message):
+                self.ack_delivery(task.task_id, TaskStatus.FAILED, agent_id, reason="delivery_payload_invalid")
                 if not future.done():
                     future.set_result(AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery payload validation failed", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_payload_invalid"], []))
                 continue
             ack = self.establish_delivery_handshake(task_id, agent_id)
-            if ack.ack_status.value != "accepted":
+            if ack.ack_status.value == "failed":
                 if not future.done():
                     future.set_result(AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Delivery handshake was not accepted", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_handshake_failed"], []))
                 continue
@@ -288,6 +291,10 @@ class Orchestrator:
                 result = agent.run(task, memory_context=memory_context)
             except Exception as exc:
                 result = AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": str(exc), "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, [str(exc)], [])
+            reason = None
+            if result.status == TaskStatus.FAILED:
+                reason = "; ".join(result.errors or []) or "agent_failed"
+            self.ack_delivery(task.task_id, result.status, agent_id, reason=reason)
             if not future.done():
                 future.set_result(result)
 
@@ -343,6 +350,7 @@ class Orchestrator:
         try:
             return future.result(timeout=float(self._agent_worker_timeout_sec))
         except concurrent.futures.TimeoutError:
+            self.ack_delivery(task.task_id, TaskStatus.FAILED, agent_id, reason="delivery_worker_timeout")
             return AgentResult(task.task_id, agent_id, TaskStatus.FAILED, {"summary": "Agent worker timed out waiting for mailbox consumer", "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, ["delivery_worker_timeout"], [])
         finally:
             with self._agent_runtime_lock:
@@ -1550,13 +1558,22 @@ class Orchestrator:
 
         primary = str(primary_model or "").strip()
         limit = self._openai_template_worker_limit()
+        raw_models: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get("model_name") or "").strip()
+            if model_name:
+                raw_models.append(model_name)
+        eligible_models = set(OpenAIRuntimeRouter._filter_models_by_runtime_inventory(raw_models))
+
         desired: list[tuple[str, str]] = []
         seen_models: set[str] = {primary} if primary else set()
         for row in rows:
             if not isinstance(row, dict):
                 continue
             model_name = str(row.get("model_name") or "").strip()
-            if not model_name or model_name in seen_models:
+            if not model_name or model_name in seen_models or model_name not in eligible_models:
                 continue
             seen_models.add(model_name)
             desired.append((self._openai_template_agent_id(model_name), model_name))
@@ -1655,16 +1672,23 @@ class Orchestrator:
         template_catalog = self._load_openai_template_catalog()
         role_map = template_catalog.get("roles") if isinstance(template_catalog.get("roles"), dict) else {}
         if role_map:
+            def _eligible_rows(items: Any, limit: int) -> list[dict[str, Any]]:
+                rows = items if isinstance(items, list) else []
+                models = [str(row.get("model_name") or "").strip() for row in rows if isinstance(row, dict)]
+                eligible = set(OpenAIRuntimeRouter._filter_models_by_runtime_inventory(models))
+                filtered = [row for row in rows if isinstance(row, dict) and str(row.get("model_name") or "").strip() in eligible]
+                return filtered[:limit]
+
             advisory_context["openai_compatible"] = {
                 "enabled": True,
                 "generated_at": template_catalog.get("generated_at"),
                 "template_count": template_catalog.get("template_count", 0),
-                "code_parallel_candidates": list(role_map.get("code_parallel", []))[:4],
-                "review_candidates": list(role_map.get("review_primary", []))[:3],
-                "plan_candidates": list(role_map.get("plan_primary", []))[:3],
-                "test_candidates": list(role_map.get("test_primary", []))[:3],
-                "docs_candidates": list(role_map.get("docs_primary", []))[:3],
-                "research_candidates": list(role_map.get("research_primary", []))[:3],
+                "code_parallel_candidates": _eligible_rows(role_map.get("code_parallel", []), 4),
+                "review_candidates": _eligible_rows(role_map.get("review_primary", []), 3),
+                "plan_candidates": _eligible_rows(role_map.get("plan_primary", []), 3),
+                "test_candidates": _eligible_rows(role_map.get("test_primary", []), 3),
+                "docs_candidates": _eligible_rows(role_map.get("docs_primary", []), 3),
+                "research_candidates": _eligible_rows(role_map.get("research_primary", []), 3),
             }
 
         return advisory_context
@@ -2415,6 +2439,9 @@ class Orchestrator:
                 self.model_replacement_policy.register_success(success_provider, str(result.model_name or getattr(task, 'assigned_model', '') or module_context.get("model") or choice.model_name or ""))
                 self._update_model_replacement_snapshot()
             quality = self.quality.analyze(task, result)
+            if result.status == TaskStatus.DONE and not quality.passed:
+                self.console.emit("REVIEW", f"Качество ниже порога: {', '.join(quality.issues)}")
+                result.status = TaskStatus.NEEDS_REVIEW
             if agent_record:
                 agent_record.metrics.quality_score = quality.score
                 self.metrics.record_result(agent_record, result)

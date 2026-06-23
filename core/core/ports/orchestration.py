@@ -1,4 +1,7 @@
 from __future__ import annotations
-from typing import Protocol, Any
+
+from typing import Any, Protocol
+
+
 class OrchestrationBackend(Protocol):
-    def run(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+    async def run(self, payload: dict[str, Any]) -> dict[str, Any]: ...

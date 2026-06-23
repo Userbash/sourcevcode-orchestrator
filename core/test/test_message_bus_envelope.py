@@ -16,6 +16,7 @@ def test_message_bus_send_envelope():
     
     received = bus.receive_for_agent("agent-1")
     assert received == envelope
+    assert [ack.ack_status.value for ack in bus.ack_history(envelope.task_id)] == ["sent"]
     
     # Hop 2 - Exceeds max_hops
     ack2 = bus.send_envelope(envelope)

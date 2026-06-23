@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -13,20 +12,16 @@ PROVIDER_CHOICES = ('openai', 'mistral', 'local_llm', 'mimo', 'antigravity', 'ai
 import httpx
 
 from core.core.env_loader import load_env_file
+from core.core.antigravity_provider import extract_antigravity_response_text, invoke_antigravity_native
 from core.core.external_ai_bridge import ExternalAIBridge
 from core.core.integrations.antigravity_manager import AntigravityManager
 from core.core.integrations.mistral_manager import MistralManager
 from core.core.openai_compatible_inventory import is_text_compatible_model
 from core.core.openai_provider import resolve_openai_provider_config
-from core.mimo.bridge import MimoAsyncBridge
+from core.core.mimo_provider import configured_native_mimo_models, extract_mimo_response_text, invoke_mimo_native
 
 PROMPT = "reply with pong only"
 DEFAULT_OUTPUT_DIR = Path("/workspace/reports/model_ping")
-MIMO_CLI_CANDIDATES = [
-    "/var/home/sanya/.npm-packages/bin/mimo",
-    "/root/.npm-packages/bin/mimo",
-    "/usr/local/bin/mimo",
-]
 MISTRAL_NON_CHAT_MARKERS = (
     "embed",
     "moderation",
@@ -38,6 +33,7 @@ MISTRAL_NON_CHAT_MARKERS = (
 
 load_env_file('.env')
 load_env_file('.env.bridge', override=True)
+load_env_file('.env.local.secrets', override=True)
 load_env_file('.env.gemini.local', override=True)
 
 
@@ -125,34 +121,6 @@ def classify_openai_skip_reason(model_id: str) -> str:
     if 'realtime' in name:
         return 'realtime_model'
     return 'non_text_model'
-
-
-def resolve_mimo_cli() -> str | None:
-    found = shutil.which('mimo')
-    if found:
-        return found
-    for candidate in MIMO_CLI_CANDIDATES:
-        path = Path(candidate)
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-    var_home = Path('/var/home')
-    if var_home.is_dir():
-        for home in var_home.iterdir():
-            candidate = home / '.npm-packages' / 'bin' / 'mimo'
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
-    return None
-
-
-def parse_mimo_models(output: str) -> list[str]:
-    bridge = MimoAsyncBridge()
-    snapshots = bridge._parse_models_output(output)
-    names: list[str] = []
-    for item in snapshots:
-        model_name = (item.full_id or item.id or '').strip()
-        if model_name:
-            names.append(model_name)
-    return names
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -380,74 +348,32 @@ async def ping_local_llm_models(prompt: str) -> dict[str, Any]:
 
 
 async def ping_mimo_models(prompt: str, output_dir: Path) -> dict[str, Any]:
-    result = {'provider': 'mimo', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False, 'mode': 'run'}
-    mimo_cli = resolve_mimo_cli()
-    if not mimo_cli:
-        result.update({'skipped': True, 'error': 'mimo_cli_missing'})
+    result = {'provider': 'mimo', 'models': [], 'ok': 0, 'failed': 0, 'skipped': False, 'mode': 'direct_http'}
+    models = configured_native_mimo_models()
+    if not models:
+        result.update({'skipped': True, 'error': 'native_model_catalog_empty'})
         return result
-    proc = await asyncio.create_subprocess_exec(mimo_cli, 'models', '--verbose', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        result.update({'failed': 1, 'error': stderr.decode('utf-8', errors='ignore').strip() or f'exit_{proc.returncode}'})
-        return result
-    models = parse_mimo_models(stdout.decode('utf-8', errors='ignore'))
-    print(f'[mimo] discovered {len(models)} models', flush=True)
+    print(f'[mimo] discovered {len(models)} native models', flush=True)
     partial_path = output_dir / 'mimo_model_ping_report.partial.json'
     sem = asyncio.Semaphore(4)
 
     def write_partial() -> None:
-        payload = {
-            'provider': 'mimo',
-            'completed': len(result['models']),
-            'ok': sum(1 for item in result['models'] if item.get('ok')),
-            'failed': sum(1 for item in result['models'] if not item.get('ok')),
-            'models': result['models'],
-        }
+        payload = {'provider': 'mimo', 'completed': len(result['models']), 'ok': sum(1 for item in result['models'] if item.get('ok')), 'failed': sum(1 for item in result['models'] if not item.get('ok')), 'models': result['models']}
         write_json(partial_path, payload)
 
     async def one(model: str) -> dict[str, Any]:
         row: dict[str, Any] = {'model': model}
         async with sem:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    'timeout', '15s', mimo_cli, 'run', '-m', model, '--format', 'json', prompt,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await proc.communicate()
-                out = stdout.decode('utf-8', errors='ignore')
-                err = stderr.decode('utf-8', errors='ignore').strip()
-                text_parts: list[str] = []
-                for line in out.splitlines():
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        event = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(event, dict) and event.get('type') == 'error':
-                        message = (((event.get('error') or {}).get('data') or {}).get('message') or (event.get('error') or {}).get('name') or 'mimo_run_failed')
-                        row['ok'] = False
-                        row['error'] = str(message)
-                        row['exit_code'] = proc.returncode
-                        return row
-                    if isinstance(event, dict) and event.get('type') == 'text':
-                        part = event.get('part') or {}
-                        text = str(part.get('text') or '').strip()
-                        if text:
-                            text_parts.append(text)
-                if text_parts:
-                    row['ok'] = True
-                    row['response_sample'] = ' '.join(text_parts)[:120]
-                else:
-                    row['ok'] = False
-                    row['error'] = err or ('timeout' if proc.returncode == 124 else 'no_text_events')
-                row['exit_code'] = proc.returncode
-            except Exception as exc:
+            payload, error, status_code = await asyncio.to_thread(invoke_mimo_native, model, prompt + ' and no reasoning', timeout_sec=20.0, max_completion_tokens=128, temperature=0.0)
+            row['status_code'] = status_code
+            text_output = extract_mimo_response_text(payload) if payload else ''
+            if text_output:
+                row['ok'] = True
+                row['response_sample'] = text_output[:120]
+            else:
                 row['ok'] = False
-                row['error'] = str(exc)
-            return row
+                row['error'] = str(error or 'no_text_events')[:240]
+        return row
 
     completed = 0
     for coro in asyncio.as_completed([one(model) for model in models]):
@@ -474,26 +400,30 @@ async def ping_antigravity(prompt: str) -> dict[str, Any]:
     if not status.get('ready'):
         error = (status.get('generation_probe') or {}).get('stderr') or (status.get('models_probe') or {}).get('stderr') or 'not_ready'
         result.update({'failed': len(models) or 1, 'error': error})
-        for model in models or ['antigravity-cli']:
+        for model in models or ['antigravity-pro']:
             result['models'].append({'model': model, 'ok': False, 'error': error})
         return result
-    cmd_prefix = ExternalAIBridge.resolve_antigravity_cli_command() or []
-    if not cmd_prefix:
-        result.update({'failed': len(models) or 1, 'error': 'cli_not_found'})
-        return result
-    cmd = [*cmd_prefix, '-p', prompt]
-    if Path(cmd_prefix[0]).name.lower() == 'gemini':
-        cmd.append('--skip-trust')
-    env = ExternalAIBridge._antigravity_runtime_env()
-    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env, cwd='/app')
-    stdout, stderr = await proc.communicate()
-    out = stdout.decode('utf-8', errors='ignore').strip()
-    err = stderr.decode('utf-8', errors='ignore').strip()
-    ok = proc.returncode == 0
-    for model in models or [Path(cmd_prefix[0]).name]:
-        result['models'].append({'model': model, 'ok': ok, 'response_sample': out[:120], 'error': None if ok else err or f'exit_{proc.returncode}'})
-    result['ok'] = len(result['models']) if ok else 0
-    result['failed'] = 0 if ok else len(result['models'])
+
+    probe_models = models or ['antigravity-pro']
+
+    async def one(model: str) -> dict[str, Any]:
+        payload, error, status_code = await asyncio.to_thread(invoke_antigravity_native, model, prompt, timeout_sec=20.0, max_completion_tokens=128, temperature=0.0)
+        text_output = extract_antigravity_response_text(payload) if payload else ''
+        return {'model': model, 'ok': bool(text_output), 'response_sample': text_output[:120] if text_output else None, 'error': None if text_output else str(error or 'no_text_events')[:240], 'status_code': status_code}
+
+    completed = 0
+    for coro in asyncio.as_completed([one(model) for model in probe_models]):
+        row = await coro
+        result['models'].append(row)
+        completed += 1
+        if completed % 10 == 0 or completed == len(probe_models):
+            ok_count = sum(1 for item in result['models'] if item.get('ok'))
+            failed_count = len(result['models']) - ok_count
+            print(f'[antigravity] progress {completed}/{len(probe_models)} ok={ok_count} failed={failed_count}', flush=True)
+    ordered_rows = {str(item.get('model') or ''): item for item in result['models']}
+    result['models'] = [ordered_rows[model] for model in probe_models if model in ordered_rows]
+    result['ok'] = sum(1 for item in result['models'] if item.get('ok'))
+    result['failed'] = len(result['models']) - result['ok']
     print(f"[antigravity] ok={result['ok']} failed={result['failed']}", flush=True)
     return result
 

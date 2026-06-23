@@ -89,7 +89,9 @@ def test_delivery_supervisor_tracks_sent_received_and_accepted():
     sent = supervisor.dispatch(envelope)
     assert sent.ack_status.value == "sent"
 
-    bus.receive_for_agent("coder-1")
+    pulled = supervisor.fetch_agent_mailbox("coder-1", limit=1)
+    assert supervisor.confirm_payload(envelope.task_id, "coder-1", pulled[0]) is True
+    supervisor.establish_delivery(envelope.task_id, "coder-1")
     bus.ack(envelope.task_id, TaskStatus.DONE, "coder-1")
     snapshot = supervisor.refresh(envelope.task_id)
 
@@ -122,7 +124,7 @@ def test_delivery_supervisor_publishes_handshake_audit_to_delivery_events_topic(
     event_types = [event["event_type"] for event in events]
     assert "delivery.sent" in event_types
     assert "delivery.payload_validated" in event_types
-    assert "delivery.accepted" in event_types
+    assert "delivery.established" in event_types
     assert all(event["topic"] == "delivery.events" for event in events)
 
 
@@ -171,7 +173,9 @@ def test_delivery_supervisor_audit_sink_failures_do_not_break_dispatch_or_refres
     envelope = _envelope()
 
     supervisor.dispatch(envelope)
-    bus.receive_for_agent("coder-1")
+    pulled = supervisor.fetch_agent_mailbox("coder-1", limit=1)
+    assert supervisor.confirm_payload(envelope.task_id, "coder-1", pulled[0]) is True
+    supervisor.establish_delivery(envelope.task_id, "coder-1")
     bus.ack(envelope.task_id, TaskStatus.DONE, "coder-1")
     snapshot = supervisor.refresh(envelope.task_id)
 
@@ -204,10 +208,10 @@ def test_delivery_supervisor_handshake_establishes_only_after_payload_validation
     assert validated is True
 
     established = supervisor.establish_delivery(envelope.task_id, "coder-1")
-    assert established.ack_status.value == "accepted"
+    assert established.ack_status.value == "received"
 
     snapshot = supervisor.refresh(envelope.task_id)
-    assert snapshot["status"] == "accepted"
+    assert snapshot["status"] == "received"
     assert snapshot["handshake_state"] == "established"
     assert snapshot["payload_validated"] is True
 
@@ -266,7 +270,7 @@ def test_orchestrator_exposes_mailbox_and_handshake_api():
     ack = orchestrator.establish_delivery_handshake(envelope.task_id, "coder-1")
     snapshot = orchestrator.refresh_delivery(envelope.task_id)
 
-    assert ack.ack_status.value == "accepted"
+    assert ack.ack_status.value == "received"
     assert snapshot["handshake_state"] == "established"
     assert orchestrator.mailbox_snapshot("coder-1")["agent_id"] == "coder-1"
 
@@ -305,10 +309,10 @@ def test_kpi_dashboard_includes_delivery_backlog_lag_and_dead_letter_metrics(tmp
     kpi_log.write_text(
         "\n".join(
             [
-                '{"event_type":"delivery.sent","task_id":"t1","logged_at":"2026-06-14T00:00:00+00:00"}',
-                '{"event_type":"delivery.retry","task_id":"t1","logged_at":"2026-06-14T00:01:00+00:00"}',
-                '{"event_type":"delivery.dead_letter","task_id":"t1","reason":"ack_timeout","logged_at":"2026-06-14T00:02:00+00:00"}',
-                '{"event_type":"delivery.accepted","task_id":"t2","logged_at":"2026-06-14T00:03:00+00:00"}',
+                '{"event_type":"delivery.sent","task_id":"t1","logged_at":"2026-06-22T00:00:00+00:00"}',
+                '{"event_type":"delivery.retry","task_id":"t1","logged_at":"2026-06-22T00:01:00+00:00"}',
+                '{"event_type":"delivery.dead_letter","task_id":"t1","reason":"ack_timeout","logged_at":"2026-06-22T00:02:00+00:00"}',
+                '{"event_type":"delivery.accepted","task_id":"t2","logged_at":"2026-06-22T00:03:00+00:00"}',
             ]
         ) + "\n",
         encoding="utf-8",

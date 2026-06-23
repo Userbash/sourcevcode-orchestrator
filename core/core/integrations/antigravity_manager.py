@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
-import time
-from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from core.core.env_loader import load_env_file
-from core.core.host_bridge import HostBridge
-from core.core.external_ai_bridge import ExternalAIBridge
 from core.core.gemini_model_registry import AntigravityModelRegistry
+from core.core.host_bridge import HostBridge
 from .antigravity_session_store import AntigravitySessionStore
 
 logger = logging.getLogger("AntigravityManager")
@@ -26,11 +23,36 @@ class AntigravityManager:
         self.host_bridge = host_bridge or HostBridge()
         self.probe_timeout = self._read_int("AI_BRIDGE_ANTIGRAVITY_PROBE_TIMEOUT_SEC", 30)
         self.login_timeout = self._read_int("AI_BRIDGE_ANTIGRAVITY_LOGIN_TIMEOUT_SEC", 60)
-        self.api_key = (os.getenv("ANTIGRAVITY_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-        self.api_base_url = os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-        self.proxy_url = os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", "").strip().rstrip("/")
+        self.api_key = (
+            os.getenv("ANTIGRAVITY_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
+        ).strip()
+        self.api_base_url = self._normalize_base_url(
+            os.getenv(
+                "AI_BRIDGE_ANTIGRAVITY_API_BASE_URL",
+                os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
+            )
+        )
+        self.proxy_url = self._normalize_base_url(os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", ""))
         self.session_store = AntigravitySessionStore()
         self.registry = AntigravityModelRegistry()
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        raw = str(url or "").strip().rstrip("/")
+        if not raw:
+            return ""
+        parsed = urlsplit(raw)
+        if parsed.scheme == "ws":
+            return urlunsplit(parsed._replace(scheme="http"))
+        if parsed.scheme == "wss":
+            return urlunsplit(parsed._replace(scheme="https"))
+        return raw
+
+    def _endpoint_base_url(self) -> str:
+        return self.proxy_url or self.api_base_url
 
     @staticmethod
     def _read_int(key: str, default: int) -> int:
@@ -73,7 +95,9 @@ class AntigravityManager:
         text = str(raw or "").strip().lower()
         if not text:
             return "unknown"
-        if "not found" in text or "no such file" in text:
+        if any(marker in text for marker in ["missing_api_key", "api key required", "no api key"]):
+            return "missing_api_key"
+        if any(marker in text for marker in ["not found", "no such file", "cli missing", "command not found"]):
             return "cli_missing"
         if any(marker in text for marker in ["unsupported_client", "ineligibletiererror", "migrate to the antigravity suite of products"]):
             return "unsupported_client"
@@ -89,6 +113,106 @@ class AntigravityManager:
         payload.setdefault("failure_kind", self._classify_failure_text(stderr))
         payload.setdefault("auth_marker_present", self.session_store.auth_marker_present())
         return payload
+
+    def _request_json(self, method: str, path: str, *, timeout: float | None = None, json_body: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> httpx.Response:
+        base_url = self._endpoint_base_url()
+        if not base_url:
+            raise RuntimeError("antigravity_api_base_url_missing")
+        headers: dict[str, str] = {}
+        query: dict[str, Any] = dict(params or {})
+        if self.api_key:
+            if "generativelanguage.googleapis.com" in base_url:
+                query.setdefault("key", self.api_key)
+            else:
+                headers.setdefault("Authorization", f"Bearer {self.api_key}")
+        url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+        return httpx.request(method, url, params=query or None, json=json_body, headers=headers or None, timeout=timeout or self.probe_timeout)
+
+    @staticmethod
+    def _models_from_payload(payload: Any) -> list[str]:
+        models: list[str] = []
+        if isinstance(payload, dict):
+            rows = payload.get("models", [])
+            if isinstance(rows, list):
+                for item in rows:
+                    if isinstance(item, dict):
+                        name = str(item.get("name") or item.get("id") or item.get("model") or "").strip()
+                    else:
+                        name = str(item).strip()
+                    if name:
+                        models.append(name.rsplit("/", 1)[-1])
+            elif isinstance(rows, str):
+                models.extend(line.strip() for line in rows.splitlines() if line.strip())
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for model in models:
+            cleaned = str(model).strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            deduped.append(cleaned)
+        return deduped
+
+    @staticmethod
+    def _generation_text_from_payload(payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("stdout", "text", "output", "response"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        candidates = payload.get("candidates")
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                content = candidate.get("content")
+                if not isinstance(content, dict):
+                    continue
+                parts = content.get("parts")
+                if not isinstance(parts, list):
+                    continue
+                chunks: list[str] = []
+                for part in parts:
+                    if isinstance(part, dict):
+                        text = str(part.get("text") or "").strip()
+                        if text:
+                            chunks.append(text)
+                if chunks:
+                    return "\n".join(chunks).strip()
+        return ""
+
+    def _probe_generation(self, model_name: str | None = None) -> dict[str, Any]:
+        prompt = "healthcheck: reply with ok"
+        base_url = self._endpoint_base_url()
+        if not base_url:
+            return {"ok": False, "stdout": "", "stderr": "antigravity_api_base_url_missing", "error": "antigravity_api_base_url_missing", "status_code": None, "auth_mode": "api_key"}
+        if not self.api_key:
+            return {"ok": False, "stdout": "", "stderr": "missing_api_key", "error": "missing_api_key", "status_code": None, "auth_mode": "api_key"}
+        timeout = max(self.probe_timeout, 10)
+        try:
+            if self.proxy_url:
+                response = self._request_json("POST", "prompt", timeout=timeout + 10, json_body={"prompt": prompt, "timeout_sec": self.probe_timeout})
+                payload = response.json() if response.content else {}
+                stdout = str(payload.get("stdout") or self._generation_text_from_payload(payload) or "").strip()
+                stderr = str(payload.get("stderr") or payload.get("error") or "").strip()
+                ok = bool(payload.get("ok") if isinstance(payload, dict) else response.status_code == 200)
+                return {"ok": ok, "status_code": response.status_code, "stdout": stdout, "stderr": stderr, "error": None if ok else (stderr or response.text[:500]), "auth_mode": "api_key", "model": model_name or "proxy"}
+
+            chosen_model = model_name or "antigravity-flash"
+            response = self._request_json(
+                "POST",
+                f"models/{chosen_model}:generateContent",
+                timeout=timeout + 10,
+                json_body={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+            )
+            payload = response.json() if response.content else {}
+            stdout = self._generation_text_from_payload(payload)
+            ok = response.status_code == 200 and bool(stdout or str(payload).strip())
+            stderr = "" if ok else response.text[:500]
+            return {"ok": ok, "status_code": response.status_code, "stdout": stdout, "stderr": stderr, "error": None if ok else stderr, "auth_mode": "api_key", "model": chosen_model}
+        except Exception as exc:
+            return {"ok": False, "status_code": None, "stdout": "", "stderr": str(exc), "error": str(exc), "auth_mode": "api_key", "model": model_name or "unknown"}
 
     def _active_interactive_session(self) -> dict[str, Any] | None:
         session = self.session_store.load_interactive_session()
@@ -126,83 +250,6 @@ class AntigravityManager:
             return verify
         return None
 
-    def _run_host(self, cmd: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        try:
-            result = self.host_bridge.execute(cmd, timeout=timeout or self.probe_timeout, check=False)
-            return {
-                "ok": result.returncode == 0,
-                "stdout": result.stdout or "",
-                "stderr": result.stderr or "",
-                "exit_code": result.returncode,
-                "command": cmd,
-            }
-        except Exception as exc:
-            return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
-
-    def _run_agy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        if self.proxy_url:
-            return self._run_agy_via_proxy(args, timeout=timeout)
-        local = self._run_local_cli(args, timeout=timeout)
-        if local.get("ok") or not self._cli_missing(local):
-            return local
-        return self._run_host(["agy", *args], timeout=timeout)
-
-    def _run_agy_via_proxy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        if not args:
-            return {"ok": False, "stdout": "", "stderr": "empty_args", "error": "empty_args", "command": ["agy"]}
-        try:
-            timeout_sec = timeout or self.probe_timeout
-            if args[:1] == ["models"]:
-                response = httpx.get(f"{self.proxy_url}/models", timeout=timeout_sec)
-                payload = response.json()
-                models = payload.get("models", []) if isinstance(payload, dict) else []
-                stdout = "\n".join(str(item) for item in models)
-                return {
-                    "ok": bool(payload.get("ok")),
-                    "stdout": stdout,
-                    "stderr": str(payload.get("stderr", "")),
-                    "exit_code": int(payload.get("exit_code", 0 if payload.get("ok") else 1)),
-                    "command": ["agy", *args],
-                }
-            if args and args[0] == "-p":
-                prompt = args[1] if len(args) > 1 else ""
-                response = httpx.post(f"{self.proxy_url}/prompt", json={"prompt": prompt, "timeout_sec": timeout_sec}, timeout=timeout_sec + 10)
-                payload = response.json()
-                return {
-                    "ok": bool(payload.get("ok")),
-                    "stdout": str(payload.get("stdout", "")),
-                    "stderr": str(payload.get("stderr", "")),
-                    "exit_code": int(payload.get("exit_code", 0 if payload.get("ok") else 1)),
-                    "command": ["agy", *args],
-                }
-            return {"ok": False, "stdout": "", "stderr": "unsupported_proxy_args", "error": "unsupported_proxy_args", "command": ["agy", *args]}
-        except Exception as exc:
-            return {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": ["agy", *args]}
-
-    def _run_login_helper(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        helper = Path(__file__).resolve().parents[2] / "scripts" / "antigravity_login.py"
-        result = self._run_host(["python3", str(helper), *args], timeout=timeout)
-        if "--json" not in args:
-            return result
-        stdout = str(result.get("stdout") or "").strip()
-        if not stdout:
-            return result
-        try:
-            import json
-            payload = json.loads(stdout)
-        except Exception:
-            return result
-        if not isinstance(payload, dict):
-            return result
-        merged = dict(result)
-        merged.update(payload)
-        if "ok" not in payload:
-            merged["ok"] = result.get("ok", False)
-        return merged
-
-    def verify_auth(self) -> dict[str, Any]:
-        return self._annotate_verify_result(self._run_login_helper(["--verify", "--json"], timeout=max(self.probe_timeout, 45)))
-
     def interactive_session_status(self, session_id: str | None = None) -> dict[str, Any]:
         session = self.session_store.load_interactive_session(session_id)
         session["active"] = self.session_store.interactive_session_active(session_id=str(session.get("session_id") or session_id or "")) if (session.get("session_id") or session_id) else False
@@ -218,93 +265,11 @@ class AntigravityManager:
         updated = self.session_store.append_interactive_input(target_session_id, text)
         return {"ok": True, "message": "Input queued for the active Antigravity interactive session.", "session": updated}
 
-    def _confirmed_ready(self) -> dict[str, Any]:
-        verify = self.verify_auth()
-        if verify.get("ok"):
-            models = list(verify.get("models") or [])
-            self.session_store.record_success(models=models, auth_mode=str(verify.get("auth_mode") or "agy_oauth"))
-            active = self._active_interactive_session()
-            if active is not None:
-                self.session_store.finish_interactive_session(str(active.get("session_id") or ""), state="ready", message="Antigravity session confirmed and kept alive.")
-            verify["action"] = "verify"
-            return verify
-
-        models = self._run_agy(["models"], timeout=max(self.probe_timeout, 45))
-        if models.get("ok"):
-            probe = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"], timeout=max(self.probe_timeout, 45))
-            if probe.get("ok"):
-                model_list = [line.strip() for line in models.get("stdout", "").splitlines() if line.strip()]
-                self.session_store.record_success(models=model_list, auth_mode="agy_oauth")
-                active = self._active_interactive_session()
-                if active is not None:
-                    self.session_store.finish_interactive_session(str(active.get("session_id") or ""), state="ready", message="Antigravity session confirmed and kept alive.")
-                return {
-                    "ok": True,
-                    "action": "verify_after_login",
-                    "models": model_list,
-                    "models_probe": models,
-                    "generation_probe": probe,
-                    "auth_probe": verify,
-                    "api_probe": None,
-                    "auth_mode": "agy_oauth",
-                }
-
-        self.session_store.record_failure(verify.get("stderr") or verify.get("error") or "antigravity_not_ready", failure_kind=str(verify.get("failure_kind") or "unknown"))
-        return verify
-
-    def ensure_authorized(self) -> dict[str, Any]:
-        verify = self._confirmed_ready()
-        if verify.get("ok"):
-            return verify
-
-        suppressed = self._maybe_suppress_login(verify)
-        if suppressed is not None:
-            suppressed["action"] = "verify"
-            return suppressed
-
-        if not self.auto_login_enabled():
-            verify["action"] = "verify"
-            verify["auto_login_skipped"] = True
-            return verify
-
-        last: dict[str, Any] = verify
-        for attempt in range(1, 4):
-            self.session_store.record_login_started()
-            login = self._run_login_helper(["--managed-login-start", "--timeout", str(self.login_timeout), "--json"], timeout=self.login_timeout + 20)
-            login["action"] = "managed_login_start"
-            login["attempt"] = attempt
-            session = dict(login.get("session") or {})
-            if login.get("ok") and session.get("session_id"):
-                return self._pending_session_response(verify, session, reason="interactive_session_active")
-            if login.get("ok"):
-                confirmation = self._confirmed_ready()
-                if confirmation.get("ok"):
-                    confirmation["action"] = "login_confirmed"
-                    confirmation["attempt"] = attempt
-                    return confirmation
-                login["verify_error"] = confirmation.get("stderr") or confirmation.get("error") or "login did not produce a ready auth state"
-                login["post_login_verify"] = confirmation
-                self.session_store.record_login_failure(str(login.get("verify_error") or "login_not_confirmed"), failure_kind=str(confirmation.get("failure_kind") or "unknown"))
-                last = login
-            else:
-                self.session_store.record_login_failure(str(login.get("stderr") or login.get("error") or login.get("message") or "login_failed"), failure_kind="auth_required")
-                last = login
-            last = login
-            if attempt < 3:
-                time.sleep(min(8.0, 1.5 * attempt))
-        return last
-
-    @staticmethod
-    def _cli_missing(probe: dict[str, Any]) -> bool:
-        raw = f"{probe.get('stderr', '')} {probe.get('error', '')}".lower()
-        return any(marker in raw for marker in ["no such file or directory", "not found", "node: command not found", 'env: "node"', "antigravity_cli_not_found"])
-
-    @staticmethod
-    def _timeout_detail(exc: subprocess.TimeoutExpired) -> tuple[str, str]:
-        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
-        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
-        detail = "\n".join(part.strip() for part in (stderr, stdout) if str(part).strip()).strip()
-        return stdout, detail or f"timeout: {exc}"
+    def _registry_models(self, *, force_refresh: bool = False) -> list[str]:
+        try:
+            return [str(item).strip() for item in self.registry.get_models(force_refresh=force_refresh) if str(item).strip()]
+        except Exception:
+            return []
 
     @staticmethod
     def _probe_inventory_kind(probe: dict[str, Any]) -> str:
@@ -316,78 +281,121 @@ class AntigravityManager:
 
     @classmethod
     def _probe_models(cls, probe: dict[str, Any]) -> list[str]:
+        models = [str(item).strip() for item in probe.get("models", []) if str(item).strip()]
+        if models:
+            return models
         if not probe.get("ok") or not cls._probe_has_inventory(probe):
             return []
-        return [line.strip() for line in str(probe.get("stdout") or "").splitlines() if line.strip()]
+        stdout = str(probe.get("stdout") or "")
+        return [line.strip() for line in stdout.splitlines() if line.strip()]
 
-    def _registry_models(self, *, force_refresh: bool = False) -> list[str]:
-        try:
-            return [str(item).strip() for item in self.registry.get_models(force_refresh=force_refresh) if str(item).strip()]
-        except Exception:
-            return []
+    def verify_auth(self) -> dict[str, Any]:
+        verify = self.probe_api_key_models()
+        verify["action"] = "verify"
+        return self._annotate_verify_result(verify)
 
-    def _run_local_cli(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
-        cmd_prefix = ExternalAIBridge.resolve_antigravity_cli_command()
-        if not cmd_prefix:
-            return {"ok": False, "stdout": "", "stderr": "antigravity_cli_not_found", "error": "antigravity_cli_not_found", "command": ["agy", *args]}
+    def _api_mode(self) -> str:
+        return "api_key"
 
-        cli_name = Path(cmd_prefix[0]).name.lower()
-        env = ExternalAIBridge._antigravity_runtime_env(cli_name)
-        repo_root = str(Path(__file__).resolve().parents[3])
-        cmd = [*cmd_prefix, *args]
-
-        structural_probe = False
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or self.probe_timeout, env=env, cwd=repo_root)
-            payload = {
-                "ok": proc.returncode == 0,
-                "stdout": proc.stdout or "",
-                "stderr": proc.stderr or "",
-                "exit_code": proc.returncode,
-                "command": cmd,
-            }
-            if structural_probe:
-                payload["probe_kind"] = "binary_presence"
-                payload["binary_present"] = proc.returncode == 0
-                payload["inventory_supported"] = False
-            return payload
-        except subprocess.TimeoutExpired as exc:
-            stdout, detail = self._timeout_detail(exc)
-            payload = {"ok": False, "stdout": stdout, "stderr": detail, "error": detail, "command": cmd, "timeout": True}
-            if structural_probe:
-                payload["probe_kind"] = "binary_presence"
-                payload["binary_present"] = False
-                payload["inventory_supported"] = False
-            return payload
-        except Exception as exc:
-            payload = {"ok": False, "stdout": "", "stderr": str(exc), "error": str(exc), "command": cmd}
-            if structural_probe:
-                payload["probe_kind"] = "binary_presence"
-                payload["binary_present"] = False
-                payload["inventory_supported"] = False
-            return payload
+    def ensure_authorized(self) -> dict[str, Any]:
+        verify = self.verify_auth()
+        if verify.get("ok"):
+            models = list(verify.get("models") or [])
+            self.session_store.record_success(models=models, auth_mode=str(verify.get("auth_mode") or self._api_mode()))
+            verify["action"] = "verify"
+            return verify
+        self.session_store.record_failure(verify.get("stderr") or verify.get("error") or "antigravity_not_ready", failure_kind=str(verify.get("failure_kind") or "unknown"))
+        verify["action"] = "verify"
+        verify["auto_login_skipped"] = True
+        verify["login_suppressed"] = True
+        verify["suppression_reason"] = "api_token_only"
+        verify["auth_mode"] = str(verify.get("auth_mode") or self._api_mode())
+        return verify
 
     def probe_api_key_models(self) -> dict[str, Any]:
         if not self.api_key:
-            return {"ok": False, "models": [], "error": "missing_api_key", "auth_mode": "api_key"}
+            return {"ok": False, "stdout": "", "stderr": "missing_api_key", "error": "missing_api_key", "status_code": None, "models": [], "auth_mode": self._api_mode(), "probe_kind": "inventory", "inventory_source": "api_key"}
         try:
-            response = httpx.get(f"{self.api_base_url}/models", params={"key": self.api_key}, timeout=self.probe_timeout)
-            models: list[str] = []
-            if response.status_code == 200:
-                payload = response.json()
-                for item in payload.get("models", []):
-                    name = str(item.get("name", "")).strip()
-                    if name:
-                        models.append(name.rsplit("/", 1)[-1])
+            response = self._request_json("GET", "models", timeout=self.probe_timeout)
+            payload = response.json() if response.content else {}
+            models = self._models_from_payload(payload)
+            stdout = "\n".join(models)
+            ok = response.status_code == 200
+            error = None if ok else response.text[:500]
             return {
-                "ok": response.status_code == 200,
+                "ok": ok,
                 "status_code": response.status_code,
+                "stdout": stdout,
+                "stderr": "" if ok else error,
+                "error": error,
                 "models": models,
-                "error": None if response.status_code == 200 else response.text[:500],
-                "auth_mode": "api_key",
+                "auth_mode": self._api_mode(),
+                "probe_kind": "inventory",
+                "inventory_source": "proxy" if self.proxy_url else "api_key",
             }
         except Exception as exc:
-            return {"ok": False, "status_code": None, "models": [], "error": str(exc), "auth_mode": "api_key"}
+            return {"ok": False, "status_code": None, "stdout": "", "stderr": str(exc), "error": str(exc), "models": [], "auth_mode": self._api_mode(), "probe_kind": "inventory", "inventory_source": "api_key"}
+
+    def list_models(self) -> list[str]:
+        res = self.probe_api_key_models()
+        models = self._probe_models(res)
+        if models:
+            return models
+        registry_models = self._registry_models(force_refresh=False)
+        if registry_models:
+            return registry_models
+        return []
+
+    def _generation_probe(self, models: list[str]) -> dict[str, Any]:
+        return self._probe_generation(models[0] if models else None)
+
+    def status(self) -> dict[str, Any]:
+        models_res = self.probe_api_key_models()
+        models = self._probe_models(models_res)
+        inventory_probe_kind = self._probe_inventory_kind(models_res)
+        inventory_source = str(models_res.get("inventory_source") or ("proxy" if self.proxy_url else "api_key"))
+        api_res: dict[str, Any] | None = models_res
+        auth_res: dict[str, Any] | None = models_res
+        generation_probe = self._generation_probe(models)
+
+        if not models:
+            registry_models = self._registry_models(force_refresh=False)
+            if registry_models:
+                models = registry_models
+                inventory_source = "registry"
+
+        ready = bool(models_res.get("ok") and generation_probe.get("ok"))
+        if not ready and not models and api_res and api_res.get("ok"):
+            ready = True
+
+        failure_text = " ".join(
+            str(part)
+            for part in [
+                (models_res or {}).get("stderr"),
+                (models_res or {}).get("error"),
+                (generation_probe or {}).get("stderr"),
+                (generation_probe or {}).get("error"),
+            ]
+            if str(part or "").strip()
+        ).strip()
+        failure_kind = self._classify_failure_text(failure_text)
+
+        if not ready and failure_kind == "unknown" and not self.api_key:
+            failure_kind = "missing_api_key"
+
+        return {
+            "ready": ready,
+            "models": models,
+            "models_probe": models_res,
+            "generation_probe": generation_probe,
+            "auth_probe": auth_res,
+            "api_probe": api_res,
+            "auth_mode": str(api_res.get("auth_mode") or self._api_mode()) if isinstance(api_res, dict) else self._api_mode(),
+            "inventory_ok": bool(models),
+            "inventory_source": inventory_source,
+            "inventory_probe_kind": inventory_probe_kind,
+            "failure_kind": failure_kind if not ready else "",
+        }
 
     def is_ready(self) -> bool:
         return self.status().get("ready") is True
@@ -406,7 +414,7 @@ class AntigravityManager:
         if ready:
             session_state = "ready"
             user_action_required = False
-            message_for_user = "Antigravity session is active. No login action is required."
+            message_for_user = "Antigravity API token flow is active. No login action is required."
             message_for_orchestrator = "Continue using Antigravity normally and refresh status on schedule."
         elif active and str(active_session.get("state") or "") == "waiting_code":
             session_state = "waiting_code"
@@ -433,21 +441,26 @@ class AntigravityManager:
             user_action_required = False
             message_for_user = "Recent login attempt already failed. The system is waiting before asking again."
             message_for_orchestrator = "Honor cooldown and avoid repeated login prompts until the cooldown expires."
-        elif failure_kind == "auth_required":
+        elif login_suppressed and suppression_reason == "api_token_only":
+            session_state = "api_token_only"
+            user_action_required = True
+            message_for_user = "Provide a valid Antigravity API token or fix the HTTP/HTTPS or ws/wss API endpoint."
+            message_for_orchestrator = "Request token-based remediation only."
+        elif failure_kind in {"auth_required", "missing_api_key"}:
             session_state = "auth_required"
             user_action_required = True
-            message_for_user = "Antigravity login is required once to restore the session."
-            message_for_orchestrator = "Request one interactive user login and avoid repeated auto-login loops."
+            message_for_user = "Antigravity API token is missing or rejected. Provide a valid HTTP/HTTPS or ws/wss token for the configured endpoint."
+            message_for_orchestrator = "Request token remediation only."
         elif failure_kind == "cli_missing":
             session_state = "cli_missing"
             user_action_required = True
-            message_for_user = "Antigravity CLI is missing or not executable on this machine."
-            message_for_orchestrator = "Do not retry login. Report a runtime dependency problem instead."
+            message_for_user = "Antigravity token-based API endpoint is required."
+            message_for_orchestrator = "Remediate the token-based API endpoint instead."
         elif failure_kind == "unsupported_client":
             session_state = "legacy_cli_unsupported"
             user_action_required = True
-            message_for_user = "Installed Gemini CLI is a legacy client that must be migrated to Antigravity-compatible runtime or API mode."
-            message_for_orchestrator = "Do not retry OAuth/login loops. Migrate off the legacy Gemini CLI or disable this provider until a supported Antigravity runtime is installed."
+            message_for_user = "The legacy Gemini CLI path is disabled; use the Antigravity API token flow."
+            message_for_orchestrator = "Use the Antigravity API token endpoint or disable this provider until the endpoint is installed."
         else:
             session_state = "degraded_unknown"
             user_action_required = False
@@ -459,7 +472,7 @@ class AntigravityManager:
             "runtime_owner": "orchestrator",
             "user_action_required": user_action_required,
             "session_state": session_state,
-            "auth_mode": str(status.get("auth_mode") or store.get("auth_mode") or "agy_oauth"),
+            "auth_mode": str(status.get("auth_mode") or store.get("auth_mode") or self._api_mode()),
             "last_success_at": store.get("last_success_at", ""),
             "last_login_failure_at": store.get("last_login_failure_at", ""),
             "last_login_started_at": store.get("last_login_started_at", ""),
@@ -488,101 +501,23 @@ class AntigravityManager:
                 "active": active,
             },
             "responsibility": {
-                "interactive_login": "user" if session_state in {"auth_required", "waiting_code"} else "AntigravityManager",
+                "interactive_login": "user" if session_state in {"auth_required", "waiting_code", "api_token_only"} else "AntigravityManager",
                 "session_validation": "AntigravityManager",
                 "runtime_watchdog": "AntigravityStatusModule",
                 "relogin_policy": "AntigravityManager",
             },
         }
 
-    def list_models(self) -> list[str]:
-        res = self._run_agy(["models"])
-        models = self._probe_models(res)
-        if models:
-            return models
-        registry_models = self._registry_models(force_refresh=False)
-        if registry_models:
-            return registry_models
-        api_res = self.probe_api_key_models()
-        if api_res.get("ok"):
-            return [str(item).strip() for item in api_res.get("models", []) if str(item).strip()]
-        return []
+    def _api_probe_for_models(self, models: list[str]) -> dict[str, Any]:
+        return self._probe_generation(models[0] if models else None)
 
-    def status(self) -> dict[str, Any]:
-        models_res = self._run_agy(["models"])
-        models = self._probe_models(models_res)
-        probe_res = {"ok": False, "skipped": True}
-        auth_res: dict[str, Any] | None = None
-        api_res: dict[str, Any] | None = None
-        auth_mode = "agy_oauth"
-        inventory_probe_kind = self._probe_inventory_kind(models_res)
-        inventory_source = "cli" if models else "unavailable"
-        cli_failure_kind = self._classify_failure_text(f"{models_res.get('stderr', '')} {models_res.get('stdout', '')}")
-
-        if models_res.get("ok"):
-            if not models:
-                registry_models = self._registry_models(force_refresh=False)
-                if registry_models:
-                    models = registry_models
-                    inventory_source = "registry"
-            probe_res = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"])
-            if not probe_res.get("ok") and self.api_key:
-                api_res = self.probe_api_key_models()
-                if api_res.get("ok"):
-                    auth_mode = str(api_res.get("auth_mode") or "api_key")
-                    api_models = [str(item).strip() for item in api_res.get("models", []) if str(item).strip()]
-                    if api_models:
-                        models = api_models
-                        inventory_source = "api_key"
-        else:
-            api_res = self.probe_api_key_models()
-            if api_res:
-                auth_mode = str(api_res.get("auth_mode") or "api_key")
-            if api_res.get("ok"):
-                models = [str(item).strip() for item in api_res.get("models", []) if str(item).strip()]
-                if models:
-                    inventory_source = "api_key"
-            elif cli_failure_kind == "unsupported_client":
-                auth_res = {
-                    "ok": False,
-                    "skipped": True,
-                    "failure_kind": "unsupported_client",
-                    "stderr": models_res.get("stderr") or models_res.get("stdout") or "legacy_gemini_cli_unsupported",
-                }
-                auth_mode = "legacy_gemini_cli"
-            elif self._cli_missing(models_res):
-                auth_res = {"ok": False, "skipped": True, "reason": "agy_cli_missing", "failure_kind": "cli_missing"}
-            else:
-                verify = self.verify_auth()
-                suppressed = self._maybe_suppress_login(verify)
-                auth_res = suppressed if suppressed is not None else self.ensure_authorized()
-                if auth_res.get("ok"):
-                    auth_mode = str(auth_res.get("auth_mode") or "agy_oauth")
-                    models_res = self._run_agy(["models"])
-                    inventory_probe_kind = self._probe_inventory_kind(models_res)
-                    models = self._probe_models(models_res)
-                    if models:
-                        inventory_source = "cli"
-                    else:
-                        registry_models = self._registry_models(force_refresh=False)
-                        if registry_models:
-                            models = registry_models
-                            inventory_source = "registry"
-                    if models_res.get("ok"):
-                        probe_res = self._run_agy(["-p", "healthcheck: reply with ok", "--print-timeout", f"{self.probe_timeout}s"])
-
-        inventory_ok = bool(models)
-        ready = bool((models_res.get("ok") and probe_res.get("ok")) or (api_res and api_res.get("ok")))
-        return {
-            "ready": ready,
-            "models": models,
-            "models_probe": models_res,
-            "generation_probe": probe_res,
-            "auth_probe": auth_res,
-            "api_probe": api_res,
-            "auth_mode": auth_mode,
-            "inventory_ok": inventory_ok,
-            "inventory_source": inventory_source,
-            "inventory_probe_kind": inventory_probe_kind,
-            "failure_kind": cli_failure_kind if not ready else "",
-        }
+    def _run_agy(self, args: list[str], *, timeout: int | None = None) -> dict[str, Any]:
+        if not args or args == ["models"]:
+            return self.probe_api_key_models()
+        if args[:1] == ["-p"]:
+            prompt = args[1] if len(args) > 1 else ""
+            model = args[3] if len(args) > 3 and args[2] == "--model" else None
+            probe = self._probe_generation(model)
+            probe["prompt"] = prompt
+            return probe
+        return {"ok": False, "stdout": "", "stderr": "antigravity_api_only", "error": "antigravity_api_only", "command": ["antigravity-api", *args]}

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
 import time
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import urlopen
+from typing import Any
+
+import httpx
+
+from .antigravity_provider import antigravity_request_headers, resolve_antigravity_provider_config
 
 
 @dataclass(slots=True)
@@ -20,14 +22,27 @@ class AntigravityModelCatalog:
     thinking: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class AntigravityRegistryDiagnostics:
+    ok: bool
+    error_type: str | None = None
+    error_message: str | None = None
+    status_code: int | None = None
+    source: str | None = None
+
+
 class AntigravityModelRegistry:
     def __init__(self) -> None:
-        self.api_base = os.getenv("ANTIGRAVITY_MODELS_API", os.getenv("GEMINI_MODELS_API", "https://generativelanguage.googleapis.com/v1beta/models"))
+        cfg = resolve_antigravity_provider_config()
+        self.api_base = cfg.models_endpoint
         self.cache_path = Path(os.getenv("ANTIGRAVITY_MODELS_CACHE_PATH", os.getenv("GEMINI_MODELS_CACHE_PATH", "core/.cache/antigravity_models.json")))
         self.ttl_sec = int(os.getenv("ANTIGRAVITY_MODELS_CACHE_TTL_SEC", os.getenv("GEMINI_MODELS_CACHE_TTL_SEC", "21600")))
+        self.timeout = float(os.getenv("ANTIGRAVITY_MODELS_PROBE_TIMEOUT_SEC", os.getenv("GEMINI_MODELS_PROBE_TIMEOUT_SEC", os.getenv("AI_BRIDGE_PROVIDER_PROBE_TIMEOUT_SEC", "20"))))
+        self._last_diagnostics = AntigravityRegistryDiagnostics(ok=True, source="cache")
 
-    def _api_key(self) -> str:
-        return os.getenv("ANTIGRAVITY_API_KEY", "").strip() or os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+    @staticmethod
+    def _api_key() -> str:
+        return os.getenv("ANTIGRAVITY_API_KEY", "").strip() or os.getenv("ANTIGRAVITY_API_TOKEN", "").strip() or os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
 
     @staticmethod
     def _normalize_model_name(raw: str) -> str:
@@ -42,7 +57,7 @@ class AntigravityModelRegistry:
             return False
         if not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*", name):
             return False
-        return any(marker in name for marker in ("flash", "lite", "pro", "thinking", "gemini", "claude"))
+        return any(marker in name for marker in ("flash", "lite", "pro", "thinking", "gemini", "antigravity", "claude", "omni"))
 
     @classmethod
     def _filter_models(cls, models: list[str]) -> list[str]:
@@ -57,38 +72,32 @@ class AntigravityModelRegistry:
         return filtered
 
     def _fetch_live(self) -> list[str]:
-        # Try fetching via agy CLI first as a reliable local source
-        try:
-            result = subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                # Map the CLI output to the expected model format if necessary
-                models = self._filter_models([line for line in result.stdout.splitlines() if line.strip()])
-                if models:
-                    return models
-        except Exception:
-            pass
-
         key = self._api_key()
         if not key:
+            self._last_diagnostics = AntigravityRegistryDiagnostics(ok=False, error_type="missing_api_key", error_message="ANTIGRAVITY_API_KEY is not set", source="live")
             return []
-        out: list[str] = []
-        page_token = ""
-        while True:
-            params = {"key": key}
-            if page_token:
-                params["pageToken"] = page_token
-            url = f"{self.api_base}?{urlencode(params)}"
-            with urlopen(url, timeout=20) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            for item in payload.get("models", []):
-                name = str(item.get("name", "")).replace("models/", "")
-                methods = set(item.get("supportedGenerationMethods", []))
-                if name and "generateContent" in methods:
-                    out.append(name)
-            page_token = payload.get("nextPageToken", "")
-            if not page_token:
-                break
-        return self._filter_models(out)
+        try:
+            response = httpx.get(self.api_base, headers=antigravity_request_headers(key), timeout=self.timeout)
+        except Exception as exc:
+            self._last_diagnostics = AntigravityRegistryDiagnostics(ok=False, error_type=type(exc).__name__, error_message=str(exc), source="live")
+            return []
+        if response.status_code != 200:
+            self._last_diagnostics = AntigravityRegistryDiagnostics(ok=False, error_type="http_error", error_message=response.text[:500], status_code=response.status_code, source="live")
+            return []
+        payload = response.json() if response.content else {}
+        rows = payload.get("models", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            rows = payload.get("data", []) if isinstance(payload, dict) else []
+        models: list[str] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or "").strip()
+            if self._looks_like_model_name(name):
+                models.append(self._normalize_model_name(name))
+        models = self._filter_models(models)
+        self._last_diagnostics = AntigravityRegistryDiagnostics(ok=True, status_code=200, source="live")
+        return models
 
     def _load_cache(self) -> list[str]:
         if not self.cache_path.exists():
@@ -109,25 +118,39 @@ class AntigravityModelRegistry:
     def get_models(self, force_refresh: bool = False) -> list[str]:
         cached = [] if force_refresh else self._load_cache()
         if cached:
+            self._last_diagnostics = AntigravityRegistryDiagnostics(ok=True, source="cache")
             return cached
         try:
             live = self._fetch_live()
-        except Exception:
+        except Exception as exc:
+            self._last_diagnostics = AntigravityRegistryDiagnostics(ok=False, error_type=type(exc).__name__, error_message=str(exc), source="live")
             live = []
         if live:
             self._save_cache(live)
             return live
-        return self._load_cache()
+        cached = self._load_cache()
+        if cached:
+            self._last_diagnostics = AntigravityRegistryDiagnostics(ok=True, source="cache")
+        return cached
+
+    def diagnostics(self) -> dict[str, str | int | bool | None]:
+        return {
+            "ok": self._last_diagnostics.ok,
+            "error_type": self._last_diagnostics.error_type,
+            "error_message": self._last_diagnostics.error_message,
+            "status_code": self._last_diagnostics.status_code,
+            "source": self._last_diagnostics.source,
+        }
 
     def get_catalog(self, force_refresh: bool = False) -> AntigravityModelCatalog:
         models = self.get_models(force_refresh=force_refresh)
-        lite = [m for m in models if "lite" in m]
-        flash = [m for m in models if "flash" in m and "lite" not in m]
-        pro = [m for m in models if "pro" in m or ("claude-sonnet" in m and "thinking" not in m)]
-        thinking = [m for m in models if "thinking" in m or "claude-opus" in m]
+        lower = {model: model.lower() for model in models}
+        lite = [model for model, value in lower.items() if "lite" in value]
+        flash = [model for model, value in lower.items() if "flash" in value and "lite" not in value]
+        pro = [model for model, value in lower.items() if "pro" in value or ("claude-sonnet" in value and "thinking" not in value)]
+        thinking = [model for model, value in lower.items() if "thinking" in value or "claude-opus" in value]
         return AntigravityModelCatalog(models, lite, flash, pro, thinking)
 
 
-# Legacy compatibility aliases. Keep imports working while the runtime moves to Antigravity.
 GeminiModelCatalog = AntigravityModelCatalog
 GeminiModelRegistry = AntigravityModelRegistry

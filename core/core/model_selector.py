@@ -297,9 +297,15 @@ class ModelSelector:
 
         learned_score = float(recommendation.get("score") or 0.0)
         learned_samples = int(recommendation.get("samples") or 0)
+        recommended_provider = str(recommendation.get("provider") or choice.provider)
+        if recommended_provider.strip().lower() == "openai":
+            sanitized_model = OpenAIRuntimeRouter.sanitize_model(recommended_model)
+            if not sanitized_model:
+                return choice
+            recommended_model = sanitized_model
         return ModelChoice(
             recommended_model,
-            str(recommendation.get("provider") or choice.provider),
+            recommended_provider,
             choice.complexity,
             params=choice.params,
             requires_secondary_review=choice.requires_secondary_review,

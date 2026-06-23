@@ -83,3 +83,19 @@ def test_create_standard_task_attaches_normalized_text_profile_and_parallel_hint
     assert profile["confidence_score"] >= 0.72
     assert any(item.startswith("files:") for item in profile["matched_rules"])
     assert task.routing_hints["parallelize_code"] is True
+
+
+def test_create_standard_task_rejects_runtime_ineligible_openai_model(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        '{"fully_routable_models": ["gpt-5.5"], "validated_models": [{"model": "claude-opus-4-8", "chat_completions": {"ok": false, "error": "Claude pool has no eligible resources"}, "responses": {"ok": false, "error": "Claude pool has no eligible resources"}}, {"model": "gpt-5.5", "chat_completions": {"ok": true}, "responses": {"ok": true}}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+
+    task = create_standard_task({"message": "Fix routing", "provider": "openai", "model": "claude-opus-4-8"})
+
+    assert task.assigned_model is None
+    assert task.routing_hints.get("requested_model") is None
+    assert task.routing_hints["requested_model_rejected"] == "claude-opus-4-8"

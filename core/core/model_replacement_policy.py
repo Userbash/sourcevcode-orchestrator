@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .model_routing_policy import ModelRoutingPolicy
+
 
 @dataclass(slots=True)
 class ModelFailureState:
@@ -86,6 +88,7 @@ class ModelReplacementPolicy:
         state.last_error_type = reason
         state.last_failure_at = now.isoformat()
 
+        ModelRoutingPolicy.block_model(model_name, reason=reason, cooldown_sec=300, block_family=reason in {'quota_exhaustion', 'api_timeout', 'tcp_timeout', 'sdk_hang', 'probe_failed'} or 'claude pool has no eligible resources' in reason or 'http 429' in reason or 'http error 0' in reason)
         if self._provider_kind(provider) == 'local':
             if state.consecutive_failures >= self.local_hide_failures:
                 state.hard_excluded = True
@@ -248,6 +251,13 @@ class ModelReplacementPolicy:
             self._push_unique(rows, seen, 'openai', 'gpt-5.5')
             self._push_unique(rows, seen, 'openai', 'gpt-5.4')
             self._push_unique(rows, seen, 'mistral', 'mistral-large-latest')
+
+        if failure_reason and any(marker in reason for marker in {'http error 0', 'http 429', 'claude pool has no eligible resources', 'claude_pool_error'}):
+            blocked_family = ModelRoutingPolicy.family(model_name)
+            rows = [row for row in rows if ModelRoutingPolicy.family(row['model_name']) != blocked_family]
+            for candidate in ModelRoutingPolicy.family_failover_candidates(model_name, task):
+                self._push_unique(rows, seen, 'openai' if candidate.startswith(('gpt-', 'claude', 'o')) else ('mistral' if candidate.startswith(('mistral', 'codestral', 'devstral')) else 'local'), candidate)
+
         return [row for row in rows if row['model_name'] != model_name or row['provider'] != provider]
 
     def _available_pairs(self, participation: dict[str, Any]) -> set[tuple[str, str]]:

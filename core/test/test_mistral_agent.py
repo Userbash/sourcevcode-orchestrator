@@ -75,3 +75,34 @@ def test_mistral_agent_prefers_assigned_model_override(monkeypatch):
     assert result.status.value == "done"
     assert captured["model"] == "mistral-medium-latest"
     assert result.model_name == "mistral-medium-latest"
+
+
+
+def test_mistral_agent_falls_back_to_fast_model_after_transient_failure(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
+    monkeypatch.setenv("MISTRAL_MODEL", "mistral-large-latest")
+    monkeypatch.setenv("MISTRAL_FAST_MODEL", "mistral-medium-latest")
+    seen: list[str] = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        model = json["model"]
+        seen.append(model)
+        response = MagicMock()
+        if model == "mistral-large-latest":
+            response.status_code = 503
+            response.raise_for_status.side_effect = RuntimeError("service busy")
+            return response
+        response.status_code = 200
+        response.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+        response.raise_for_status.return_value = None
+        return response
+
+    monkeypatch.setattr("core.agents.mistral_agent.httpx.post", fake_post)
+    monkeypatch.setattr("core.agents.mistral_agent.time.sleep", lambda *_args, **_kwargs: None)
+    agent = MistralAgent("mistral-1", _Security())
+
+    result = agent.run(_task(TaskType.RESEARCH, "collect runtime readiness summary"))
+
+    assert result.status.value == "done"
+    assert seen[-1] == "mistral-medium-latest"
+    assert result.model_name == "mistral-medium-latest"

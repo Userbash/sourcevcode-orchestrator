@@ -50,5 +50,15 @@
   "quality_pressure": {
     "high": 0.88,
     "medium": 0.78
+  },
+  "metadata": {
+    "transport": "direct_api",
+    "inventory_source": "direct_http_catalog",
+    "auth_mode": "api_key",
+    "endpoint_roles": {
+      "inventory": "models",
+      "chat": "chat/completions",
+      "responses": "responses"
+    }
   }
 }

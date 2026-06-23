@@ -261,3 +261,22 @@ def test_openai_runtime_router_filters_runtime_incompatible_models(tmp_path, mon
 
     assert "claude-sonnet-4-6" not in plan.models
     assert plan.models[0] == "gpt-5.5"
+
+
+def test_openai_runtime_router_sanitize_model_rejects_runtime_ineligible_model(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "fully_routable_models": ["gpt-5.5"],
+            "validated_models": [
+                {"model": "claude-haiku-4-5", "chat_completions": {"ok": False, "error": "Claude pool has no eligible resources"}, "responses": {"ok": False, "error": "Claude pool has no eligible resources"}},
+                {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+
+    assert OpenAIRuntimeRouter.sanitize_model("claude-haiku-4-5") is None
+    assert OpenAIRuntimeRouter.sanitize_model("gpt-5.5") == "gpt-5.5"

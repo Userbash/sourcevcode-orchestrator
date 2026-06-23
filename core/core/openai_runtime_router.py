@@ -8,6 +8,7 @@ from typing import Any
 
 from .models import Complexity, Task, TaskType
 from .openai_model_registry import OpenAIModelRegistry
+from .model_routing_policy import ModelRoutingPolicy
 
 
 class OpenAIModelUnavailableError(RuntimeError):
@@ -45,6 +46,8 @@ class OpenAIRoutingPlan:
     remaining_tokens: int
     complexity: Complexity
     reason: str
+    estimated_cost_usd: float = 0.0
+    cost_rows: list[dict[str, Any]] | None = None
 
 
 class OpenAIRuntimeRouter:
@@ -179,7 +182,30 @@ class OpenAIRuntimeRouter:
         if allowlist is None:
             return filtered
         allowlisted = [model for model in filtered if model in allowlist]
-        return allowlisted or filtered
+        return ModelRoutingPolicy.filter_available(allowlisted or filtered)
+
+    @classmethod
+    def is_runtime_routable_model(cls, model_name: str, *, require_allowlist: bool = True) -> bool:
+        model = str(model_name or "").strip()
+        if not model or not cls.is_chat_routable_model(model):
+            return False
+        blocked = cls._load_runtime_blocklist()
+        if model in blocked:
+            return False
+        require_routable = os.getenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if not require_routable or not require_allowlist:
+            return True
+        allowlist = cls._load_routable_allowlist()
+        if allowlist is None:
+            return True
+        return model in allowlist
+
+    @classmethod
+    def sanitize_model(cls, model_name: str | None, *, require_allowlist: bool = True) -> str | None:
+        model = str(model_name or "").strip()
+        if not model:
+            return None
+        return model if cls.is_runtime_routable_model(model, require_allowlist=require_allowlist) else None
 
     @staticmethod
     def _fallbacks(complexity: Complexity, task: Task) -> list[str]:
@@ -220,7 +246,7 @@ class OpenAIRuntimeRouter:
         preferred = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.4-nano"]
         return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_interactive"
 
-    def _complexity_ordered_models(self, task: Task, complexity: Complexity, *, force_refresh: bool = False) -> list[str]:
+    def _complexity_ordered_models(self, task: Task, complexity: Complexity, *, force_refresh: bool = False) -> tuple[list[str], str, list[str]]:
         catalog = self.registry.get_catalog(force_refresh=force_refresh)
         codex_task = task.type in {TaskType.CODE, TaskType.FIX, TaskType.TEST}
         if complexity == Complexity.LOW:
@@ -240,9 +266,10 @@ class OpenAIRuntimeRouter:
             env_key = "OPENAI_CRITICAL_MODELS"
             reason = "critical_quality"
 
-        models = [*self._env_models(env_key), *live, *self._fallbacks(complexity, task), *self._env_models("OPENAI_EXTRA_MODELS")]
+        env_models = self._env_models(env_key)
+        models = [*env_models, *live, *self._fallbacks(complexity, task), *self._env_models("OPENAI_EXTRA_MODELS")]
         ordered = self._dedupe(models)
-        return self._filter_models_by_runtime_inventory(ordered), reason
+        return self._filter_models_by_runtime_inventory(ordered), reason, env_models
 
     @staticmethod
     def _dedupe(models: list[str]) -> list[str]:
@@ -264,13 +291,14 @@ class OpenAIRuntimeRouter:
         used = self._session_token_usage.get(session_id, 0)
         budget = self._budget_for_task(task)
         remaining = max(0, budget - used)
+        env_models: list[str] = []
 
         if remaining <= 0:
             models = ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"]
             reason = "budget_depleted_lightweight_only"
         else:
             first_call = used <= 0
-            models, reason = self._complexity_ordered_models(task, complexity, force_refresh=first_call)
+            models, reason, env_models = self._complexity_ordered_models(task, complexity, force_refresh=first_call)
             models, ws_reason = self._prioritize_for_ws_cost_tier(task, models, complexity)
             if ws_reason:
                 reason = ws_reason
@@ -280,10 +308,18 @@ class OpenAIRuntimeRouter:
                 reason = "budget_guard_lightweight"
 
         blocked = self._session_blocked_models.get(session_id, set())
-        models = [model for model in models if model not in blocked]
+        models = [model for model in models if model not in blocked and ModelRoutingPolicy.is_model_available(model)]
+        if not any(model in models for model in env_models):
+            models = ModelRoutingPolicy.sort_for_task(task, models, estimated_tokens=estimated, budget_pressure="high" if estimated > remaining else "normal")
         if not models:
             raise OpenAIModelUnavailableError("no OpenAI models available for runtime routing")
-        return OpenAIRoutingPlan(models, estimated, remaining, complexity, reason)
+        base_cost = float(os.getenv("AI_BRIDGE_OPENAI_COST_PER_1M_TOKENS_USD", "1.0"))
+        cost_rows = [
+            {"model": model, "multiplier": ModelRoutingPolicy.multiplier(model), "estimated_cost_usd": ModelRoutingPolicy.estimate_cost_usd(estimated, model, base_cost_per_million_tokens=base_cost)}
+            for model in models
+        ]
+        estimated_cost = round(sum(float(row["estimated_cost_usd"]) for row in cost_rows), 6)
+        return OpenAIRoutingPlan(models, estimated, remaining, complexity, reason, estimated_cost, cost_rows)
 
     def select_model(self, task: Task, prompt: str = "") -> str:
         return self.build_plan(task, prompt).models[0]
@@ -293,7 +329,8 @@ class OpenAIRuntimeRouter:
         current = self._session_token_usage.get(session_id, 0)
         self._session_token_usage[session_id] = max(0, current + max(0, consumed_tokens))
 
-    def block_model(self, task: Task, model: str) -> None:
+    def block_model(self, task: Task, model: str, *, reason: str = "") -> None:
         session_id = task.session_id or "default"
         blocked = self._session_blocked_models.setdefault(session_id, set())
         blocked.add(model)
+        ModelRoutingPolicy.block_model(model, reason=reason or "probe_failed", cooldown_sec=300)

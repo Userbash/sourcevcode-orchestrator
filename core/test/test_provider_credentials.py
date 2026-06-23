@@ -63,3 +63,20 @@ def test_load_env_file_syncs_openai_codex_sale_aliases(tmp_path, monkeypatch) ->
     assert os.getenv("CODEX_SALE_API_KEY") == "openai_nonsecret_key_value_1234567890"
     assert os.getenv("OPENAI_BASE_URL") == "https://codex.sale/v1"
     assert os.getenv("OPENAI_TCP_PROBE_HOSTS") == "codex.sale:443"
+
+
+def test_load_default_env_cascades_local_secrets(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("AI_BRIDGE_AUTO_APPROVE=true\n", encoding="utf-8")
+    (tmp_path / ".env.local.secrets").write_text(
+        "MIMO_API_KEY=mimo_nonsecret_key_value_1234567890\nJWT_SECRET=test-secret\n",
+        encoding="utf-8",
+    )
+
+    load_env_file(str(env_file))
+
+    assert os.getenv("MIMO_API_KEY") == "mimo_nonsecret_key_value_1234567890"
+    assert os.getenv("JWT_SECRET") == "test-secret"

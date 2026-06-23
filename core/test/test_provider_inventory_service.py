@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 from core.core.provider_inventory_service import ProviderInventoryService
 
@@ -11,6 +12,8 @@ def test_provider_inventory_service_reads_provider_snapshot(tmp_path, monkeypatc
     snapshot.write_text(json.dumps({"updated_at": int(time.time()), "providers": {"mistral": {"provider": "mistral", "models": ["mistral-large-latest"], "source": "cache", "ok": True}}}), encoding="utf-8")
     monkeypatch.setenv("PROVIDER_INVENTORY_SNAPSHOT_PATH", str(snapshot))
 
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._generated_mimo_models", staticmethod(lambda: []))
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._artifact_mimo_models", staticmethod(lambda: {"usable": [], "ping": []}))
     service = ProviderInventoryService()
     provider = service.provider_snapshot("mistral")
 
@@ -23,7 +26,7 @@ def test_provider_inventory_service_builds_participation_snapshot(tmp_path, monk
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True)
     (report_dir / "model_ping_report.json").write_text(
-        '{"openai": {"models": [{"model": "gpt-5.4", "ok": true}, {"model": "gpt-5.5", "ok": true}]}, "mistral": {"models": [{"model": "mistral-large-latest", "ok": true}, {"model": "codestral-embed", "ok": false, "skipped": true, "skip_reason": "embedding_model"}, {"model": "labs-leanstral-2603", "ok": false, "status_code": 403, "error": "Labs model"}]}, "local_llm": {"models": [{"model": "qwen2.5:32b-instruct-q4_k_m", "ok": true}, {"model": "qwen-2.5-7b-instruct", "ok": false, "error": ""}]}, "antigravity": {"models": [{"model": "antigravity-cli", "ok": false, "error": "not found"}]}}',
+        '{"openai": {"models": [{"model": "gpt-5.4", "ok": true}, {"model": "gpt-5.5", "ok": true}]}, "mistral": {"models": [{"model": "mistral-large-latest", "ok": true}, {"model": "codestral-embed", "ok": false, "skipped": true, "skip_reason": "embedding_model"}, {"model": "labs-leanstral-2603", "ok": false, "status_code": 403, "error": "Labs model"}]}, "local_llm": {"models": [{"model": "qwen2.5:32b-instruct-q4_k_m", "ok": true}, {"model": "qwen-2.5-7b-instruct", "ok": false, "error": ""}]}, "antigravity": {"models": [{"model": "antigravity-pro", "ok": false, "error": "not found"}]}}',
         encoding='utf-8',
     )
     (report_dir / "mimo_model_ping_report.json").write_text(
@@ -42,7 +45,7 @@ def test_provider_inventory_service_builds_participation_snapshot(tmp_path, monk
             self.model_name = model_name
 
     service = ProviderInventoryService()
-    snap = service.build_participation_snapshot([_Record("mistral", "mistral-large-latest"), _Record("local", "qwen2.5:32b-instruct-q4_k_m"), _Record("google", "antigravity-cli")])
+    snap = service.build_participation_snapshot([_Record("mistral", "mistral-large-latest"), _Record("local", "qwen2.5:32b-instruct-q4_k_m"), _Record("antigravity", "antigravity-pro")])
 
     assert any(item["model_name"] == "mistral-large-latest" and item["source"] == "registered_agent" for item in snap["active_now"])
     assert any(item["model_name"] == "mistral/mistral-large-latest" and item["source"] == "mimo_usable" for item in snap["active_now"])
@@ -50,6 +53,7 @@ def test_provider_inventory_service_builds_participation_snapshot(tmp_path, monk
     assert any(item["model_name"] == "codestral-embed" and item["reason"] == "embedding_model" for item in snap["present_but_unusable"])
     assert any(item["model_name"] == "github-copilot/gpt-5.2" and item["reason"] == "github_pat_not_supported" for item in snap["present_but_unusable"])
     assert any(item["model_name"] == "qwen-2.5-7b-instruct" and item["reason"] == "probe_failed" for item in snap["present_but_unusable"])
+    assert any(item["model_name"] == "antigravity-pro" and item["reason"] == "direct_api_missing_or_unready" for item in snap["present_but_unusable"])
 
 
 def test_provider_inventory_service_syncs_openai_artifacts(monkeypatch):
@@ -79,54 +83,28 @@ def test_provider_inventory_service_syncs_openai_artifacts(monkeypatch):
     assert entry["diagnostics"]["artifact_sync"]["orchestrator_templates_path"] == "templates.json"
 
 
-def test_provider_inventory_service_mimo_uses_sync_refresh_in_running_loop(tmp_path, monkeypatch):
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir(parents=True)
-    monkeypatch.setenv("PROVIDER_INVENTORY_REPORT_DIR", str(report_dir))
-    class _Bridge:
-        def __init__(self):
-            self.is_cli_alive = True
-        def get_cached_models(self):
-            return []
-        def refresh_cache_sync(self):
-            return [type("Snap", (), {"full_id": "mimo/mimo-auto", "id": "mimo-auto"})()]
-
-    monkeypatch.setattr("core.core.provider_inventory_service.MimoAsyncBridge", _Bridge)
-    monkeypatch.setattr("core.core.provider_inventory_service.asyncio.get_running_loop", lambda: object())
-
+def test_provider_inventory_service_mimo_uses_direct_catalog(monkeypatch):
+    monkeypatch.setattr("core.core.provider_inventory_service.fetch_mimo_model_catalog", lambda force_refresh=False: {"models": ["xiaomi/mimo-v2.5-pro"], "source": "live", "status_code": 200, "error": None})
+    monkeypatch.setattr("core.core.provider_inventory_service.sync_mimo_native_artifacts", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr("core.core.provider_inventory_service.configured_native_mimo_models", lambda: ["xiaomi/mimo-v2.5-pro"])
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._generated_mimo_models", staticmethod(lambda: []))
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._artifact_mimo_models", staticmethod(lambda: {"usable": [], "ping": []}))
     service = ProviderInventoryService()
     entry = service._mimo_entry(force_refresh=True)
-
     assert entry.ok is True
-    assert entry.source == "bridge_live_sync"
-    assert entry.models == ["mimo/mimo-auto"]
+    assert entry.source == "direct_http_catalog"
+    assert entry.models == ["xiaomi/mimo-v2.5-pro"]
 
 
-def test_provider_inventory_service_mimo_falls_back_to_generated_catalog(tmp_path, monkeypatch):
-    report_dir = tmp_path / "reports"
-    report_dir.mkdir(parents=True)
-    monkeypatch.setenv("PROVIDER_INVENTORY_REPORT_DIR", str(report_dir))
-    cache = tmp_path / "openai_models_full.json"
-    cache.write_text(json.dumps({"models": ["mimo-v2-pro", "mimo-v2.5", "gpt-5.5"]}), encoding="utf-8")
-    monkeypatch.setenv("OPENAI_MODELS_FULL_CACHE_PATH", str(cache))
-
-    class _Bridge:
-        def __init__(self):
-            self.is_cli_alive = False
-        def get_cached_models(self):
-            return []
-        def refresh_cache_sync(self):
-            return []
-
-    monkeypatch.setattr("core.core.provider_inventory_service.MimoAsyncBridge", _Bridge)
-
+def test_provider_inventory_service_mimo_falls_back_to_generated_catalog(monkeypatch):
+    monkeypatch.setattr("core.core.provider_inventory_service.fetch_mimo_model_catalog", lambda force_refresh=False: {"models": [], "source": "unconfigured", "status_code": None, "error": "MIMO_API_KEY not set"})
+    monkeypatch.setattr("core.core.provider_inventory_service.configured_native_mimo_models", lambda: [])
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._generated_mimo_models", staticmethod(lambda: ["mimo-v2-pro", "mimo-v2.5"]))
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._artifact_mimo_models", staticmethod(lambda: {"usable": [], "ping": []}))
     service = ProviderInventoryService()
     entry = service._mimo_entry(force_refresh=True)
-
-    assert entry.ok is False
-    assert entry.source == "generated_manifest_fallback"
-    assert entry.models == ["mimo-v2-pro", "mimo-v2.5"]
-    assert entry.diagnostics["generated_fallback_used"] is True
+    assert entry.ok is True
+    assert entry.models == ["xiaomi/mimo-v2-pro", "xiaomi/mimo-v2.5"]
 
 
 
@@ -137,7 +115,7 @@ def test_provider_inventory_service_refreshes_mimo_usable_snapshot(tmp_path, mon
 
     class _Bridge:
         def __init__(self):
-            self.is_cli_alive = True
+            self.is_catalog_available = True
         def refresh_cache_sync(self):
             return [
                 type("Snap", (), {"full_id": "xiaomi/mimo-v2.5-pro", "id": "mimo-v2.5-pro"})(),
@@ -150,9 +128,9 @@ def test_provider_inventory_service_refreshes_mimo_usable_snapshot(tmp_path, mon
         stdout = json.dumps({"type": "text", "part": {"text": f"pong from {model}"}}) + "\n"
         return type("Proc", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
 
-    monkeypatch.setattr("core.core.provider_inventory_service.MimoAsyncBridge", _Bridge)
-    monkeypatch.setattr("core.core.provider_inventory_service.subprocess.run", _fake_run)
 
+    monkeypatch.setattr("core.core.provider_inventory_service.configured_native_mimo_models", lambda: ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "xiaomi/mimo-v2-flash"])
+    monkeypatch.setattr("core.core.provider_inventory_service.invoke_mimo_native", lambda model_name, prompt, timeout_sec=20.0, max_completion_tokens=128, temperature=0.0: ({"choices": [{"message": {"content": f"pong from {model_name}"}}]}, None, 200))
     service = ProviderInventoryService()
     result = service.refresh_mimo_usable_snapshot(force_refresh=True)
 
@@ -214,38 +192,23 @@ def test_provider_inventory_service_auto_refreshes_stale_snapshot(tmp_path, monk
 
 
 def test_provider_inventory_service_mimo_merges_artifact_models_into_inventory(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.core.provider_inventory_service.fetch_mimo_model_catalog", lambda force_refresh=False: {"models": ["xiaomi/mimo-v2.5-pro"], "source": "cache", "status_code": 200, "error": None})
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True)
-    (report_dir / "mimo_model_ping_report.json").write_text(json.dumps({
-        "models": [{"model": "github-models/gpt-5.4", "ok": False, "error": "auth"}]
-    }), encoding="utf-8")
-    (report_dir / "mimo_usable_models.json").write_text(json.dumps({
-        "models": [{"model": "xiaomi/mimo-v2.5-pro", "ok": True}]
-    }), encoding="utf-8")
+    (report_dir / "mimo_model_ping_report.json").write_text(json.dumps({"models": [{"model": "xiaomi/mimo-v2.5", "ok": False, "error": "auth"}]}), encoding="utf-8")
+    (report_dir / "mimo_usable_models.json").write_text(json.dumps({"models": [{"model": "xiaomi/mimo-v2.5-pro", "ok": True}]}), encoding="utf-8")
     monkeypatch.setenv("PROVIDER_INVENTORY_REPORT_DIR", str(report_dir))
-
-    class _Bridge:
-        def __init__(self):
-            self.is_cli_alive = True
-        def get_cached_models(self):
-            return [type("Snap", (), {"full_id": "mimo/mimo-auto", "id": "mimo-auto"})()]
-        def refresh_cache_sync(self):
-            return self.get_cached_models()
-
-    monkeypatch.setattr("core.core.provider_inventory_service.MimoAsyncBridge", _Bridge)
-
+    monkeypatch.setattr("core.core.provider_inventory_service.configured_native_mimo_models", lambda: ["xiaomi/mimo-v2.5-pro"])
+    monkeypatch.setattr("core.core.provider_inventory_service.ProviderInventoryService._generated_mimo_models", staticmethod(lambda: []))
     service = ProviderInventoryService()
     entry = service._mimo_entry(force_refresh=False)
-
-    assert entry.models == ["mimo/mimo-auto", "xiaomi/mimo-v2.5-pro", "github-models/gpt-5.4"]
-    assert entry.diagnostics["auto_added_models_count"] == 2
+    assert entry.models == ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5"]
     assert entry.diagnostics["usable_artifact_models_count"] == 1
     assert entry.diagnostics["ping_artifact_models_count"] == 1
-    assert entry.source == "bridge_cache+artifact_merge"
 
 
 def test_provider_inventory_service_reads_mimo_models_from_generated_profiles(tmp_path, monkeypatch):
-    generated_root = tmp_path / "generated" / "openai_compatible"
+    generated_root = tmp_path / "generated" / "mimo_native"
     model_dir = generated_root / "models"
     model_dir.mkdir(parents=True)
     (generated_root / "manifest.json").write_text(json.dumps({
@@ -260,8 +223,8 @@ def test_provider_inventory_service_reads_mimo_models_from_generated_profiles(tm
         "profile_key": "model::gpt-5.5",
         "metadata": {"model_family": "gpt"},
     }), encoding='utf-8')
-    monkeypatch.setenv("OPENAI_GENERATED_PROFILE_DIR", str(generated_root))
-    monkeypatch.setenv("OPENAI_MODELS_FULL_CACHE_PATH", str(tmp_path / "missing_cache.json"))
+    monkeypatch.setenv("MIMO_GENERATED_PROFILE_DIR", str(generated_root))
+    monkeypatch.setenv("MIMO_MODELS_FULL_CACHE_PATH", str(tmp_path / "missing_cache.json"))
 
     models = ProviderInventoryService._generated_mimo_models()
 
@@ -371,3 +334,23 @@ def test_provider_inventory_service_openai_entry_embeds_runtime_inventory(monkey
     assert entry.models == ["gpt-5.5", "claude-sonnet-4-6"]
     assert entry.source == "live"
     assert entry.diagnostics["runtime_inventory"]["artifact_sync"]["orchestrator_templates_path"] == "templates.json"
+
+
+def test_antigravity_profiles_are_direct_api_only():
+    manifest = json.loads(Path("core/mimo/profiles/manifest.json").read_text(encoding="utf-8"))
+
+    assert "providers/provider__antigravity.json" in manifest["provider_profiles"]
+    assert "models/model__antigravity-pro.json" in manifest["model_profiles"]
+    assert "models/model__antigravity-flash.json" in manifest["model_profiles"]
+    assert "combinations/combo__antigravity__antigravity-pro.json" in manifest["combo_profiles"]
+
+    for rel_path in [
+        "providers/provider__antigravity.json",
+        "models/model__antigravity-pro.json",
+        "models/model__antigravity-flash.json",
+        "combinations/combo__antigravity__antigravity-pro.json",
+    ]:
+        profile = json.loads((Path("core/mimo/profiles") / rel_path).read_text(encoding="utf-8"))
+        assert profile["metadata"]["transport"] == "direct_api"
+        assert profile["metadata"]["inventory_source"] == "direct_http_catalog"
+        assert profile["metadata"]["auth_mode"] == "api_key"

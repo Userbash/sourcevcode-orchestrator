@@ -108,32 +108,16 @@ def _check_ai_provider_access() -> CheckResult:
     load_env_file()
     mistral_key = bool(os.getenv("MISTRAL_API_KEY"))
 
-    from core.core.availability import ModelAvailability
+    from core.core.antigravity_provider import resolve_antigravity_provider_config
 
-    antigravity_cmd = ModelAvailability._resolve_antigravity_cli_command()
-    if antigravity_cmd is not None:
-        try:
-            env = os.environ.copy()
-            node_path = shutil.which("node")
-            if not node_path:
-                npx = shutil.which("npx")
-                if npx:
-                    node_dir = os.path.dirname(npx)
-                    current_path = env.get("PATH", "")
-                    if node_dir and node_dir not in current_path.split(os.pathsep):
-                        env["PATH"] = f"{node_dir}{os.pathsep}{current_path}" if current_path else node_dir
-            probe = subprocess.run([*antigravity_cmd, "--version"], capture_output=True, text=True, timeout=25, check=False, env=env)
-            antigravity_cli_ok = probe.returncode == 0
-        except Exception:
-            antigravity_cli_ok = False
-    else:
-        antigravity_cli_ok = False
+    antigravity_cfg = resolve_antigravity_provider_config()
+    antigravity_ready = bool(antigravity_cfg.api_key)
 
-    if antigravity_cli_ok or mistral_key:
-        details = f"antigravity_cli={antigravity_cli_ok}, mistral_key={mistral_key}"
+    if antigravity_ready or mistral_key:
+        details = f"antigravity_api={antigravity_ready}, mistral_key={mistral_key}"
         return CheckResult("ai_provider_access", True, details)
 
-    return CheckResult("ai_provider_access", False, "no external AI provider ready (antigravity executable unavailable and MISTRAL_API_KEY missing)")
+    return CheckResult("ai_provider_access", False, "no external AI provider ready (antigravity API token missing and MISTRAL_API_KEY missing)")
 
 
 def _check_data_plane() -> CheckResult:

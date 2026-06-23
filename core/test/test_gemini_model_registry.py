@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from core.core.gemini_model_registry import AntigravityModelRegistry
 
@@ -35,3 +36,35 @@ def test_antigravity_registry_filters_invalid_cached_model_names(tmp_path, monke
     registry = AntigravityModelRegistry()
 
     assert registry.get_models(force_refresh=False) == ["antigravity-flash"]
+
+
+class _HTTPResponse:
+    def __init__(self, payload):
+        self.payload = payload
+        self.status_code = 200
+        self.content = b"{}"
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self.payload
+
+
+def test_antigravity_registry_fetches_models_from_http_catalog(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTIGRAVITY_API_KEY", "test-key")
+    monkeypatch.setenv("ANTIGRAVITY_MODELS_CACHE_PATH", str(tmp_path / "antigravity_models.json"))
+
+    def fake_get(url, headers=None, timeout=None):
+        assert headers == {"Content-Type": "application/json", "api-key": "test-key", "Authorization": "Bearer test-key"}
+        assert url.endswith("/models")
+        return _HTTPResponse({
+            "models": [
+                {"name": "models/antigravity-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/antigravity-pro", "supportedGenerationMethods": ["generateContent"]},
+            ]
+        })
+
+    monkeypatch.setattr("core.core.gemini_model_registry.httpx.get", fake_get)
+
+    registry = AntigravityModelRegistry()
+
+    assert registry.get_models(force_refresh=True) == ["antigravity-flash", "antigravity-pro"]

@@ -24,6 +24,7 @@ from .gemini_runtime_router import AntigravityRuntimeRouter
 from .env_loader import load_env_file
 from .external_ai_bridge import ExternalAIBridge
 from .provider_credentials import credential_snapshot
+from .antigravity_provider import resolve_antigravity_provider_config
 from .antigravity_status_module import shared_antigravity_snapshot
 from .mimo_status import build_mimo_runtime_status, mimo_enabled
 from .integrations.antigravity_manager import AntigravityManager
@@ -134,12 +135,14 @@ class ModelAvailability:
         return os.getenv("AI_BRIDGE_LIVE_MODEL_PROBE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
-    def _resolve_antigravity_cli_command() -> list[str] | None:
-        return ExternalAIBridge.resolve_antigravity_cli_command()
-
-    @staticmethod
-    def _antigravity_runtime_env() -> dict[str, str]:
-        return ExternalAIBridge._antigravity_runtime_env()
+    def _antigravity_api_config() -> dict[str, str | bool]:
+        cfg = resolve_antigravity_provider_config()
+        return {
+            "api_key_configured": bool(cfg.api_key),
+            "base_url": cfg.base_url,
+            "models_endpoint": cfg.models_endpoint,
+            "chat_completions_endpoint": cfg.chat_completions_endpoint,
+        }
 
     @staticmethod
     def _tcp_targets(provider: str) -> list[tuple[str, int]]:
@@ -218,19 +221,19 @@ class ModelAvailability:
         tcp = diagnostics.get("tcp", {}) if isinstance(diagnostics.get("tcp"), dict) else {}
         if status == ProviderStatus.AUTH_FAILED:
             if provider == "antigravity":
-                key_name = "ANTIGRAVITY_API_KEY/GEMINI_API_KEY/GOOGLE_API_KEY или agy OAuth session"
+                key_name = "ANTIGRAVITY_API_KEY or ANTIGRAVITY_API_TOKEN"
             elif provider == "openai":
                 key_name = "OPENAI_API_KEY"
             else:
                 key_name = "MISTRAL_API_KEY"
-            steps.append(f"Проверь {key_name}: переменная окружения или CLI-сессия должна быть задана и не просрочена.")
+            steps.append(f"Проверь {key_name}: переменная окружения или token-based endpoint должны быть заданы и не просрочены.")
         if status == ProviderStatus.QUOTA_EXCEEDED:
             steps.append("Проверь quota/rate limit у провайдера и временно снизь приоритет этого провайдера в routing policy.")
         if status in {ProviderStatus.TIMEOUT, ProviderStatus.OFFLINE}:
             steps.append("Проверь DNS и TCP egress из среды выполнения до provider API на 443/tcp.")
             steps.append("Проверь proxy/firewall/VPN: соединение должно открываться до host из tcp diagnostics.")
             if provider == "antigravity":
-                steps.append("Проверь, что Antigravity CLI (`agy`) установлен/доступен и может выполнить `agy -p`.")
+                steps.append("Проверь token-based HTTP/HTTPS endpoint и подтверждённый models/chat catalog для Antigravity.")
             if provider == "openai":
                 steps.append("Проверь доступ к настроенному OpenAI-compatible endpoint `/models` и что выбранная Codex/OpenAI модель есть в live catalog.")
         if tcp and not tcp.get("ok"):
@@ -270,8 +273,8 @@ class ModelAvailability:
         start = datetime.now(UTC)
         diagnostics: dict[str, Any] = {
             "provider": "antigravity",
-            "credential": credential_snapshot(("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")),
-            "cli_available": bool(self._resolve_antigravity_cli_command()),
+            "credential": credential_snapshot(("ANTIGRAVITY_API_KEY", "ANTIGRAVITY_API_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY")),
+            "api_config": self._antigravity_api_config(),
         }
         tcp = self._tcp_probe("antigravity")
         diagnostics["tcp"] = tcp
@@ -294,7 +297,7 @@ class ModelAvailability:
             diagnostics["auth_probe"] = status.get("auth_probe")
         if status.get("api_probe"):
             diagnostics["api_probe"] = status.get("api_probe")
-        diagnostics["auth_mode"] = status.get("auth_mode", "agy_oauth")
+        diagnostics["auth_mode"] = status.get("auth_mode", "api_key")
         
         latency = (datetime.now(UTC) - start).total_seconds() * 1000
         
@@ -383,7 +386,7 @@ class ModelAvailability:
         start = datetime.now(UTC)
         diagnostics: dict[str, Any] = {
             "provider": "mimo",
-            "credential": credential_snapshot(("GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN")),
+            "credential": credential_snapshot(("MIMO_API_KEY", "AI_BRIDGE_MIMO_API_KEY")),
         }
         if not mimo_enabled():
             latency = (datetime.now(UTC) - start).total_seconds() * 1000
@@ -401,8 +404,8 @@ class ModelAvailability:
         diagnostics["provider_breakdown"] = snapshot.get("provider_breakdown", {})
         latency = (datetime.now(UTC) - start).total_seconds() * 1000
 
-        if not snapshot.get("cli_available") and not snapshot.get("report_present"):
-            health = ProviderHealth("mimo", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error="mimo_cli_missing", diagnostics=diagnostics)
+        if not snapshot.get("direct_api_configured") and not snapshot.get("report_present"):
+            health = ProviderHealth("mimo", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error="mimo_api_key_missing", diagnostics=diagnostics)
             return self._cache(health)
 
         if snapshot.get("ready"):
@@ -416,11 +419,11 @@ class ModelAvailability:
             return self._cache(health)
 
         auth_categories = diagnostics.get("auth_categories") or {}
-        if isinstance(auth_categories, dict) and any(key in auth_categories for key in {"github_pat_not_supported", "gemini_api_key_missing", "invalid_api_key"}):
+        if isinstance(auth_categories, dict) and any(key in auth_categories for key in {"invalid_api_key", "illegal_access", "token_plan_base_url_missing"}):
             health = ProviderHealth("mimo", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error="mimo_auth_degraded", diagnostics=diagnostics)
             diagnostics["remediation"] = [
-                "Проверь GitHub/MIMO auth mode: часть endpoints не принимает Personal Access Token.",
-                "Для Gemini-backed MIMO моделей проверь наличие совместимого Gemini credential в runtime.",
+                "Проверь MIMO_API_KEY и entitlement на native Xiaomi MIMO models.",
+                "Если ключ формата tp-..., задай MIMO_BASE_URL/AI_BRIDGE_MIMO_BASE_URL из Token Plan page.",
             ]
             return self._cache(health)
 

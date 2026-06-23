@@ -46,6 +46,9 @@ services:
       AI_KERNEL_API_KEY: ${AI_KERNEL_API_KEY:-local}
       AI_KERNEL_MODEL_ALIAS: ${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}
       AI_KERNEL_TCP_PROBE_HOSTS: ${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}
+      AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE: ${AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE:-true}
+      AI_BRIDGE_HOST_WORKSPACE_ROOT: ${AI_BRIDGE_HOST_WORKSPACE_ROOT:-.}
+      AI_KERNEL_HOST_HOME: ${AI_KERNEL_HOST_HOME:-${HOME}}
       AI_BRIDGE_WORKSPACE_ROOT: ${AI_BRIDGE_WORKSPACE_ROOT:-/workspace}
       AI_BRIDGE_EASY_DIFFUSION_START_ENABLED: ${AI_BRIDGE_EASY_DIFFUSION_START_ENABLED:-true}
       AI_BRIDGE_EASY_DIFFUSION_URL: ${AI_BRIDGE_EASY_DIFFUSION_URL:-http://host.containers.internal:9000}
@@ -80,12 +83,6 @@ services:
         export AI_BRIDGE_RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
         export AI_BRIDGE_MESSAGE_BUS_BACKEND=rabbitmq
 
-        if command -v mimo >/dev/null 2>&1; then
-          echo "[MIMO] CLI detected: $$(command -v mimo)"
-          mimo models --verbose >/tmp/mimo_models_boot.log 2>&1 || echo "[MIMO] models probe failed during boot; director will retry at runtime."
-        else
-          echo "[MIMO] CLI not found in PATH during boot."
-        fi
 
         if [ -f /app/scripts/migrate_themes_to_pg.py ]; then
           python3 /app/scripts/migrate_themes_to_pg.py || echo "Migration failed or unnecessary."

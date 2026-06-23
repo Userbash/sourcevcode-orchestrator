@@ -299,6 +299,9 @@ start_orchestrator() {
     -e AI_KERNEL_API_KEY="${AI_KERNEL_API_KEY:-local}" \
     -e AI_KERNEL_MODEL_ALIAS="${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}" \
     -e AI_KERNEL_TCP_PROBE_HOSTS="${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}" \
+    -e AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE="${AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE:-true}" \
+    -e AI_BRIDGE_HOST_WORKSPACE_ROOT="$PROJECT_ROOT" \
+    -e AI_KERNEL_HOST_HOME="$HOME" \
     -e AI_BRIDGE_WORKSPACE_ROOT=/workspace \
     -e AI_BRIDGE_EASY_DIFFUSION_START_ENABLED=false \
     -e AI_BRIDGE_MEMORY_ENABLED=true \

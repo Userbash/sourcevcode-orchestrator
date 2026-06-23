@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass, field
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -851,7 +852,7 @@ class MimoOrchestrationDirector:
             if models:
                 for model in models:
                     self.state.set_context_limit(model.id or model.full_id, int(model.context_window or 0))
-            self.is_available = self.bridge.is_cli_alive
+            self.is_available = bool(getattr(self.bridge, "is_catalog_available", False))
             if self.is_available:
                 self.last_failure_reason = None
                 self.recovery_attempts = 0
@@ -875,7 +876,7 @@ class MimoOrchestrationDirector:
         return {
             "ready": bool(self.is_available),
             "profiles_loaded": len(self.task_profiles),
-            "bridge_cli_alive": bool(getattr(self.bridge, "is_cli_alive", False)),
+            "bridge_catalog_ready": bool(getattr(self.bridge, "is_catalog_available", False)),
             "profile_manifest_present": self.profile_manifest_path.exists(),
             "status_source_configured": self._status_source is not None,
             "failure_reason": self.last_failure_reason,

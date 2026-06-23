@@ -1,7 +1,7 @@
 {
-  "generated_at": 1782114624,
+  "generated_at": 1782196111,
   "provider": "openai",
-  "base_url": "",
+  "base_url": "https://codex.sale/v1",
   "template_count": 48,
   "roles": {
     "code_parallel": [

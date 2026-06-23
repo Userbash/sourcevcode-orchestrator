@@ -33,6 +33,8 @@ class AntigravityStatusModule:
     _poll_thread: threading.Thread | None = None
     _stop_event: threading.Event = field(default_factory=threading.Event)
     _lock: threading.RLock = field(default_factory=threading.RLock)
+    _failure_count: int = 0
+    _failure_window_started_at: str | None = None
 
     @staticmethod
     def _ttl_sec() -> int:
@@ -49,6 +51,44 @@ class AntigravityStatusModule:
             return max(15, int(raw))
         except ValueError:
             return 45
+
+    @staticmethod
+    def _failure_threshold() -> int:
+        raw = os.getenv("AI_BRIDGE_ANTIGRAVITY_FAILURE_THRESHOLD", "3").strip()
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 3
+
+    @staticmethod
+    def _failure_window_sec() -> int:
+        raw = os.getenv("AI_BRIDGE_ANTIGRAVITY_FAILURE_WINDOW_SEC", "900").strip()
+        try:
+            return max(60, int(raw))
+        except ValueError:
+            return 900
+
+    def _record_success(self) -> None:
+        self._failure_count = 0
+        self._failure_window_started_at = None
+
+    def _record_failure(self) -> None:
+        now = datetime.now(UTC).isoformat()
+        if not self._failure_window_started_at:
+            self._failure_window_started_at = now
+            self._failure_count = 1
+            return
+        try:
+            started = datetime.fromisoformat(self._failure_window_started_at)
+            if (datetime.now(UTC) - started).total_seconds() > self._failure_window_sec():
+                self._failure_window_started_at = now
+                self._failure_count = 1
+                return
+        except Exception:
+            self._failure_window_started_at = now
+            self._failure_count = 1
+            return
+        self._failure_count += 1
 
     def on_load(self, api: KernelAPI) -> None:
         self._api = api
@@ -69,17 +109,20 @@ class AntigravityStatusModule:
             self._last_error = str(exc)
             return None
 
-    def _make_status(self, health: dict[str, Any], *, retry: dict[str, Any] | None = None, session_control: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _make_status(self, health: dict[str, Any], *, retry: dict[str, Any] | None = None, session_control: dict[str, Any] | None = None, failure_count: int | None = None) -> dict[str, Any]:
         ready = bool(health.get("ready"))
         session_state = str((session_control or {}).get("session_state") or "")
         overall_status = "ready" if ready else "degraded"
+        observed_failure_count = self._failure_count if failure_count is None else max(0, int(failure_count))
+        if not ready and observed_failure_count >= self._failure_threshold():
+            overall_status = "failed"
         if not ready and session_state in {"login_pending", "waiting_code"}:
             overall_status = session_state
         status = {
             "ok": ready,
             "ready": ready,
             "status": overall_status,
-            "auth_mode": health.get("auth_mode", "agy_oauth"),
+            "auth_mode": health.get("auth_mode", "api_key"),
             "models": health.get("models", []),
             "inventory_ok": health.get("inventory_ok"),
             "inventory_source": health.get("inventory_source"),
@@ -89,6 +132,10 @@ class AntigravityStatusModule:
             "auth_probe": health.get("auth_probe", {}),
             "api_probe": health.get("api_probe", {}),
             "session_control": session_control or {},
+            "failure_count": observed_failure_count,
+            "failure_threshold": self._failure_threshold(),
+            "failure_window_sec": self._failure_window_sec(),
+            "failure_window_started_at": self._failure_window_started_at,
             "error": None if ready else (health.get("models_probe", {}) or {}).get("stderr") or (health.get("generation_probe", {}) or {}).get("stderr") or (health.get("auth_probe", {}) or {}).get("stderr"),
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -121,9 +168,15 @@ class AntigravityStatusModule:
                 if retry.get("ok"):
                     health = manager.status()
             session_control = manager.session_control_status() if hasattr(manager, "session_control_status") else {}
-            status = self._make_status(health, retry=retry, session_control=session_control)
+            failure_count = 0 if health.get("ready") else self._failure_count + 1
+            status = self._make_status(health, retry=retry, session_control=session_control, failure_count=failure_count)
+            if status.get("ready"):
+                self._record_success()
+            else:
+                self._record_failure()
         except Exception as exc:
             self._last_error = str(exc)
+            self._record_failure()
             status = {
                 "ok": False,
                 "ready": False,
@@ -165,7 +218,7 @@ class AntigravityStatusModule:
         with self._lock:
             if not self._last_status:
                 self.refresh(force=False)
-            return {**self._last_status, "last_refresh_at": self._last_refresh_at, "last_error": self._last_error, "ttl_sec": self._ttl_sec(), "poll_interval_sec": self._poll_interval_sec()}
+            return {**self._last_status, "last_refresh_at": self._last_refresh_at, "last_error": self._last_error, "ttl_sec": self._ttl_sec(), "poll_interval_sec": self._poll_interval_sec(), "failure_count": self._failure_count, "failure_threshold": self._failure_threshold(), "failure_window_sec": self._failure_window_sec(), "failure_window_started_at": self._failure_window_started_at}
 
     def before_task(self, task: Any, context: dict[str, Any]) -> None:
         if context.get("needs_antigravity_status"):

@@ -1,0 +1,1039 @@
+{
+  "generated_at": 1782196133,
+  "provider": "mimo",
+  "base_url": "https://api.xiaomimimo.com/v1",
+  "template_count": 48,
+  "roles": {
+    "code_parallel": [
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning"
+        ],
+        "score": 1.14
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning",
+          "review"
+        ],
+        "score": 1.14
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-omni",
+        "family": "mimo",
+        "tier": "multimodal",
+        "preferred_task_types": [
+          "research",
+          "docs",
+          "plan",
+          "code",
+          "review",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "multimodal"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-asr",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voiceclone",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voicedesign",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.98
+      }
+    ],
+    "review_primary": [
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning"
+        ],
+        "score": 1.12
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning",
+          "review"
+        ],
+        "score": 1.12
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-omni",
+        "family": "mimo",
+        "tier": "multimodal",
+        "preferred_task_types": [
+          "research",
+          "docs",
+          "plan",
+          "code",
+          "review",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "multimodal"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-asr",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voiceclone",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "review_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voicedesign",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.9
+      }
+    ],
+    "plan_primary": [
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning"
+        ],
+        "score": 1.11
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning",
+          "review"
+        ],
+        "score": 1.11
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-omni",
+        "family": "mimo",
+        "tier": "multimodal",
+        "preferred_task_types": [
+          "research",
+          "docs",
+          "plan",
+          "code",
+          "review",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "multimodal"
+        ],
+        "score": 0.95
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.89
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-asr",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.89
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.89
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voiceclone",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.89
+      },
+      {
+        "role": "plan_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voicedesign",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.89
+      }
+    ],
+    "test_primary": [
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning",
+          "review"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-omni",
+        "family": "mimo",
+        "tier": "multimodal",
+        "preferred_task_types": [
+          "research",
+          "docs",
+          "plan",
+          "code",
+          "review",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "multimodal"
+        ],
+        "score": 0.95
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-asr",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voiceclone",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "test_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voicedesign",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.94
+      }
+    ],
+    "docs_primary": [
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning"
+        ],
+        "score": 1.08
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning",
+          "review"
+        ],
+        "score": 1.08
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-omni",
+        "family": "mimo",
+        "tier": "multimodal",
+        "preferred_task_types": [
+          "research",
+          "docs",
+          "plan",
+          "code",
+          "review",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "multimodal"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.92
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-asr",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.92
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.92
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voiceclone",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.92
+      },
+      {
+        "role": "docs_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voicedesign",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.92
+      }
+    ],
+    "research_primary": [
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research",
+          "test",
+          "docs"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "deep_reasoning",
+          "review"
+        ],
+        "score": 1.1
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2-omni",
+        "family": "mimo",
+        "tier": "multimodal",
+        "preferred_task_types": [
+          "research",
+          "docs",
+          "plan",
+          "code",
+          "review",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "multimodal"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.88
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-asr",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.88
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.88
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voiceclone",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.88
+      },
+      {
+        "role": "research_primary",
+        "provider": "mimo",
+        "model_name": "xiaomi/mimo-v2.5-tts-voicedesign",
+        "family": "mimo",
+        "tier": "standard_plus",
+        "preferred_task_types": [
+          "code",
+          "test",
+          "docs",
+          "fix",
+          "review",
+          "plan"
+        ],
+        "strengths": [
+          "coding",
+          "drafting",
+          "review"
+        ],
+        "score": 0.88
+      }
+    ]
+  },
+  "defaults": {
+    "code_parallel_branch_count": 4,
+    "review_model": "xiaomi/mimo-v2-pro",
+    "planning_model": "xiaomi/mimo-v2-pro"
+  }
+}
