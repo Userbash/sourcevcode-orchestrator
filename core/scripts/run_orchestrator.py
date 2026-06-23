@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -81,8 +80,8 @@ def _attach_default_agents(orchestrator: Orchestrator) -> None:
     orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", local_model), agent_type="custom", critical=False, model_name=local_model, provider="local")
     orchestrator.attach_local_agent("ai-kernel-qwen36-1", AIKernelAgent("ai-kernel-qwen36-1"), agent_type="custom", critical=False, model_name=ai_kernel_model, provider="ai_kernel")
 
-    if shutil.which("mimo"):
-        mimo_default_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro")
+    mimo_default_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro")
+    if os.getenv("AI_BRIDGE_MIMO_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
         orchestrator.attach_local_agent("mimo-router-1", MimoAgent("mimo-router-1", default_model=mimo_default_model), agent_type="external_ai", critical=False, model_name=mimo_default_model, provider="mimo")
 
 

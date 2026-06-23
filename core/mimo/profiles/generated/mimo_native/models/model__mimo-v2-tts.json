@@ -48,6 +48,12 @@
     "provider_family": "xiaomi_mimo_native",
     "native_direct": true,
     "generated": true,
-    "tier": "standard"
+    "tier": "standard",
+    "mimo_group": "tts",
+    "mimo_subgroup": "speech_synthesis",
+    "probe_mode": "assistant_text",
+    "group_description": "Text-to-speech / voice generation workloads that require assistant-style output payloads.",
+    "group_use_case": "Speech output, voice cloning, and voice design generation.",
+    "model_use_case": "Generate speech from text prompts for narration, assistants, or playback."
   }
 }

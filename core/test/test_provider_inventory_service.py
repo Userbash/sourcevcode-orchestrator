@@ -111,7 +111,7 @@ def test_provider_inventory_service_mimo_falls_back_to_generated_catalog(monkeyp
 def test_provider_inventory_service_refreshes_mimo_usable_snapshot(tmp_path, monkeypatch):
     report_dir = tmp_path / "reports"
     monkeypatch.setenv("PROVIDER_INVENTORY_REPORT_DIR", str(report_dir))
-    monkeypatch.setenv("AI_BRIDGE_MIMO_AUTO_PING_LIMIT", "3")
+    monkeypatch.setenv("AI_BRIDGE_MIMO_AUTO_PING_LIMIT", "0")
 
     class _Bridge:
         def __init__(self):
@@ -130,20 +130,55 @@ def test_provider_inventory_service_refreshes_mimo_usable_snapshot(tmp_path, mon
 
 
     monkeypatch.setattr("core.core.provider_inventory_service.configured_native_mimo_models", lambda: ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "xiaomi/mimo-v2-flash"])
-    monkeypatch.setattr("core.core.provider_inventory_service.invoke_mimo_native", lambda model_name, prompt, timeout_sec=20.0, max_completion_tokens=128, temperature=0.0: ({"choices": [{"message": {"content": f"pong from {model_name}"}}]}, None, 200))
+
+    def _fake_probe(model_name, prompt, *, group=None, timeout_sec=20.0):
+        return ({"choices": [{"message": {"content": f"pong from {model_name}"}}]}, None, 200, group or "text")
+
+    monkeypatch.setattr("core.core.provider_inventory_service.invoke_mimo_group_probe", _fake_probe)
     service = ProviderInventoryService()
     result = service.refresh_mimo_usable_snapshot(force_refresh=True)
 
     assert result["status"] == "ok"
     assert result["probed_count"] == 3
+    assert result["text_ready_count"] == 3
     payload = json.loads((report_dir / "mimo_usable_models.json").read_text(encoding="utf-8"))
     assert payload["usable_count"] == 3
+    assert payload["text_ready_count"] == 3
     assert payload["models"][0]["model"] == "xiaomi/mimo-v2.5-pro"
 
 
 def test_provider_inventory_service_normalizes_mimo_aliases():
     assert ProviderInventoryService._normalize_provider("xiaomi") == "mimo"
     assert ProviderInventoryService._normalize_provider("github-models") == "mimo"
+
+
+def test_provider_inventory_service_mimo_group_probe_helpers_are_group_aware():
+    from core.core.mimo_provider import build_mimo_probe_payload, mimo_group_use_case, mimo_model_group, mimo_model_subgroup, mimo_probe_mode_for_group
+
+    assert mimo_model_group("xiaomi/mimo-v2.5-pro") == "text"
+    assert mimo_model_group("xiaomi/mimo-v2.5-asr") == "asr"
+    assert mimo_model_group("xiaomi/mimo-v2.5-tts") == "tts"
+    assert mimo_model_group("xiaomi/mimo-v2-omni") == "multimodal"
+    assert mimo_probe_mode_for_group("asr") == "input_audio"
+    assert mimo_probe_mode_for_group("tts") == "assistant_text"
+    assert mimo_model_subgroup("xiaomi/mimo-v2.5-tts-voiceclone") == "voice_clone"
+    assert mimo_model_subgroup("xiaomi/mimo-v2.5-tts-voicedesign") == "voice_design"
+    assert mimo_group_use_case("tts").startswith("Speech output")
+    assert build_mimo_probe_payload("xiaomi/mimo-v2.5-asr", "reply", group="asr")["messages"][0]["content"][0]["input_audio"]["data"].startswith("data:audio/wav;base64,")
+    assert build_mimo_probe_payload("xiaomi/mimo-v2.5-tts", "reply", group="tts")["messages"][0]["role"] == "assistant"
+    assert build_mimo_probe_payload("xiaomi/mimo-v2.5-tts-voiceclone", "reply", group="tts")["audio"]["data"].startswith("data:audio/wav;base64,")
+    assert build_mimo_probe_payload("xiaomi/mimo-v2.5-tts-voiceclone", "reply", group="tts")["audio"]["voice"].startswith("data:audio/wav;base64,")
+    assert build_mimo_probe_payload("xiaomi/mimo-v2.5-tts-voiceclone", "reply", group="tts")["messages"][0]["role"] == "assistant"
+    assert build_mimo_probe_payload("xiaomi/mimo-v2.5-tts-voicedesign", "reply", group="tts")["messages"][0]["role"] == "user"
+
+
+def test_provider_inventory_service_selects_all_mimo_models_by_default(monkeypatch):
+    monkeypatch.delenv("AI_BRIDGE_MIMO_AUTO_PING_LIMIT", raising=False)
+    models = ["xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "xiaomi/mimo-v2-pro"]
+
+    selected = ProviderInventoryService._select_mimo_probe_models(models)
+
+    assert selected == models
 
 
 def test_provider_inventory_service_marks_invalid_api_key_as_auth_failed():

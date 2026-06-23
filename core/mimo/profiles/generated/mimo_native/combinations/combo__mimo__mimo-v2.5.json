@@ -48,6 +48,12 @@
     "provider_family": "xiaomi_mimo_native",
     "native_direct": true,
     "generated": true,
-    "tier": "standard_plus"
+    "tier": "standard_plus",
+    "mimo_group": "text",
+    "mimo_subgroup": "text_reasoning",
+    "probe_mode": "chat_text",
+    "group_description": "Text reasoning, coding, review, planning, and docs.",
+    "group_use_case": "General orchestrator work: coding, review, planning, docs, and synthesis.",
+    "model_use_case": "Handle text-first orchestration tasks such as coding, review, planning, and docs."
   }
 }

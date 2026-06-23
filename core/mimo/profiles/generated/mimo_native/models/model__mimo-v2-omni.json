@@ -48,6 +48,12 @@
     "provider_family": "xiaomi_mimo_native",
     "native_direct": true,
     "generated": true,
-    "tier": "multimodal"
+    "tier": "multimodal",
+    "mimo_group": "multimodal",
+    "mimo_subgroup": "multimodal_reasoning",
+    "probe_mode": "text_multimodal",
+    "group_description": "Mixed input reasoning and multimodal coordination.",
+    "group_use_case": "Cross-modal tasks that combine text reasoning with media-aware prompts.",
+    "model_use_case": "Combine text reasoning with richer multimodal context when the task needs it."
   }
 }

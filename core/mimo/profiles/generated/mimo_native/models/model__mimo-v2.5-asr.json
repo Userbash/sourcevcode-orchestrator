@@ -48,6 +48,12 @@
     "provider_family": "xiaomi_mimo_native",
     "native_direct": true,
     "generated": true,
-    "tier": "standard_plus"
+    "tier": "standard_plus",
+    "mimo_group": "asr",
+    "mimo_subgroup": "speech_to_text",
+    "probe_mode": "input_audio",
+    "group_description": "Speech-to-text / transcription workloads that require audio input.",
+    "group_use_case": "Audio transcription and speech-to-text ingestion.",
+    "model_use_case": "Convert audio into text for transcripts, captions, and voice command ingestion."
   }
 }

@@ -14,7 +14,7 @@ from core.core.mistral_model_registry import MistralModelRegistry
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.openai_compatible_inventory import is_text_compatible_model, sync_openai_compatible_artifacts
 from core.core.openai_provider import resolve_openai_provider_config
-from core.core.mimo_provider import configured_native_mimo_models, extract_mimo_response_text, fetch_mimo_model_catalog, invoke_mimo_native, sync_mimo_native_artifacts
+from core.core.mimo_provider import configured_native_mimo_models, extract_mimo_response_text, fetch_mimo_model_catalog, invoke_mimo_group_probe, mimo_group_description, mimo_group_use_case, mimo_model_group, mimo_model_subgroup, mimo_probe_mode_for_group, sync_mimo_native_artifacts
 from core.core.mimo_status import mimo_enabled
 import httpx
 import requests
@@ -435,9 +435,10 @@ class ProviderInventoryService:
     @staticmethod
     def _select_mimo_probe_models(models: list[str]) -> list[str]:
         try:
-            limit = max(1, int(os.getenv('AI_BRIDGE_MIMO_AUTO_PING_LIMIT', '6') or '6'))
+            raw_limit = str(os.getenv('AI_BRIDGE_MIMO_AUTO_PING_LIMIT', '0') or '0').strip()
+            limit = int(raw_limit)
         except ValueError:
-            limit = 6
+            limit = 0
         unique: list[str] = []
         seen: set[str] = set()
         def add(candidate: str) -> None:
@@ -461,13 +462,13 @@ class ProviderInventoryService:
             add(model)
         for model in models:
             add(model)
-            if len(unique) >= limit:
+            if limit > 0 and len(unique) >= limit:
                 break
-        return unique[:limit]
+        return unique[:limit] if limit > 0 else unique
 
     def refresh_mimo_usable_snapshot(self, *, force_refresh: bool = False, prompt: str = 'reply with pong only') -> dict[str, Any]:
         if not self.mimo_enabled:
-            return {'status': 'disabled', 'reason': 'mimo_disabled_by_env', 'disable_env': 'AI_BRIDGE_MIMO_ENABLED'}
+            return {'status': 'disabled', 'reason': 'mimo_disabled_by_env', 'disable_env': 'AI_BRIDGE_MIMO_ENABLED', 'groups': []}
         report_dir = self._report_dir()
         report_dir.mkdir(parents=True, exist_ok=True)
         now = time.time()
@@ -476,26 +477,122 @@ class ProviderInventoryService:
         inventory = configured_native_mimo_models()
         selected = self._select_mimo_probe_models(inventory)
         rows: list[dict[str, Any]] = []
-        usable_rows: list[dict[str, Any]] = []
+        ready_rows: list[dict[str, Any]] = []
+        text_ready_rows: list[dict[str, Any]] = []
+        specialized_ready_rows: list[dict[str, Any]] = []
+        group_buckets: dict[str, dict[str, Any]] = {}
+
+        def bucket_for(group: str) -> dict[str, Any]:
+            bucket = group_buckets.setdefault(
+                group,
+                {
+                    'group': group,
+                    'description': mimo_group_description(group),
+                    'use_case': mimo_group_use_case(group),
+                    'probe_mode': mimo_probe_mode_for_group(group),
+                    'inventory_count': 0,
+                    'probed_count': 0,
+                    'ready_count': 0,
+                    'failed_count': 0,
+                    'models': [],
+                    'ready_models': [],
+                    'failed_models': [],
+                },
+            )
+            return bucket
+
         for model_name in selected:
-            row: dict[str, Any] = {'model': model_name}
-            payload, error, status_code = invoke_mimo_native(model_name, prompt + ' and no reasoning', timeout_sec=20.0, max_completion_tokens=128, temperature=0.0)
+            group = mimo_model_group(model_name)
+            probe_mode = mimo_probe_mode_for_group(group)
+            row: dict[str, Any] = {
+                'model': model_name,
+                'group': group,
+                'group_description': mimo_group_description(group),
+                'group_use_case': mimo_group_use_case(group),
+                'subgroup': mimo_model_subgroup(model_name),
+                'probe_mode': probe_mode,
+            }
+            payload, error, status_code, probe_group = invoke_mimo_group_probe(model_name, prompt + ' and no reasoning', group=group, timeout_sec=20.0)
             text_output = extract_mimo_response_text(payload) if payload else ''
+            ready = False
+            if group in {'text', 'multimodal'}:
+                ready = bool(text_output)
+                if text_output:
+                    row['response_sample'] = text_output[:120]
+                    row['response_kind'] = 'text'
+                elif status_code is not None and status_code < 400:
+                    row['response_kind'] = 'non_text'
+            elif status_code is not None and status_code < 400:
+                ready = True
+                row['response_kind'] = 'specialized_ok'
+                if text_output:
+                    row['response_sample'] = text_output[:120]
             row['status_code'] = status_code
-            if text_output:
+            row['probe_group'] = probe_group
+            if ready:
                 row['ok'] = True
-                row['response_sample'] = text_output[:120]
-                usable_rows.append({'model': model_name, 'ok': True, 'response_sample': text_output[:120], 'status_code': status_code})
+                ready_rows.append({
+                    'model': model_name,
+                    'group': group,
+                    'ok': True,
+                    'response_sample': row.get('response_sample'),
+                    'status_code': status_code,
+                    'probe_mode': probe_mode,
+                })
+                if group in {'text', 'multimodal'}:
+                    text_ready_rows.append(dict(ready_rows[-1]))
+                else:
+                    specialized_ready_rows.append(dict(ready_rows[-1]))
+                bucket = bucket_for(group)
+                bucket['ready_count'] += 1
+                bucket['ready_models'].append(model_name)
             else:
                 row['ok'] = False
                 row['error'] = str(error or 'no_text_events')[:240]
+                bucket = bucket_for(group)
+                bucket['failed_count'] += 1
+                bucket['failed_models'].append({'model': model_name, 'error': row['error'], 'status_code': status_code})
+            bucket['inventory_count'] += 1
+            bucket['probed_count'] += 1
+            bucket['models'].append(model_name)
             rows.append(row)
-        report_payload = {'provider': 'mimo', 'generated_at': int(now), 'inventory_count': len(inventory), 'probed_count': len(selected), 'ok': sum(1 for row in rows if row.get('ok')), 'failed': sum(1 for row in rows if not row.get('ok')), 'models': rows}
-        usable_payload = {'provider': 'mimo', 'generated_at': int(now), 'usable_count': len(usable_rows), 'total': len(selected), 'models': usable_rows}
+
+        group_rows = [group_buckets[group] for group in sorted(group_buckets, key=lambda item: {'text': 0, 'multimodal': 1, 'asr': 2, 'tts': 3}.get(item, 99))]
+        report_payload = {
+            'provider': 'mimo',
+            'generated_at': int(now),
+            'inventory_count': len(inventory),
+            'probed_count': len(selected),
+            'ok': len(ready_rows),
+            'failed': len(rows) - len(ready_rows),
+            'models': rows,
+            'groups': group_rows,
+            'group_ready_counts': {item['group']: item['ready_count'] for item in group_rows},
+            'group_failed_counts': {item['group']: item['failed_count'] for item in group_rows},
+        }
+        usable_payload = {
+            'provider': 'mimo',
+            'generated_at': int(now),
+            'usable_count': len(ready_rows),
+            'text_ready_count': len(text_ready_rows),
+            'specialized_ready_count': len(specialized_ready_rows),
+            'total': len(selected),
+            'models': ready_rows,
+            'groups': group_rows,
+        }
         (report_dir / 'mimo_model_ping_report.json').write_text(json.dumps(report_payload, ensure_ascii=True, indent=2), encoding='utf-8')
         (report_dir / 'mimo_usable_models.json').write_text(json.dumps(usable_payload, ensure_ascii=True, indent=2), encoding='utf-8')
         self._last_mimo_auto_ping_at = now
-        return {'status': 'ok', 'inventory_count': len(inventory), 'probed_count': len(selected), 'usable_count': len(usable_rows), 'report_dir': str(report_dir)}
+        return {
+            'status': 'ok',
+            'inventory_count': len(inventory),
+            'probed_count': len(selected),
+            'usable_count': len(ready_rows),
+            'text_ready_count': len(text_ready_rows),
+            'specialized_ready_count': len(specialized_ready_rows),
+            'groups': group_rows,
+            'report_dir': str(report_dir),
+        }
 
     def _openai_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
         runtime_inventory: dict[str, Any] | None = None

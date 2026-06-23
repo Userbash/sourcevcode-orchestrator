@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import time
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -176,10 +179,15 @@ def _model_score(model_id: str, role: str) -> float:
 
 def _preferred_task_types(model_id: str) -> list[str]:
     tier = _model_tier(model_id)
+    group = mimo_model_group(model_id)
+    if group == 'asr':
+        return ['speech_to_text', 'transcription', 'voice', 'analysis']
+    if group == 'tts':
+        return ['speech_synthesis', 'voice', 'audio', 'docs']
+    if group == 'multimodal':
+        return ['research', 'docs', 'plan', 'code', 'review', 'test']
     if tier == 'frontier':
         return ['code', 'review', 'plan', 'research', 'test', 'docs']
-    if tier == 'multimodal':
-        return ['research', 'docs', 'plan', 'code', 'review', 'test']
     if tier == 'economy':
         return ['docs', 'test', 'fix', 'code']
     return ['code', 'test', 'docs', 'fix', 'review', 'plan']
@@ -188,15 +196,99 @@ def _preferred_task_types(model_id: str) -> list[str]:
 def _strengths(model_id: str) -> list[str]:
     lowered = normalize_mimo_model_name(model_id).lower()
     strengths: list[str] = ['coding', 'drafting']
+    group = mimo_model_group(model_id)
     if 'pro' in lowered:
         strengths.append('deep_reasoning')
     if 'flash' in lowered:
         strengths.append('fast_turnaround')
-    if 'omni' in lowered:
+    if group == 'multimodal':
         strengths.append('multimodal')
+    if group == 'asr':
+        strengths.append('speech_to_text')
+    if group == 'tts':
+        strengths.append('voice_synthesis')
     if '2.5' in lowered:
         strengths.append('review')
     return strengths
+
+
+_MIMO_GROUP_DESCRIPTIONS: dict[str, str] = {
+    'text': 'Text reasoning, coding, review, planning, and docs.',
+    'multimodal': 'Mixed input reasoning and multimodal coordination.',
+    'asr': 'Speech-to-text / transcription workloads that require audio input.',
+    'tts': 'Text-to-speech / voice generation workloads that require assistant-style output payloads.',
+}
+
+_MIMO_GROUP_USE_CASES: dict[str, str] = {
+    'text': 'General orchestrator work: coding, review, planning, docs, and synthesis.',
+    'multimodal': 'Cross-modal tasks that combine text reasoning with media-aware prompts.',
+    'asr': 'Audio transcription and speech-to-text ingestion.',
+    'tts': 'Speech output, voice cloning, and voice design generation.',
+}
+
+
+def mimo_model_group(model_id: str) -> str:
+    lowered = normalize_mimo_model_name(model_id).lower()
+    if not lowered:
+        return 'text'
+    if 'asr' in lowered or 'transcribe' in lowered:
+        return 'asr'
+    if 'tts' in lowered or 'speech' in lowered or 'voiceclone' in lowered or 'voicedesign' in lowered:
+        return 'tts'
+    if 'omni' in lowered or 'multimodal' in lowered:
+        return 'multimodal'
+    return 'text'
+
+
+def mimo_group_description(group: str) -> str:
+    return _MIMO_GROUP_DESCRIPTIONS.get(str(group or '').strip().lower(), _MIMO_GROUP_DESCRIPTIONS['text'])
+
+
+def mimo_group_use_case(group: str) -> str:
+    return _MIMO_GROUP_USE_CASES.get(str(group or '').strip().lower(), _MIMO_GROUP_USE_CASES['text'])
+
+
+def mimo_probe_mode_for_group(group: str) -> str:
+    normalized = str(group or '').strip().lower()
+    if normalized == 'asr':
+        return 'input_audio'
+    if normalized == 'tts':
+        return 'assistant_text'
+    if normalized == 'multimodal':
+        return 'text_multimodal'
+    return 'chat_text'
+
+
+def mimo_model_subgroup(model_id: str) -> str:
+    lowered = normalize_mimo_model_name(model_id).lower()
+    group = mimo_model_group(model_id)
+    if group == 'asr':
+        return 'speech_to_text'
+    if group == 'tts':
+        if 'voiceclone' in lowered:
+            return 'voice_clone'
+        if 'voicedesign' in lowered:
+            return 'voice_design'
+        return 'speech_synthesis'
+    if group == 'multimodal':
+        return 'multimodal_reasoning'
+    return 'text_reasoning'
+
+
+def mimo_model_use_case(model_id: str) -> str:
+    group = mimo_model_group(model_id)
+    subgroup = mimo_model_subgroup(model_id)
+    if group == 'asr':
+        return 'Convert audio into text for transcripts, captions, and voice command ingestion.'
+    if subgroup == 'voice_clone':
+        return 'Clone a speaker voice from reference audio before generating speech output.'
+    if subgroup == 'voice_design':
+        return 'Design or refine a synthetic voice using text guidance.'
+    if group == 'tts':
+        return 'Generate speech from text prompts for narration, assistants, or playback.'
+    if group == 'multimodal':
+        return 'Combine text reasoning with richer multimodal context when the task needs it.'
+    return 'Handle text-first orchestration tasks such as coding, review, planning, and docs.'
 
 
 def build_mimo_model_profile(model_id: str) -> dict[str, Any]:
@@ -210,12 +302,19 @@ def build_mimo_model_profile(model_id: str) -> dict[str, Any]:
     }[tier]
     context_depth = {'frontier': 6, 'multimodal': 5, 'standard_plus': 5, 'standard': 4, 'economy': 3}[tier]
     model_key = _prefixed_native_model(model_id)
+    group = mimo_model_group(model_id)
     metadata = {
         'model_family': 'mimo',
         'provider_family': 'xiaomi_mimo_native',
         'native_direct': True,
         'generated': True,
         'tier': tier,
+        'mimo_group': group,
+        'mimo_subgroup': mimo_model_subgroup(model_id),
+        'probe_mode': mimo_probe_mode_for_group(group),
+        'group_description': mimo_group_description(group),
+        'group_use_case': mimo_group_use_case(group),
+        'model_use_case': mimo_model_use_case(model_id),
     }
     model_payload = {
         'profile_type': 'model',
@@ -263,12 +362,19 @@ def build_mimo_orchestrator_templates(models: list[str], *, base_url: str = '') 
     for role in roles:
         rows: list[dict[str, Any]] = []
         for model in compatible:
+            group = mimo_model_group(model)
             rows.append({
                 'role': role,
                 'provider': 'mimo',
                 'model_name': model,
                 'family': 'mimo',
                 'tier': _model_tier(model),
+                'group': group,
+                'group_description': mimo_group_description(group),
+                'group_use_case': mimo_group_use_case(group),
+                'subgroup': mimo_model_subgroup(model),
+                'model_use_case': mimo_model_use_case(model),
+                'probe_mode': mimo_probe_mode_for_group(group),
                 'preferred_task_types': _preferred_task_types(model),
                 'strengths': _strengths(model),
                 'score': _model_score(model, role),
@@ -346,6 +452,22 @@ def load_mimo_model_catalog() -> dict[str, Any]:
         payload.setdefault('models', [])
         payload.setdefault('source', 'cache')
         payload.setdefault('ok', bool(payload.get('models')))
+        if payload.get('models'):
+            return payload
+    short_cache = _read_json(_mimo_cache_path())
+    short_models = _dedupe_native_models(list(short_cache.get('models') or [])) if short_cache else []
+    if short_models:
+        return {
+            'ts': int(short_cache.get('ts') or time.time()) if isinstance(short_cache, dict) else int(time.time()),
+            'provider': 'mimo',
+            'base_url': resolve_mimo_provider_config().base_url,
+            'endpoint': resolve_mimo_provider_config().models_endpoint,
+            'status_code': short_cache.get('status_code') if isinstance(short_cache, dict) else None,
+            'source': 'short_cache_fallback',
+            'error': None,
+            'total_models': len(short_models),
+            'models': short_models,
+        }
     return payload
 
 
@@ -653,3 +775,134 @@ def invoke_mimo_native(model_name: str, prompt: str, *, timeout_sec: float = 45.
             return payload, message, response.status_code
         return None, (response.text or f'http_{response.status_code}').strip(), response.status_code
     return payload if isinstance(payload, dict) else None, None, response.status_code
+
+
+def _mimo_silent_wav_base64(*, duration_ms: int = 250, sample_rate: int = 16000) -> str:
+    frame_count = max(1, int(sample_rate * max(1, duration_ms) / 1000))
+    pcm = b"\x00\x00" * frame_count
+    with io.BytesIO() as buffer:
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm)
+        return base64.b64encode(buffer.getvalue()).decode('ascii')
+
+
+def _mimo_silent_wav_data_url(*, duration_ms: int = 250, sample_rate: int = 16000) -> str:
+    return f'data:audio/wav;base64,{_mimo_silent_wav_base64(duration_ms=duration_ms, sample_rate=sample_rate)}'
+
+
+def _mimo_input_audio_payload(*, duration_ms: int = 250, sample_rate: int = 16000) -> dict[str, Any]:
+    return {
+        'data': _mimo_silent_wav_data_url(duration_ms=duration_ms, sample_rate=sample_rate),
+        'format': 'wav',
+    }
+
+
+def _mimo_audio_payload(*, duration_ms: int = 250, sample_rate: int = 16000) -> dict[str, Any]:
+    return {
+        'data': _mimo_silent_wav_data_url(duration_ms=duration_ms, sample_rate=sample_rate),
+        'format': 'wav',
+        'voice': _mimo_silent_wav_data_url(duration_ms=max(120, duration_ms), sample_rate=sample_rate),
+    }
+
+def build_mimo_probe_payload(model_name: str, prompt: str, *, group: str | None = None) -> dict[str, Any]:
+    normalized_model = normalize_mimo_model_name(model_name)
+    model_group = str(group or mimo_model_group(model_name)).strip().lower()
+    if model_group == 'asr':
+        return {
+            'model': normalized_model,
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'input_audio',
+                            'input_audio': _mimo_input_audio_payload(),
+                        }
+                    ],
+                }
+            ],
+            'max_completion_tokens': 64,
+            'temperature': 0.0,
+            'stream': False,
+        }
+    if 'voiceclone' in normalized_model.lower():
+        return {
+            'model': normalized_model,
+            'messages': [
+                {
+                    'role': 'assistant',
+                    'content': prompt,
+                }
+            ],
+            'audio': _mimo_audio_payload(),
+            'max_completion_tokens': 64,
+            'temperature': 0.0,
+            'stream': False,
+        }
+    if 'voicedesign' in normalized_model.lower():
+        return {
+            'model': normalized_model,
+            'messages': [
+                {
+                    'role': 'user',
+                    'content': prompt,
+                }
+            ],
+            'max_completion_tokens': 64,
+            'temperature': 0.0,
+            'stream': False,
+        }
+    if model_group == 'tts':
+        return {
+            'model': normalized_model,
+            'messages': [
+                {
+                    'role': 'assistant',
+                    'content': prompt,
+                }
+            ],
+            'max_completion_tokens': 64,
+            'temperature': 0.0,
+            'stream': False,
+        }
+    return {
+        'model': normalized_model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'max_completion_tokens': 64,
+        'temperature': 0.0,
+        'stream': False,
+    }
+
+
+def invoke_mimo_group_probe(model_name: str, prompt: str, *, group: str | None = None, timeout_sec: float = 45.0) -> tuple[dict[str, Any] | None, str | None, int | None, str]:
+    cfg = resolve_mimo_provider_config()
+    preflight_error = preflight_mimo_native_request(model_name, cfg)
+    probe_group = str(group or mimo_model_group(model_name)).strip().lower()
+    if preflight_error:
+        return None, preflight_error, None, probe_group
+    try:
+        response = httpx.post(
+            cfg.chat_completions_endpoint,
+            headers=mimo_request_headers(cfg.api_key),
+            json=build_mimo_probe_payload(model_name, prompt, group=probe_group),
+            timeout=timeout_sec,
+        )
+    except Exception as exc:
+        return None, str(exc), None, probe_group
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if response.status_code >= 400:
+        if isinstance(payload, dict):
+            err = payload.get('error') or {}
+            message = str(err.get('message') or response.text or f'http_{response.status_code}').strip()
+            param = str(err.get('param') or '').strip()
+            if param:
+                message = f'{message}: {param}'
+            return payload, message, response.status_code, probe_group
+        return None, (response.text or f'http_{response.status_code}').strip(), response.status_code, probe_group
+    return payload if isinstance(payload, dict) else None, None, response.status_code, probe_group
