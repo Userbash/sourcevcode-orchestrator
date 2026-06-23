@@ -10,8 +10,8 @@ from core.core.models import AgentHealth, AgentStatus, Task, TaskStatus
 from core.core.security import SecurityManager
 
 
-class AntigravityCLIAgent(BaseAgent):
-    def __init__(self, agent_id: str, security_manager: SecurityManager) -> None:
+class AntigravityAgent(BaseAgent):
+    def __init__(self, agent_id: str, security_manager: SecurityManager | None = None) -> None:
         super().__init__(agent_id, capabilities=["code", "review", "test", "docs", "research"])
         self.security = security_manager
         self.timeout_sec = self._resolve_timeout()
@@ -68,16 +68,14 @@ class AntigravityCLIAgent(BaseAgent):
             prompt,
             memory_context,
             provider=self.provider,
-            model_name=os.getenv("ANTIGRAVITY_API_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash")),
+            model_name=os.getenv("ANTIGRAVITY_DEFAULT_MODEL", os.getenv("ANTIGRAVITY_API_MODEL", os.getenv("GEMINI_MODEL", "antigravity-pro"))),
         )
 
-        if not self.security.validate_shell_command("agy -p"):
-            return self.result(task, "Security violation: Antigravity CLI command not allowed", TaskStatus.FAILED)
 
         self.active_tasks += 1
         try:
             bridge = ExternalAIBridge(None)
-            bridge_result = bridge.run_antigravity_cli(task, prompt, timeout_sec=self.timeout_sec)
+            bridge_result = bridge.run_antigravity(task, prompt, timeout_sec=self.timeout_sec)
 
             if bridge_result.ok:
                 return self.result(task, bridge_result.output, TaskStatus.DONE)
@@ -87,11 +85,11 @@ class AntigravityCLIAgent(BaseAgent):
                 return fallback
 
             self.last_error = bridge_result.error
-            summary = f"Antigravity CLI unavailable (model={bridge_result.model}, attempts={bridge_result.attempts})"
+            summary = f"Antigravity API unavailable (model={bridge_result.model}, attempts={bridge_result.attempts})"
             if bridge_result.error_type == "auth_fail":
-                summary = "Antigravity CLI authentication required"
+                summary = "Antigravity API authentication required"
             elif "timeout" in bridge_result.error.lower():
-                summary = "CLI execution timed out"
+                summary = "API execution timed out"
             return self.result(
                 task,
                 summary,
@@ -100,7 +98,7 @@ class AntigravityCLIAgent(BaseAgent):
             )
         except Exception as e:  # pragma: no cover - guardrail
             self.last_error = str(e)
-            return self.result(task, "CLI execution error", TaskStatus.FAILED, errors=[str(e)])
+            return self.result(task, "Antigravity API execution error", TaskStatus.FAILED, errors=[str(e)])
         finally:
             self.active_tasks = max(0, self.active_tasks - 1)
 
@@ -108,7 +106,7 @@ class AntigravityCLIAgent(BaseAgent):
         api_key = (os.getenv("ANTIGRAVITY_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
         if not api_key:
             return None
-        model_name = os.getenv("ANTIGRAVITY_API_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+        model_name = os.getenv("ANTIGRAVITY_DEFAULT_MODEL", os.getenv("ANTIGRAVITY_API_MODEL", os.getenv("GEMINI_MODEL", "antigravity-pro")))
         agent = GeminiAgent(f"{self.agent_id}-api", model_name=model_name)
         result = agent.run(task, memory_context=memory_context)
         if result.status == TaskStatus.DONE:
@@ -127,4 +125,5 @@ class AntigravityCLIAgent(BaseAgent):
         return max(30, timeout)
 
 
-GeminiCLIAgent = AntigravityCLIAgent
+AntigravityCLIAgent = AntigravityAgent
+GeminiCLIAgent = AntigravityAgent

@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 from core.agents.antigravity_cli_agent import AntigravityCLIAgent
 from core.core.models import AgentStatus
-from core.core.security import SecurityManager, SecurityPolicy
 
 
 def test_antigravity_cli_agent_health_reflects_manager_degradation(monkeypatch):
@@ -16,11 +15,11 @@ def test_antigravity_cli_agent_health_reflects_manager_degradation(monkeypatch):
                 'inventory_ok': True,
                 'api_probe': {'status_code': 403, 'error': 'permission_denied'},
                 'auth_probe': {'stderr': 'authentication required'},
-                'models_probe': {'stderr': 'agy missing'},
+                'models_probe': {'stderr': 'api inventory unavailable'},
             }
         ),
     )
-    agent = AntigravityCLIAgent('antigravity-cli-1', SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=['agy -p'])))
+    agent = AntigravityCLIAgent('antigravity-1')
 
     health = agent.health()
 

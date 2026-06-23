@@ -64,13 +64,13 @@ def test_attach_optional_local_agent_can_allow_degraded_by_env(monkeypatch):
 
     attached = _attach_optional_local_agent(
         orchestrator,
-        'antigravity-cli-1',
+        'antigravity-1',
         _FakeAgent('degraded', 'api blocked'),
         agent_type='external_ai',
         critical=False,
-        model_name='antigravity-cli',
-        provider='google',
+        model_name='antigravity-pro',
+        provider='antigravity',
     )
 
     assert attached is True
-    assert orchestrator.calls == [('antigravity-cli-1', 'antigravity-cli', 'google')]
+    assert orchestrator.calls == [('antigravity-1', 'antigravity-pro', 'antigravity')]

@@ -8,6 +8,7 @@ def test_classify_mimo_error_categories():
     assert classify_mimo_error("Personal Access Tokens are not supported for this endpoint") == "github_pat_not_supported"
     assert classify_mimo_error("Google Generative AI API key is missing") == "gemini_api_key_missing"
     assert classify_mimo_error("Invalid API Key") == "invalid_api_key"
+    assert classify_mimo_error("Illegal access") == "illegal_access"
     assert classify_mimo_error("No access to model: x") == "no_model_access"
 
 

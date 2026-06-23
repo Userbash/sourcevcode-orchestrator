@@ -19,6 +19,7 @@ from core.core.env_loader import load_env_file
 
 load_env_file()
 load_env_file(".env.bridge", override=True)
+load_env_file(".env.local.secrets", override=True)
 load_env_file(".env.gemini.local", override=True)
 load_env_file("/app/.env.bridge")
 
@@ -42,6 +43,10 @@ logger = logging.getLogger("orchestrator_daemon")
 
 def _attach_optional_degraded_agents() -> bool:
     return os.getenv("AI_BRIDGE_ATTACH_OPTIONAL_DEGRADED_AGENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _attach_placeholder_agents() -> bool:
+    return os.getenv("AI_BRIDGE_ATTACH_PLACEHOLDER_AGENTS", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _attach_optional_local_agent(
@@ -367,7 +372,7 @@ async def main():
     orchestrator = Orchestrator()
     orchestrator.orchestration_config = OrchestrationConfig.from_env()
 
-    security_manager = SecurityManager(SecurityPolicy(allow_shell=True, shell_allowlist=["agy -p", "antigravity -p"]))
+    security_manager = SecurityManager(SecurityPolicy())
 
     mistral_key = has_usable_credential("MISTRAL_API_KEY")
     openai_key = has_usable_credential("OPENAI_API_KEY")
@@ -393,19 +398,20 @@ async def main():
     except Exception as exc:
         logger.warning(f"[INVENTORY] warm refresh before worker attach failed: {exc}")
 
-    orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="planner", critical=True, model_name="gpt-planner", provider="openai")
+    if _attach_placeholder_agents():
+        orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="planner", critical=True, model_name="gpt-planner", provider="openai")
     orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="codex", critical=True, model_name=codex_model, provider=codex_provider)
     worker_sync = orchestrator.sync_openai_template_workers(enabled=openai_key, primary_model=codex_model)
     if worker_sync.get("attached") or worker_sync.get("removed"):
         logger.info(f"[AGENTS] OpenAI-compatible worker sync: {worker_sync}")
     _attach_optional_local_agent(
         orchestrator,
-        "antigravity-cli-1",
-        AntigravityCLIAgent("antigravity-cli-1", security_manager),
+        "antigravity-1",
+        AntigravityCLIAgent("antigravity-1", security_manager),
         agent_type="external_ai",
         critical=False,
-        model_name="antigravity-cli",
-        provider="google",
+        model_name=os.getenv("ANTIGRAVITY_DEFAULT_MODEL", "antigravity-pro"),
+        provider="antigravity",
     )
     _attach_optional_local_agent(
         orchestrator,
@@ -416,8 +422,9 @@ async def main():
         model_name="mistral-large-latest",
         provider="mistral",
     )
-    orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
-    orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
+    if _attach_placeholder_agents():
+        orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
+        orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
     _attach_optional_local_agent(
         orchestrator,
         "local-llm-1",
@@ -436,17 +443,16 @@ async def main():
         model_name=os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"),
         provider="ai_kernel",
     )
-    mimo_agent = MimoAgent("mimo-router-1", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto"))
-    if mimo_agent._cli_path():
-        _attach_optional_local_agent(
-            orchestrator,
-            "mimo-router-1",
-            mimo_agent,
-            agent_type="external_ai",
-            critical=False,
-            model_name=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "mimo/mimo-auto"),
-            provider="mimo",
-        )
+    mimo_agent = MimoAgent("mimo-router-1", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"))
+    _attach_optional_local_agent(
+        orchestrator,
+        "mimo-router-1",
+        mimo_agent,
+        agent_type="external_ai",
+        critical=False,
+        model_name=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"),
+        provider="mimo",
+    )
 
     _start_http_server(orchestrator)
 

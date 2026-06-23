@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-MIMO_CLI_CANDIDATES = (
-    '/var/home/sanya/.npm-packages/bin/mimo',
-    '/root/.npm-packages/bin/mimo',
-    '/usr/local/bin/mimo',
-)
+from .mimo_provider import configured_native_mimo_models, fetch_mimo_model_catalog, load_mimo_model_catalog, resolve_mimo_provider_config
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -47,23 +42,6 @@ def mimo_suppression_ttl_sec() -> int:
     return _env_int('AI_BRIDGE_MIMO_SUPPRESSION_TTL_SEC', 1800, minimum=60)
 
 
-def resolve_mimo_cli() -> str | None:
-    found = shutil.which('mimo')
-    if found:
-        return found
-    for candidate in MIMO_CLI_CANDIDATES:
-        path = Path(candidate)
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-    var_home = Path('/var/home')
-    if var_home.is_dir():
-        for home in var_home.iterdir():
-            candidate = home / '.npm-packages' / 'bin' / 'mimo'
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
-    return None
-
-
 def default_report_dir() -> Path:
     workspace = Path('/workspace/reports/model_ping')
     if workspace.parent.exists():
@@ -81,10 +59,14 @@ def classify_mimo_error(error: str) -> str:
         return 'gemini_api_key_missing'
     if 'invalid api key' in text:
         return 'invalid_api_key'
+    if 'illegal access' in text:
+        return 'illegal_access'
     if 'no access to model' in text:
         return 'no_model_access'
     if 'invalid model' in text:
         return 'invalid_model'
+    if 'token plan' in text:
+        return 'token_plan_base_url_missing'
     if 'timeout' in text:
         return 'timeout'
     if 'no_text_events' in text:
@@ -115,14 +97,7 @@ def load_mimo_ping_report(report_dir: str | Path | None = None) -> dict[str, Any
         payload['_report_present'] = True
         payload['_report_updated_at'] = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
     else:
-        payload = {
-            '_report_path': str(path),
-            '_report_present': False,
-            '_report_updated_at': None,
-            'models': [],
-            'ok': 0,
-            'failed': 0,
-        }
+        payload = {'_report_path': str(path), '_report_present': False, '_report_updated_at': None, 'models': [], 'ok': 0, 'failed': 0}
     return payload
 
 
@@ -135,101 +110,25 @@ def load_mimo_usable_report(report_dir: str | Path | None = None) -> dict[str, A
         payload['_usable_present'] = True
         payload['_usable_updated_at'] = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
     else:
-        payload = {
-            '_usable_path': str(path),
-            '_usable_present': False,
-            '_usable_updated_at': None,
-            'models': [],
-            'usable_count': 0,
-            'total': 0,
-        }
+        payload = {'_usable_path': str(path), '_usable_present': False, '_usable_updated_at': None, 'models': [], 'usable_count': 0, 'total': 0}
     return payload
 
 
-def build_mimo_runtime_status(
-    *,
-    bridge: Any | None = None,
-    report_dir: str | Path | None = None,
-    status_source_configured: bool = False,
-    failure_reason: str | None = None,
-    recovery_attempts: int = 0,
-    last_sync_at: str | None = None,
-    profiles_loaded: int | None = None,
-) -> dict[str, Any]:
+def build_mimo_runtime_status(*, bridge: Any | None = None, report_dir: str | Path | None = None, status_source_configured: bool = False, failure_reason: str | None = None, recovery_attempts: int = 0, last_sync_at: str | None = None, profiles_loaded: int | None = None) -> dict[str, Any]:
+    cfg = resolve_mimo_provider_config()
+    catalog = fetch_mimo_model_catalog(force_refresh=False) if (cfg.api_key and report_dir is None) else load_mimo_model_catalog()
+    configured_models = [str(item).strip() for item in (catalog.get('models') or configured_native_mimo_models()) if str(item).strip()]
     if not mimo_enabled():
         return {
-            'provider': 'mimo',
-            'status': 'disabled',
-            'ready': False,
-            'disabled_by_env': True,
-            'disable_env': 'AI_BRIDGE_MIMO_ENABLED',
-            'cli_available': bool(resolve_mimo_cli()),
-            'cli_path': resolve_mimo_cli(),
-            'bridge_cli_alive': bool(getattr(bridge, 'is_cli_alive', False)) if bridge is not None else bool(resolve_mimo_cli()),
-            'status_source_configured': bool(status_source_configured),
-            'failure_reason': 'mimo_disabled_by_env',
-            'recovery_attempts': int(recovery_attempts or 0),
-            'last_sync_at': last_sync_at,
-            'profiles_loaded': int(profiles_loaded or 0),
-            'report_present': False,
-            'report_path': str((Path(report_dir) if report_dir is not None else default_report_dir()) / 'mimo_model_ping_report.json'),
-            'report_updated_at': None,
-            'usable_artifact_present': False,
-            'usable_artifact_path': str((Path(report_dir) if report_dir is not None else default_report_dir()) / 'mimo_usable_models.json'),
-            'usable_artifact_updated_at': None,
-            'inventory_count': 0,
-            'usable_count': 0,
-            'failed_count': 0,
-            'usable_models_sample': [],
-            'failed_models_sample': [],
-            'auth_categories': {},
-            'provider_breakdown': {},
-            'cached_models_count': 0,
-            'cached_models_sample': [],
-            'inventory_snapshot_present': False,
-            'inventory_snapshot_models_sample': [],
-            'live_inventory_count': 0,
-            'live_inventory_sample': [],
-            'live_inventory_error': 'mimo_disabled_by_env',
-            'suppression_policy': {
-                'failure_threshold': mimo_failure_threshold(),
-                'failure_window_sec': mimo_failure_window_sec(),
-                'suppression_ttl_sec': mimo_suppression_ttl_sec(),
-            },
-        }
-    cli_path = resolve_mimo_cli()
+            'provider': 'mimo', 'status': 'disabled', 'ready': False, 'disabled_by_env': True, 'disable_env': 'AI_BRIDGE_MIMO_ENABLED', 'direct_api_configured': bool(cfg.api_key), 'base_url': cfg.base_url, 'status_source_configured': bool(status_source_configured), 'failure_reason': 'mimo_disabled_by_env', 'recovery_attempts': int(recovery_attempts or 0), 'last_sync_at': last_sync_at, 'profiles_loaded': int(profiles_loaded or 0), 'report_present': False, 'report_path': str((Path(report_dir) if report_dir is not None else default_report_dir()) / 'mimo_model_ping_report.json'), 'report_updated_at': None, 'usable_artifact_present': False, 'usable_artifact_path': str((Path(report_dir) if report_dir is not None else default_report_dir()) / 'mimo_usable_models.json'), 'usable_artifact_updated_at': None, 'inventory_count': 0, 'usable_count': 0, 'failed_count': 0, 'usable_models_sample': [], 'failed_models_sample': [], 'auth_categories': {}, 'provider_breakdown': {}, 'cached_models_count': 0, 'cached_models_sample': [], 'inventory_snapshot_present': False, 'inventory_snapshot_models_sample': [], 'live_inventory_count': 0, 'live_inventory_sample': [], 'live_inventory_error': 'mimo_disabled_by_env', 'suppression_policy': {'failure_threshold': mimo_failure_threshold(), 'failure_window_sec': mimo_failure_window_sec(), 'suppression_ttl_sec': mimo_suppression_ttl_sec()}}
     report = load_mimo_ping_report(report_dir)
     usable_artifact = load_mimo_usable_report(report_dir)
     rows = list(report.get('models') or [])
-    live_inventory: list[str] = []
-    live_inventory_error: str | None = None
-    if cli_path:
-        try:
-            import subprocess
-            proc = subprocess.run([cli_path, 'models', '--verbose'], capture_output=True, text=True, timeout=30, check=False)
-            if proc.returncode == 0:
-                for line in proc.stdout.splitlines():
-                    stripped = line.strip()
-                    if stripped and '/' in stripped and ' ' not in stripped and ':' not in stripped and not stripped.startswith('{'):
-                        live_inventory.append(stripped)
-            else:
-                live_inventory_error = (proc.stderr or proc.stdout or f'exit_{proc.returncode}').strip() or None
-        except Exception as exc:
-            live_inventory_error = str(exc)
     if not rows:
         usable_rows = []
         for row in list(usable_artifact.get('models') or []):
-            if not isinstance(row, dict):
-                continue
-            model_name = str(row.get('model') or '').strip()
-            if not model_name:
-                continue
-            usable_rows.append({
-                'model': model_name,
-                'ok': True,
-                'response_sample': row.get('response_sample'),
-                'exit_code': row.get('exit_code'),
-            })
+            if isinstance(row, dict) and str(row.get('model') or '').strip():
+                usable_rows.append({'model': str(row.get('model')).strip(), 'ok': True, 'response_sample': row.get('response_sample'), 'status_code': row.get('status_code')})
         if usable_rows:
             rows = usable_rows
             report = {**report, 'models': rows, 'ok': len(rows), 'failed': 0}
@@ -238,9 +137,7 @@ def build_mimo_runtime_status(
     auth_categories: dict[str, int] = {}
     provider_breakdown: dict[str, dict[str, int]] = {}
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        provider = _provider_from_model_name(str(row.get('model') or ''))
+        provider = _provider_from_model_name(str((row or {}).get('model') or ''))
         bucket = provider_breakdown.setdefault(provider, {'total': 0, 'ok': 0, 'failed': 0})
         bucket['total'] += 1
         if row.get('ok'):
@@ -249,94 +146,28 @@ def build_mimo_runtime_status(
             bucket['failed'] += 1
             category = classify_mimo_error(str(row.get('error') or ''))
             auth_categories[category] = auth_categories.get(category, 0) + 1
-
-    cached_models = list(bridge.get_cached_models()) if bridge is not None and hasattr(bridge, 'get_cached_models') else []
-    cached_names = []
-    for item in cached_models:
-        model_name = str(getattr(item, 'full_id', '') or getattr(item, 'id', '')).strip()
-        if model_name:
-            cached_names.append(model_name)
     from .provider_inventory_service import ProviderInventoryService
-
     inventory_snapshot = ProviderInventoryService().provider_snapshot('mimo')
-    snapshot_models = []
-    if isinstance(inventory_snapshot, dict):
-        snapshot_models = [str(item).strip() for item in inventory_snapshot.get('models', []) if str(item).strip()]
-        for model_name in snapshot_models:
-            if model_name not in cached_names:
-                cached_names.append(model_name)
-
-    cli_alive = bool(getattr(bridge, 'is_cli_alive', False)) if bridge is not None else bool(cli_path)
+    snapshot_models = [str(item).strip() for item in (inventory_snapshot.get('models', []) if isinstance(inventory_snapshot, dict) else []) if str(item).strip()]
     usable_count = len(usable_rows)
     failed_count = len(failed_rows)
-    inventory_count = len(rows) or len(cached_names) or len(live_inventory)
-
-    if live_inventory:
-        for model_name in live_inventory:
-            if model_name not in cached_names:
-                cached_names.append(model_name)
-
+    inventory_count = len(rows) or len(snapshot_models) or len(configured_models)
     auth_only_failure = failed_count > 0 and usable_count == 0 and bool(auth_categories) and sum(auth_categories.values()) >= failed_count
-
     if usable_count > 0:
         status = 'degraded' if failed_count > 0 else 'ready'
         ready = True
     elif auth_only_failure:
         status = 'failed'
         ready = False
-    elif live_inventory and not live_inventory_error:
-        status = 'ready'
+    elif bool(cfg.api_key) and bool(configured_models):
+        status = 'degraded' if failed_count > 0 else 'ready'
         ready = True
-    elif inventory_count > 0 or report.get('_report_present'):
-        status = 'degraded'
-        ready = False
-    elif cli_path:
+    elif configured_models:
         status = 'inventory_unknown'
         ready = False
     else:
         status = 'offline'
         ready = False
-
+    live_inventory_error = str(catalog.get('error') or '') or (None if configured_models else 'native_model_catalog_empty')
     return {
-        'provider': 'mimo',
-        'status': status,
-        'ready': ready,
-        'disabled_by_env': False,
-        'disable_env': 'AI_BRIDGE_MIMO_ENABLED',
-        'cli_available': bool(cli_path),
-        'cli_path': cli_path,
-        'bridge_cli_alive': cli_alive,
-        'status_source_configured': bool(status_source_configured),
-        'failure_reason': failure_reason,
-        'recovery_attempts': int(recovery_attempts or 0),
-        'last_sync_at': last_sync_at,
-        'profiles_loaded': int(profiles_loaded or 0),
-        'report_present': bool(report.get('_report_present')),
-        'report_path': str(report.get('_report_path') or ''),
-        'report_updated_at': report.get('_report_updated_at'),
-        'usable_artifact_present': bool(usable_artifact.get('_usable_present')),
-        'usable_artifact_path': str(usable_artifact.get('_usable_path') or ''),
-        'usable_artifact_updated_at': usable_artifact.get('_usable_updated_at'),
-        'inventory_count': inventory_count,
-        'usable_count': usable_count,
-        'failed_count': failed_count,
-        'usable_models_sample': [str(row.get('model') or '') for row in usable_rows[:12]],
-        'failed_models_sample': [
-            {'model': str(row.get('model') or ''), 'error': str(row.get('error') or ''), 'exit_code': row.get('exit_code')}
-            for row in failed_rows[:12]
-        ],
-        'auth_categories': auth_categories,
-        'provider_breakdown': provider_breakdown,
-        'cached_models_count': len(cached_names),
-        'cached_models_sample': cached_names[:12],
-        'inventory_snapshot_present': bool(snapshot_models),
-        'inventory_snapshot_models_sample': snapshot_models[:12],
-        'live_inventory_count': len(live_inventory),
-        'live_inventory_sample': live_inventory[:12],
-        'live_inventory_error': live_inventory_error,
-        'suppression_policy': {
-            'failure_threshold': mimo_failure_threshold(),
-            'failure_window_sec': mimo_failure_window_sec(),
-            'suppression_ttl_sec': mimo_suppression_ttl_sec(),
-        },
-    }
+        'provider': 'mimo', 'status': status, 'ready': ready, 'disabled_by_env': False, 'disable_env': 'AI_BRIDGE_MIMO_ENABLED', 'direct_api_configured': bool(cfg.api_key), 'base_url': cfg.base_url, 'base_url_explicit': cfg.base_url_explicit, 'key_kind': cfg.key_kind, 'status_source_configured': bool(status_source_configured), 'failure_reason': failure_reason, 'recovery_attempts': int(recovery_attempts or 0), 'last_sync_at': last_sync_at, 'profiles_loaded': int(profiles_loaded or 0), 'report_present': bool(report.get('_report_present')), 'report_path': str(report.get('_report_path') or ''), 'report_updated_at': report.get('_report_updated_at'), 'usable_artifact_present': bool(usable_artifact.get('_usable_present')), 'usable_artifact_path': str(usable_artifact.get('_usable_path') or ''), 'usable_artifact_updated_at': usable_artifact.get('_usable_updated_at'), 'inventory_count': inventory_count, 'usable_count': usable_count, 'failed_count': failed_count, 'usable_models_sample': [str(row.get('model') or '') for row in usable_rows[:12]], 'failed_models_sample': [{'model': str(row.get('model') or ''), 'error': str(row.get('error') or ''), 'status_code': row.get('status_code')} for row in failed_rows[:12]], 'auth_categories': auth_categories, 'provider_breakdown': provider_breakdown, 'cached_models_count': 0, 'cached_models_sample': [], 'inventory_snapshot_present': bool(snapshot_models), 'inventory_snapshot_models_sample': snapshot_models[:12], 'live_inventory_count': len(configured_models), 'live_inventory_sample': configured_models[:12], 'live_inventory_source': str(catalog.get('source') or 'cache'), 'live_inventory_error': live_inventory_error, 'suppression_policy': {'failure_threshold': mimo_failure_threshold(), 'failure_window_sec': mimo_failure_window_sec(), 'suppression_ttl_sec': mimo_suppression_ttl_sec()}}
