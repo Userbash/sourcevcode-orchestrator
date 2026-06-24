@@ -384,6 +384,101 @@ class HybridMemory:
         self._project_index.clear()
         self.backend.clear()
 
+    def warmup_from_persistent(
+        self,
+        *,
+        session_id: str,
+        agent_id: str,
+        memory_domain: str | None = None,
+        top_k: int = 8,
+        trained_top_k: int = 4,
+    ) -> dict[str, Any]:
+        warmed_keys: list[str] = []
+        warmed_session_records = 0
+        warmed_trained_records = 0
+
+        def _decode(value: Any) -> Any:
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return value
+                try:
+                    return json.loads(text)
+                except Exception:
+                    return value
+            return value
+
+        def _tags(value: Any) -> list[str]:
+            if not isinstance(value, (list, tuple)):
+                return []
+            return [str(item).strip() for item in value if str(item).strip()]
+
+        if hasattr(self.persistent, "list_session_memories"):
+            try:
+                records = self.persistent.list_session_memories(session_id=session_id, agent_id=agent_id, limit=max(1, int(top_k)))
+            except Exception:
+                records = []
+            for record in records:
+                metadata = dict(getattr(record, "metadata", {}) or {})
+                scope = str(metadata.get("scope") or "session")
+                if scope not in {"session", "task", "agent", "capability"}:
+                    scope = "session"
+                identifier = session_id
+                if scope == "agent":
+                    identifier = str(getattr(record, "agent_id", agent_id) or agent_id)
+                elif scope == "capability":
+                    identifier = str(metadata.get("identifier") or getattr(record, "agent_id", agent_id) or agent_id)
+                elif scope == "task":
+                    identifier = str(metadata.get("identifier") or session_id)
+                key = str(metadata.get("key") or f"{getattr(record, 'memory_type', 'episodic')}:{getattr(record, 'memory_id', 0)}")
+                full_key = self.make_key(scope, identifier, key)
+                self.set_by_full_key(
+                    full_key,
+                    _decode(getattr(record, "content", None)),
+                    importance_score=float(getattr(record, "importance_score", 0.5) or 0.5),
+                    memory_type=str(getattr(record, "memory_type", "episodic") or "episodic"),
+                    tags=_tags(metadata.get("tags")),
+                )
+                warmed_keys.append(full_key)
+                warmed_session_records += 1
+
+        if memory_domain and hasattr(self.persistent, "retrieve_trained_memories"):
+            try:
+                trained_records = self.persistent.retrieve_trained_memories(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    memory_domain=memory_domain,
+                    top_k=max(1, int(trained_top_k)) * 3,
+                )
+            except Exception:
+                trained_records = []
+            for record in trained_records:
+                content = _decode(getattr(record, "content", None))
+                if isinstance(content, dict):
+                    value = dict(content)
+                else:
+                    value = {"summary": str(content)}
+                trained_key = f"trained:{memory_domain}:{getattr(record, 'trained_memory_id', warmed_trained_records)}"
+                self.set_by_full_key(
+                    trained_key,
+                    value,
+                    importance_score=max(0.3, float(getattr(record, "quality_score", 0.5) or 0.5)),
+                    memory_type="trained",
+                    tags=[memory_domain, "trained"],
+                )
+                warmed_keys.append(trained_key)
+                warmed_trained_records += 1
+
+        return {
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "memory_domain": memory_domain or "",
+            "warmed_session_records": warmed_session_records,
+            "warmed_trained_records": warmed_trained_records,
+            "warmup_total": warmed_session_records + warmed_trained_records,
+            "warmed_keys": warmed_keys[:40],
+        }
+
     def soft_flush(self, api: Any | None = None) -> int:
         """Persist all hot entries and buffered records with AI-driven compaction."""
         flushed = 0

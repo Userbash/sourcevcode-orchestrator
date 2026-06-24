@@ -34,3 +34,7 @@ class FeedbackLoop:
             retry_count=count + 1,
         )
         return False, fix_task
+    def retries_for(self, task: Task) -> int:
+        retry_key = task.parent_task_id or task.task_id
+        return int(self._retries.get(retry_key, 0) or 0)
+

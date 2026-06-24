@@ -12,6 +12,7 @@ services:
     image: postgres:16-alpine
     container_name: ai_bridge_db
     environment:
+      ORCHESTRATOR_PORT: "8000"
       POSTGRES_USER: ai_bridge
       POSTGRES_PASSWORD: ai_bridge_password
       POSTGRES_DB: ai_bridge
@@ -32,6 +33,7 @@ services:
       - ./.env.bridge
     container_name: hebrew_ai_orchestrator
     environment:
+      ORCHESTRATOR_PORT: "8000"
       PYTHONPATH: /app
       PATH: /var/home/sanya/.npm-packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app/.local/bin
       TESTING: "false"

@@ -214,6 +214,41 @@ def test_decomposer_preserves_parallel_subagent_specialization(coding_payload):
     assert all(task.parent_task_id == plan.root_task_id for task in plan.atomic_tasks)
 
 
+def test_decomposer_fan_in_waits_for_all_parallel_subagents(coding_payload):
+    task = Task(TaskType.PLAN, TaskInput("Prepare UX and frontend handoff"), TaskContext("demo", ".", "main"))
+    decomposer = TaskDecomposer()
+    draft = {
+        "status": "model",
+        "layers": [
+            {
+                "name": "ux_slice",
+                "objective": "Prepare UX and frontend handoff",
+                "capability": "frontend",
+                "task_type": "code",
+                "dependencies": [],
+                "sub_agents": ["ux_planner", "frontend_builder"],
+                "parallel_group": True,
+            },
+            {
+                "name": "qa_gate",
+                "objective": "Validate the combined UX and frontend result",
+                "capability": "test",
+                "task_type": "test",
+                "dependencies": ["ux_slice"],
+                "sub_agents": ["tester_agent"],
+            },
+        ],
+    }
+
+    plan = decomposer.decompose_from_draft(task, draft)
+
+    branches = [item for item in plan.atomic_tasks if item.draft_layer.startswith("ux_slice_")]
+    qa_gate = next(item for item in plan.atomic_tasks if item.draft_layer == "qa_gate")
+
+    assert len(branches) == 2
+    assert set(qa_gate.dependencies) == {item.task_id for item in branches}
+
+
 def test_decomposer_creates_dag_not_linear_chain(coding_payload):
     root = encapsulate(
         payload=coding_payload,

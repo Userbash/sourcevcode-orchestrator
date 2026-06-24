@@ -130,6 +130,8 @@ def test_before_task_turns_text_into_structured_instruction():
     assert "PLAN:" in task.input.description
     assert "RISKS:" in task.input.description
     assert "OUTPUT CONTRACT:" in task.input.description
+    assert "self-check" in task.input.description.lower()
+    assert "contradictions" in task.input.description.lower()
     assert "Improve the prompt optimizer" in task.input.description
     assert "Break user text into a clearer instruction for the AI." in task.input.description
     assert len(task.input.description) > len(original)

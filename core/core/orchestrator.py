@@ -31,9 +31,11 @@ from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
 from .result_merger import ResultMerger
+from .ring_validation import OrchestrationReport, ValidationCheck, ValidationRing
 from .smart_scheduler import SmartScheduler
 from .session_memory import MemoryScope, SessionMemory
 from .memory_control_module import MemoryControlModule
+from .validation_memory_gate import ValidationMemoryGate
 from .availability import ModelAvailability, ProviderStatus
 from .ai_activity_module import AIActivityModule
 from .data_plane_monitor import build_data_plane_snapshot
@@ -74,6 +76,7 @@ from .ai_kernel_bridge import AIKernelBridge
 from .local_llm_module import LocalLLMModule
 from .sourcecraft_module import SourceCraftModule
 from .reasoning_module import ReasoningModule
+from .reasoning_protocol import ReasoningStreamAdapter
 from .risk_advisor_module import RiskAdvisorModule
 from .orchestrator_advisor_module import OrchestratorAdvisorModule
 from .intelligence_module import AIIntelligenceModule
@@ -159,10 +162,40 @@ class Orchestrator:
     def emit_event(self, event_name: str, payload: dict[str, Any]) -> None:
         self.console.emit(event_name, str(payload))
 
+    
+    @staticmethod
+    def _memory_warmup_report_from_state(state: dict[str, Any]) -> dict[str, Any]:
+        validation = state.get("validation_memory_gate") if isinstance(state.get("validation_memory_gate"), dict) else {}
+        memory_control = state.get("memory_control") if isinstance(state.get("memory_control"), dict) else {}
+        local_model = state.get("local_model_manager") if isinstance(state.get("local_model_manager"), dict) else {}
+        memory_pressure = local_model.get("memory_pressure") if isinstance(local_model.get("memory_pressure"), dict) else {}
+        last_snapshot = validation.get("last_snapshot") if isinstance(validation.get("last_snapshot"), dict) else {}
+        warmups_total = int(validation.get("warmups_total", 0) or 0)
+        local_model_warmups = int(local_model.get("warmups", 0) or 0)
+        parallel_batches_total = int(memory_control.get("parallel_batches_total", 0) or 0)
+        conflict_total = int(validation.get("conflict_total", 0) or 0)
+        status = "conflict" if conflict_total else "active" if (warmups_total or local_model_warmups or parallel_batches_total) else "idle"
+        return {
+            "status": status,
+            "warmups_total": warmups_total,
+            "local_model_warmups": local_model_warmups,
+            "parallel_batches_total": parallel_batches_total,
+            "conflict_total": conflict_total,
+            "snapshots_total": int(validation.get("snapshots_total", 0) or 0),
+            "consensus_total": int(validation.get("consensus_total", 0) or 0),
+            "resident_memory_gb": memory_pressure.get("resident_memory_gb"),
+            "pressure_state": memory_pressure.get("pressure_state"),
+            "last_task_id": last_snapshot.get("task_id"),
+            "last_agent_id": last_snapshot.get("agent_id"),
+            "last_conflict": bool(last_snapshot.get("validation_memory_conflict")),
+            "last_conflict_reasons": list(last_snapshot.get("validation_memory_conflict_reasons") or []),
+        }
+
     def module_state(self) -> dict[str, Any]:
         state = self.module_manager.finalize()
         state["model_availability"] = self._model_availability_state()
         state["provider_inventory"] = self._provider_inventory_snapshot if isinstance(self._provider_inventory_snapshot, dict) else {"updated_at": None, "providers": {}}
+        state["memory_warmup_report"] = self._memory_warmup_report_from_state(state)
         return state
 
     def query_state(self, module_name: str, key: str) -> Any:
@@ -689,6 +722,7 @@ class Orchestrator:
         self.module_manager.register(AIActivityModule())
         self.module_manager.register(OrchestratorControlModule())
         self.module_manager.register(MemoryControlModule())
+        self.module_manager.register(ValidationMemoryGate())
         self.module_manager.register(ModelUsageModule())
         self.module_manager.register(LocalModelManagerModule())
         self.module_manager.register(AntigravityStatusModule())
@@ -720,10 +754,12 @@ class Orchestrator:
         self.module_manager.load("ai_activity")
         self.module_manager.load("orchestrator_control")
         self.module_manager.load("memory_control")
+        self.module_manager.load("validation_memory_gate")
         self.module_manager.load("model_usage")
         self.module_manager.load("local_model_manager")
         self.mimo_director.set_budget_module(self.module_manager.get_module("model_usage"))
         self.module_manager.load("unified_vfs")
+        self.validation_memory_gate = self.module_manager.get_module("validation_memory_gate")
         self.mimo_director.set_vfs_source(self.module_manager.get_module("unified_vfs"))
         self.mimo_director.safe_sync()
         try:
@@ -1254,6 +1290,12 @@ class Orchestrator:
             return module
         return None
 
+    def _validation_memory_gate_module(self) -> ValidationMemoryGate | None:
+        module = self.module_manager.get_module("validation_memory_gate")
+        if isinstance(module, ValidationMemoryGate):
+            return module
+        return None
+
     def _local_model_manager_module(self) -> LocalModelManagerModule | None:
         module = self.module_manager.get_module("local_model_manager")
         if isinstance(module, LocalModelManagerModule):
@@ -1351,6 +1393,7 @@ class Orchestrator:
         """Yield orchestrator console events while a submitted task is running."""
         loop = asyncio.get_running_loop()
         event_queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        protocol = ReasoningStreamAdapter()
 
         def console_listener(stage: str, message: str) -> None:
             event = {
@@ -1366,6 +1409,7 @@ class Orchestrator:
         heartbeat_interval_sec = 10.0
         last_heartbeat = loop.time()
         yield {"type": "stream_event", "stage": "ACCEPTED", "message": "task accepted by orchestrator"}
+        yield protocol.accepted()
 
         try:
             while not task_future.done():
@@ -1373,24 +1417,35 @@ class Orchestrator:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.25)
                     last_heartbeat = loop.time()
                     yield event
+                    if event.get("stage") != "HEARTBEAT":
+                        yield protocol.from_console_event(str(event.get("stage") or ""), str(event.get("message") or ""))
                 except asyncio.TimeoutError:
                     now = loop.time()
                     if now - last_heartbeat >= heartbeat_interval_sec:
                         last_heartbeat = now
-                        yield {
+                        heartbeat = {
                             "type": "stream_event",
                             "stage": "HEARTBEAT",
                             "message": "task still running",
                             "ts": datetime.now(UTC).isoformat(),
                         }
+                        yield heartbeat
                     continue
 
             while not event_queue.empty():
-                yield event_queue.get_nowait()
+                event = event_queue.get_nowait()
+                yield event
+                if event.get("stage") != "HEARTBEAT":
+                    yield protocol.from_console_event(str(event.get("stage") or ""), str(event.get("message") or ""))
 
             result = await task_future
+            yield protocol.finished(result, status=str(result.get("status") or "unknown"))
+            answer_event = protocol.answer(result)
+            if answer_event is not None:
+                yield answer_event
             yield {"type": "final_result", "status": result.get("status", "unknown"), "result": result}
         except Exception as exc:
+            yield protocol.finished({"results": []}, status="error")
             yield {"type": "final_result", "status": "error", "message": str(exc)}
         finally:
             if console_listener in self.console.listeners:
@@ -1820,6 +1875,12 @@ class Orchestrator:
         return plan
 
     def _load_memory_context(self, task: Task, agent_id: str, *, provider: str = "", model_name: str = "") -> dict[str, object]:
+        validation_gate = self._validation_memory_gate_module()
+        if validation_gate is not None and hasattr(validation_gate, "build_validation_context"):
+            try:
+                return dict(validation_gate.build_validation_context(task, agent_id=agent_id, provider=provider, model_name=model_name))
+            except Exception:
+                pass
         memory_control = self._memory_control_module()
         if memory_control is not None:
             return dict(memory_control.build_runtime_context(task, agent_id=agent_id, provider=provider, model_name=model_name))
@@ -1905,6 +1966,136 @@ class Orchestrator:
         if layered.prompt_guidance:
             context["prompt_guidance"] = list(layered.prompt_guidance)
         return context
+
+    @staticmethod
+    def _task_contract(task: Task) -> dict[str, Any]:
+        return {
+            "input_payload_shape": {
+                "task_id": task.task_id,
+                "task_type": task.type.value,
+                "priority": task.priority.value,
+                "description": task.input.description,
+                "files": list(task.input.files or []),
+                "constraints": list(task.input.constraints or []),
+                "acceptance_criteria": list(task.input.acceptance_criteria or []),
+                "required_capability": task.required_capability or CAPABILITY_BY_TASK_TYPE.get(task.type, "code"),
+                "routing_hints": dict(task.routing_hints or {}),
+            },
+            "acceptance_criteria": list(task.input.acceptance_criteria or []),
+            "output_shape_contract": {
+                "format": "json",
+                "required_fields": [
+                    "summary",
+                    "files_changed",
+                    "commands_run",
+                    "test_results",
+                    "diff",
+                    "errors",
+                    "confidence",
+                ],
+                "optional_fields": ["thoughts", "warnings", "provider", "model_name"],
+            },
+        }
+
+    @staticmethod
+    def _execution_dag_payload(plan: ExecutionPlan) -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, str]] = []
+        for task in plan.atomic_tasks:
+            nodes.append({
+                "task_id": task.task_id,
+                "task_type": task.type.value,
+                "capability": task.required_capability or CAPABILITY_BY_TASK_TYPE.get(task.type, "code"),
+                "priority": task.priority.value,
+                "dependencies": list(task.dependencies or []),
+                "draft_layer": task.draft_layer,
+                "assigned_model": task.assigned_model,
+                "routing_hints": dict(task.routing_hints or {}),
+            })
+            for dependency in task.dependencies or []:
+                edges.append({"from": dependency, "to": task.task_id})
+        return {"root_task_id": plan.root_task_id, "nodes": nodes, "edges": edges}
+
+    @staticmethod
+    def _task_type_index(plan: ExecutionPlan) -> dict[str, TaskType]:
+        return {task.task_id: task.type for task in plan.atomic_tasks}
+
+    @staticmethod
+    def _average_confidence(results: list[AgentResult]) -> float:
+        if not results:
+            return 0.0
+        return round(sum(max(0.0, min(1.0, float(result.confidence or 0.0))) for result in results) / len(results), 4)
+
+    def _security_validation_summary(self, results: list[AgentResult]) -> ValidationCheck:
+        text_chunks: list[str] = []
+        signals: list[str] = []
+        for result in results:
+            output = result.output if isinstance(result.output, dict) else {}
+            text_chunks.append(str(output.get("summary", "")))
+            text_chunks.append(str(output.get("diff", "")))
+            text_chunks.extend(str(item) for item in output.get("commands_run", []) or [])
+            text_chunks.extend(str(item) for item in result.errors or [])
+
+        combined = "\n".join(chunk for chunk in text_chunks if chunk)
+        sanitized = self.quality.security.redact_secrets(combined)
+        if sanitized != combined:
+            signals.append("secret_leakage_detected")
+        lowered = combined.lower()
+        for marker in ("vulnerability", "exploit", "injection", "unauthorized", "credential", "secret", "token", "password"):
+            if marker in lowered:
+                signals.append(marker)
+
+        status = "PASS" if not signals else "FAIL"
+        return ValidationCheck(status=status, meta={"signals": signals, "result_count": len(results), "contains_security_markers": bool(signals)})
+
+    def _validation_ring_summary(self, plan: ExecutionPlan, results: list[AgentResult], merged: dict[str, Any]) -> ValidationRing:
+        task_types = self._task_type_index(plan)
+        test_results = [result for result in results if task_types.get(result.task_id) == TaskType.TEST]
+        review_results = [result for result in results if task_types.get(result.task_id) == TaskType.REVIEW]
+        test_threshold = float(self.kpi.task_thresholds.get("test", 0.74) or 0.74)
+        review_threshold = float(self.kpi.task_thresholds.get("review", 0.76) or 0.76)
+
+        tester_coverage = int(round(self._average_confidence(test_results) * 100)) if test_results else int(round(self._average_confidence(results) * 100))
+        tester_pass = bool(test_results) and all(result.status == TaskStatus.DONE for result in test_results) and self._average_confidence(test_results) >= test_threshold
+        reviewer_pass = bool(review_results) and all(result.status == TaskStatus.DONE for result in review_results) and self._average_confidence(review_results) >= review_threshold
+        security_gate = self._security_validation_summary(results)
+
+        reviewer_comments: list[str] = []
+        for result in review_results:
+            reviewer_comments.extend(str(item) for item in result.errors or [])
+            output = result.output if isinstance(result.output, dict) else {}
+            if output.get("summary"):
+                reviewer_comments.append(str(output.get("summary")))
+
+        return ValidationRing(
+            security_gate=security_gate,
+            tester=ValidationCheck(status="PASS" if tester_pass else "FAIL", coverage_pct=tester_coverage, meta={"threshold": test_threshold, "result_count": len(test_results)}),
+            reviewer=ValidationCheck(status="PASS" if reviewer_pass else "FAIL", comments=reviewer_comments[:12], meta={"threshold": review_threshold, "result_count": len(review_results)}),
+        )
+
+    def _quorum_allows(self, validation_ring: ValidationRing, merged: dict[str, Any], results: list[AgentResult]) -> bool:
+        if validation_ring.security_gate.status != "PASS":
+            return False
+        if validation_ring.tester.status != "PASS":
+            return False
+        if validation_ring.reviewer.status == "PASS":
+            return True
+        overall_quality = self._average_confidence([result for result in results if result.status == TaskStatus.DONE])
+        review_threshold = float(self.kpi.task_thresholds.get("review", 0.76) or 0.76)
+        return overall_quality >= review_threshold
+
+    def _build_orchestration_report(self, plan: ExecutionPlan, results: list[AgentResult], merged: dict[str, Any]) -> OrchestrationReport:
+        validation_ring = self._validation_ring_summary(plan, results, merged)
+        approved = self._quorum_allows(validation_ring, merged, results)
+        return OrchestrationReport(
+            task_id=plan.root_task_id,
+            status="APPROVED" if approved else "REJECTED",
+            execution_dag=self._execution_dag_payload(plan),
+            validation_ring=validation_ring,
+            quorum_verified=approved,
+            fix_attempts_spent=sum(1 for row in self.live_trace_rows if row.get("event_type") == "FIX_LOOP" and row.get("root_task_id") == plan.root_task_id),
+            final_merged_result=dict(merged),
+        )
 
     def _model_usage_module(self) -> ModelUsageModule | None:
         module = self.module_manager.get_module("model_usage")
@@ -2127,6 +2318,7 @@ class Orchestrator:
             **runtime_usage,
             **advisory_context,
         }
+        module_context["task_contract"] = self._task_contract(task)
         state_snapshot = self.state_store.save_session_state(
             session_id,
             {"task_id": task.task_id, "status": "running", "task_type": task.type.value, "agent_id": None},
@@ -2620,6 +2812,16 @@ class Orchestrator:
                 self.console.emit("REVIEW", f"Качество ниже порога: {', '.join(quality.issues)}")
             ok, fix_task = self.feedback.evaluate(task, result)
             if not ok and fix_task:
+                self.live_trace_rows.append(
+                    {
+                        "event_type": "FIX_LOOP",
+                        "root_task_id": task.parent_task_id or task.task_id,
+                        "task_id": task.task_id,
+                        "fix_task_id": fix_task.task_id,
+                        "retry_count": fix_task.retry_count,
+                        "reason": "; ".join(result.errors or []) or result.output.get("summary", ""),
+                    }
+                )
                 self.console.emit("FIX", "Найдены ошибки, создана задача исправления")
                 fix_result = self.run_task(fix_task)
                 if fix_result.status == TaskStatus.DONE:
@@ -2666,6 +2868,7 @@ class Orchestrator:
         self.console.emit("AGENTS", f"Найдено агентов: {len(self.registry.list_agents())}, доступно: {len(self.registry.ready_agents())}")
         self.healthcheck.check_all()
 
+        task_types = self._task_type_index(plan)
         completed: set[str] = set()
         pending = {task.task_id: task for task in plan.atomic_tasks}
         final_results: list[AgentResult] = []
@@ -2728,24 +2931,67 @@ class Orchestrator:
                 total_tasks,
                 details=f"batch {batch_no} finished ok={succeeded} failed={failed}",
             )
-            if failed:
-                failed_ids = ", ".join(r.task_id[:8] for r in results if r.status != TaskStatus.DONE)
-                self.console.emit("ERROR", f"Batch {batch_no}: failed task(s): {failed_ids}")
 
-            if any(r.status != TaskStatus.DONE for r in results):
+            failed_results = [r for r in results if r.status != TaskStatus.DONE]
+            if failed_results:
+                failed_ids = ", ".join(r.task_id[:8] for r in failed_results)
+                self.console.emit("ERROR", f"Batch {batch_no}: failed task(s): {failed_ids}")
+            non_review_failures = [r for r in failed_results if task_types.get(r.task_id) != TaskType.REVIEW]
+            if non_review_failures:
                 merged = self.merger.merge(final_results)
+                report = self._build_orchestration_report(plan, final_results, merged)
+                report.status = "REJECTED"
+                report.quorum_verified = False
                 module_state = self.module_state()
-                return {"status": "failed", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {}), "local_model_manager": module_state.get("local_model_manager", {})}
+                return {
+                    "status": "failed",
+                    "merged": merged,
+                    "results": [r.as_dict() for r in final_results],
+                    "metrics": self.metrics.snapshot(),
+                    "console": self.console.events,
+                    "live_trace": self.live_trace_rows,
+                    "scheduler": [decision.as_dict() for decision in self.scheduler.decisions],
+                    "kernel_modules": self.module_manager.loaded_modules(),
+                    "module_state": module_state,
+                    "ai_activity": module_state.get("ai_activity", {}),
+                    "model_usage": module_state.get("model_usage", {}),
+                    "model_availability": module_state.get("model_availability", {}),
+                    "local_model_manager": module_state.get("local_model_manager", {}),
+                    "orchestration_report": report.model_dump(),
+                }
 
             for task in ready_tasks:
                 completed.add(task.task_id)
                 pending.pop(task.task_id)
 
         merged = self.merger.merge(final_results)
-        self.console.progress("Parallel batches", total_tasks, total_tasks, details="orchestration complete")
-        self.console.emit("DONE", "Все критерии выполнены (Асинхронный параллельный режим)")
+        report = self._build_orchestration_report(plan, final_results, merged)
+        if report.quorum_verified:
+            merged["status"] = "done"
+            self.console.progress("Parallel batches", total_tasks, total_tasks, details="orchestration complete")
+            self.console.emit("DONE", "Все критерии выполнены (Асинхронный параллельный режим)")
+            top_status = "done"
+        else:
+            top_status = "failed"
         module_state = self.module_state()
-        return {"status": "done", "merged": merged, "results": [r.as_dict() for r in final_results], "metrics": self.metrics.snapshot(), "console": self.console.events, "live_trace": self.live_trace_rows, "disabled_agents": self.autoscaler.disabled_agents, "enabled_agents": self.autoscaler.enabled_agents, "scheduler": [decision.as_dict() for decision in self.scheduler.decisions], "kernel_modules": self.module_manager.loaded_modules(), "module_state": module_state, "ai_activity": module_state.get("ai_activity", {}), "model_usage": module_state.get("model_usage", {}), "model_availability": module_state.get("model_availability", {}), "local_model_manager": module_state.get("local_model_manager", {})}
+        return {
+            "status": top_status,
+            "merged": merged,
+            "results": [r.as_dict() for r in final_results],
+            "metrics": self.metrics.snapshot(),
+            "console": self.console.events,
+            "live_trace": self.live_trace_rows,
+            "disabled_agents": self.autoscaler.disabled_agents,
+            "enabled_agents": self.autoscaler.enabled_agents,
+            "scheduler": [decision.as_dict() for decision in self.scheduler.decisions],
+            "kernel_modules": self.module_manager.loaded_modules(),
+            "module_state": module_state,
+            "ai_activity": module_state.get("ai_activity", {}),
+            "model_usage": module_state.get("model_usage", {}),
+            "model_availability": module_state.get("model_availability", {}),
+            "local_model_manager": module_state.get("local_model_manager", {}),
+            "orchestration_report": report.model_dump(),
+        }
 
     async def run_async(self, root_task: Task) -> dict:
         """Asynchronous entry point that leverages parallel execution."""

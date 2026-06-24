@@ -12,6 +12,7 @@ MEMORY_VOLUME_NAME="${AI_BRIDGE_MEMORY_VOLUME_NAME:-hebrew_core_memory}"
 OLLAMA_VOLUME_NAME="${AI_BRIDGE_OLLAMA_VOLUME_NAME:-ollama}"
 LOCAL_MODEL="${AI_BRIDGE_LOCAL_LLM_MODEL:-qwen2.5:0.5b}"
 ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-8000}"
+ORCHESTRATOR_CONTAINER_PORT="${ORCHESTRATOR_CONTAINER_PORT:-8000}"
 OLLAMA_PORT="${AI_BRIDGE_LOCAL_LLM_PORT:-11434}"
 RUN_LOCAL_LLM=1
 RUN_AGY_LOGIN=0
@@ -280,11 +281,12 @@ start_orchestrator() {
   host_run podman run -d \
     --name "$ORCHESTRATOR_CONTAINER" \
     -w /app \
-    -p "${ORCHESTRATOR_PORT}:8000" \
+    -p "${ORCHESTRATOR_PORT}:${ORCHESTRATOR_CONTAINER_PORT}" \
     --env-file "$PROJECT_ROOT/.env" \
     --env-file "$PROJECT_ROOT/.env.gemini.local" \
     --env-file "$PROJECT_ROOT/.env.bridge" \
     -e PYTHONPATH=/app \
+    -e ORCHESTRATOR_PORT="${ORCHESTRATOR_CONTAINER_PORT}" \
     -e PATH=/var/home/sanya/.npm-packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app/.local/bin \
     -e NODE_PATH=/var/home/sanya/.npm-packages/lib/node_modules \
     -e TESTING=false \

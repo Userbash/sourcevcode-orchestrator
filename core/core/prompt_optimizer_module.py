@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .external_ai_bridge import ExternalAIBridge
@@ -184,16 +185,25 @@ class PromptOptimizerModule:
         top_k = 2 if task.type in {TaskType.PLAN, TaskType.REVIEW, TaskType.TEST} else 1
         try:
             if hasattr(hybrid, "get_trained_memory_context"):
-                ctx = hybrid.get_trained_memory_context(
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    memory_domain=domain,
-                    top_k=top_k,
-                    query_text=str(task.input.description or ''),
-                    files=[str(item).strip() for item in list(task.input.files or []) if str(item).strip()],
-                    constraints=[str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()],
-                    acceptance_criteria=[str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()],
-                )
+                call_kwargs = {
+                    "session_id": session_id,
+                    "agent_id": agent_id,
+                    "memory_domain": domain,
+                    "top_k": top_k,
+                    "query_text": str(task.input.description or ""),
+                    "files": [str(item).strip() for item in list(task.input.files or []) if str(item).strip()],
+                    "constraints": [str(item).strip() for item in list(task.input.constraints or []) if str(item).strip()],
+                    "acceptance_criteria": [str(item).strip() for item in list(task.input.acceptance_criteria or []) if str(item).strip()],
+                }
+                try:
+                    ctx = hybrid.get_trained_memory_context(**call_kwargs)
+                except TypeError:
+                    ctx = hybrid.get_trained_memory_context(
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        memory_domain=domain,
+                        top_k=top_k,
+                    )
                 brief = str(ctx.get("brief") or "").strip()
                 memory_domain = str(ctx.get("memory_domain") or domain)
                 reason = self._trained_memory_validation_reason(ctx, brief, memory_domain, task, policy)
@@ -203,7 +213,6 @@ class PromptOptimizerModule:
                 return ctx
         except Exception:
             pass
-        try:
             if hasattr(hybrid, "retrieve_trained_memory_brief"):
                 brief = hybrid.retrieve_trained_memory_brief(
                     session_id=session_id,
@@ -301,6 +310,112 @@ class PromptOptimizerModule:
         except Exception:
             return {"matched": False, "brief": "", "similarity": 0.0, "reason": "reuse_lookup_failed"}
 
+    @staticmethod
+    def _token_overlap_score(left: str, right: str) -> float:
+        left_tokens = set(re.findall(r"[a-z0-9_./:#-]+", str(left).lower()))
+        right_tokens = set(re.findall(r"[a-z0-9_./:#-]+", str(right).lower()))
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+    def _memory_consensus_context(
+        self,
+        task: Task,
+        trained: dict[str, Any] | None,
+        reusable: dict[str, Any] | None,
+        layered: dict[str, Any] | None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        gate = self._api.get_context("validation_memory_gate") if self._api else None
+        if gate and hasattr(gate, "build_validation_context"):
+            try:
+                provider = str((context or {}).get("selected_provider") or (context or {}).get("provider") or "")
+                model_name = str((context or {}).get("selected_model") or (context or {}).get("model") or getattr(task, "assigned_model", "") or "")
+                agent_id = str(getattr(task, "required_capability", "") or self._task_type_label(task))
+                gate_context = gate.build_validation_context(task, agent_id=agent_id, provider=provider, model_name=model_name, context=context)
+                if isinstance(gate_context, dict) and gate_context.get("validation_memory_consensus") is not None:
+                    return {
+                        "validation_memory_consensus": float(gate_context.get("validation_memory_consensus", 0.0) or 0.0),
+                        "validation_memory_conflict": bool(gate_context.get("validation_memory_conflict")),
+                        "validation_memory_conflict_reasons": list(gate_context.get("validation_memory_conflict_reasons") or []),
+                        "validation_vfs_path": str(gate_context.get("validation_vfs_path") or f"validation/memory/{task.session_id or 'default'}/{task.task_id}"),
+                        "validation_vfs_integrity_ok": bool(gate_context.get("validation_vfs_stored")),
+                    }
+            except Exception:
+                pass
+        trained = trained or {}
+        reusable = reusable or {}
+        layered = layered or {}
+        context = context or {}
+        trained_brief = str(trained.get("brief") or "").strip()
+        reusable_brief = str(reusable.get("brief") or reusable.get("reusable_task_memory_brief") or "").strip()
+        layered_brief = str(layered.get("layered_context_brief") or "").strip()
+        prompt_guidance = [str(item).strip() for item in (layered.get("prompt_guidance") or context.get("prompt_guidance") or []) if str(item).strip()]
+
+        evidence_sources = []
+        if trained_brief and trained.get("trusted"):
+            evidence_sources.append("trained_memory")
+        if reusable_brief and reusable.get("matched"):
+            evidence_sources.append("reusable_memory")
+        if layered_brief or prompt_guidance:
+            evidence_sources.append("layered_context")
+
+        conflict_reasons: list[str] = []
+        if trained_brief and not trained.get("trusted"):
+            conflict_reasons.append(f"trained_memory_untrusted:{trained.get('reason') or 'unknown'}")
+        if reusable_brief and not reusable.get("matched"):
+            conflict_reasons.append("reusable_memory_unmatched")
+        if trained_brief and reusable_brief:
+            overlap = self._token_overlap_score(trained_brief, reusable_brief)
+            if overlap < 0.12:
+                conflict_reasons.append(f"memory_disagreement:{overlap:.2f}")
+
+        consensus_score = len(evidence_sources) / 3.0
+        validation_conflict = bool(conflict_reasons) or len(evidence_sources) < 2
+        if len(evidence_sources) < 2:
+            conflict_reasons.append("insufficient_independent_evidence")
+
+        vfs = self._api.get_context("unified_vfs") if self._api else None
+        vfs_path = f"validation/prompt/{task.session_id or 'default'}/{task.task_id}"
+        vfs_integrity_ok = False
+        if vfs and hasattr(vfs, "write_state") and hasattr(vfs, "read_state"):
+            snapshot = {
+                "task_id": task.task_id,
+                "session_id": task.session_id or "default",
+                "trained_memory_domain": str(trained.get("memory_domain") or ""),
+                "trained_memory_trusted": bool(trained.get("trusted")),
+                "trained_memory_reason": str(trained.get("reason") or ""),
+                "reusable_task_memory_similarity": float(reusable.get("similarity", 0.0) or reusable.get("reusable_task_memory_similarity", 0.0) or 0.0),
+                "layered_context_present": bool(layered_brief),
+                "prompt_guidance_count": len(prompt_guidance),
+                "consensus_score": round(consensus_score, 3),
+                "validation_conflict": validation_conflict,
+                "conflict_reasons": list(conflict_reasons),
+            }
+            try:
+                write_ok = bool(vfs.write_state(vfs_path, snapshot, str(task.assigned_model or self._task_type_label(task)), metadata={"kind": "prompt_optimizer_validation", "task_id": task.task_id}))
+                node = vfs.read_state(vfs_path)
+                vfs_integrity_ok = bool(write_ok and node is not None and getattr(node, "content", None) == snapshot)
+            except Exception:
+                vfs_integrity_ok = False
+        else:
+            conflict_reasons.append("vfs_unavailable")
+
+        if not vfs_integrity_ok:
+            conflict_reasons.append("vfs_integrity_unverified")
+            validation_conflict = True
+
+        if validation_conflict:
+            consensus_score = max(0.0, consensus_score - 0.25)
+
+        return {
+            "validation_memory_consensus": round(consensus_score, 3),
+            "validation_memory_conflict": validation_conflict,
+            "validation_memory_conflict_reasons": conflict_reasons[:6],
+            "validation_vfs_path": vfs_path,
+            "validation_vfs_integrity_ok": vfs_integrity_ok,
+        }
+
     def _extract_context(self, task: Task, history: list[dict[str, Any]], offload: dict[str, Any] | None, trained: dict[str, Any] | None = None, reusable: dict[str, Any] | None = None, context: dict[str, Any] | None = None) -> list[str]:
         context_lines: list[str] = []
         if task.session_id:
@@ -342,6 +457,14 @@ class PromptOptimizerModule:
             context_lines.append(f"reusable_task_similarity: {float(reusable.get("similarity", 0.0) or 0.0):.2f}")
             context_lines.append(f"reusable_task_fingerprint: {reusable.get("fingerprint", "")}")
             context_lines.append(f"reusable_task_memory_brief: {str(reusable.get("brief") or "")[:240]}")
+        layered = self._layered_context_memory(task, context)
+        consensus = self._memory_consensus_context(task, trained, reusable, layered, context)
+        context_lines.append(f"validation_memory_consensus: {consensus['validation_memory_consensus']:.3f}")
+        context_lines.append(f"validation_memory_conflict: {consensus['validation_memory_conflict']}")
+        if consensus["validation_memory_conflict_reasons"]:
+            context_lines.append(f"validation_memory_conflict_reasons: {', '.join(consensus['validation_memory_conflict_reasons'])}")
+        context_lines.append(f"validation_vfs_path: {consensus['validation_vfs_path']}")
+        context_lines.append(f"validation_vfs_integrity_ok: {consensus['validation_vfs_integrity_ok']}")
         decisions = self._memory_decisions(task)
         if decisions:
             context_lines.append(f"memory_decisions: {len(decisions)}")
@@ -468,6 +591,7 @@ class PromptOptimizerModule:
             steps.append("split the work into independent branches, assign ownership, and keep a final merge/review stage.")
         if str(profile.get("execution_shape") or "") == "single_lane_validation":
             steps.append("run the work through a single validated lane and keep review/test checkpoints explicit.")
+        steps.append("treat your first answer as provisional: self-check it, challenge assumptions, and revise conclusions when evidence contradicts them.")
         if history:
             steps.append("reuse only the relevant successful patterns from recent history.")
         if not steps:
@@ -550,7 +674,9 @@ class PromptOptimizerModule:
         sections.append(
             "Break the request into a detailed, unambiguous execution instruction. "
             "Make hidden assumptions explicit, split complex work into numbered parts, "
-            "and optimize for development quality, correctness, and testability."
+            "and optimize for development quality, correctness, and testability. "
+            "Do not trust the first conclusion automatically: self-check, look for contradictions, "
+            "and revise the answer when the evidence is weak or inconsistent."
         )
         return "\n".join(sections)
 

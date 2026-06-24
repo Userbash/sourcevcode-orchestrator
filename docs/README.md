@@ -1,63 +1,43 @@
 # Documentation Index
 
-## SourceVCode Orchestrator Core
+This directory now documents the current orchestrator runtime first.
 
-- `ARCHITECTURE.md` - system architecture and runtime flows
-- `AI_BRIDGE_RUNTIME_ROUTING.md` - AI Bridge model/provider routing rules
-- `AI_BRIDGE_ARCHITECTURE.md` - AI Bridge component overview and wiring
-- `AI_ORCHESTRATOR_CORE.md` - technical reference for the orchestrator core
-- `PROJECT_FULL_DOCUMENTATION_EN.md` - (LEGACY/ECOSYSTEM REFERENCE) comprehensive platform documentation
+Older documents are still present when they contain useful release history or migration context, but they should not be read as the primary description of the live system. If two documents disagree, prefer the files listed under **Current Runtime**.
 
-## Governance and Process
+## Current Runtime
 
-- `DOCUMENTATION_GOVERNANCE.md` - required documentation update rules
-- `VERSIONING_POLICY.md` - semantic versioning and release rules
-- `TRACEABILITY_POLICY.md` - required issue-to-release traceability chain
-- `ENVIRONMENT_VERSIONING.md` - environment reproducibility/version controls
-- `RELEASE_MANIFEST_TEMPLATE.md` - release metadata template
-- `DB_MIGRATION_PLAYBOOK.md` - migration and rollback standards
-
-## Security and Access
-
-- `RBAC_MATRIX.md` - role/permission governance map
-- `SECURITY_CHANGELOG.md` - security-impact change history
+- `SYSTEM_OVERVIEW.md` - the best starting point for understanding how the orchestrator works today
+- `RUNTIME_CHANGES_AND_MIGRATION_NOTES.md` - what changed compared with older documentation and older runtime slices
+- `AI_BRIDGE_RUNTIME_ROUTING.md` - provider and model routing policy
+- `AI_BRIDGE_ARCHITECTURE.md` - bridge-level component wiring
+- `AI_ORCHESTRATOR_CORE.md` - technical reference for core orchestration behavior
+- `API/README.md` - API documentation structure
+- `API/openapi.yaml` - OpenAPI contract
 
 ## Operations
 
-- `RUNBOOKS/OPERATIONS_RUNBOOK.md` - startup/deploy operations
+- `RUNBOOKS/OPERATIONS_RUNBOOK.md` - deployment and recovery procedures
+- `TEST_COVERAGE_MAP.md` - test coverage and known gaps
+- `AI_BRIDGE_HARDENING_BACKLOG.md` - runtime hardening backlog
 
-## API Contracts
+## Memory and Validation
 
-- `API/README.md` - API documentation structure and rules
-- `API/ERRORS.md` - standard error model
-- `API/VERSIONING.md` - API compatibility/versioning approach
-- `API/openapi.yaml` - OpenAPI specification
+- `AI_BRIDGE_SESSION_MEMORY.md` - session and layered memory design
+- `RELEASE_SUMMARY_LAYERED_RUNTIME_MEMORY_AND_MULTI_AGENT_ORCHESTRATION.md` - release summary for memory, decomposition, and multi-agent routing changes
 
-## Architecture Decisions
+## Governance
 
-- `ADR/README.md` - ADR process and index
-- `ADR/0000-template.md` - ADR template
-- `ADR/0001-documentation-governance-and-versioning-baseline.md` - accepted baseline ADR
+- `DOCUMENTATION_GOVERNANCE.md` - documentation update rules
+- `VERSIONING_POLICY.md` - versioning policy
+- `TRACEABILITY_POLICY.md` - traceability rules
+- `ENVIRONMENT_VERSIONING.md` - reproducible environment rules
 
-## Quality and Coverage
+## Historical and Reference Material
 
-- `TEST_COVERAGE_MAP.md` - current test coverage map and risk gaps
+These files are still useful, but they describe broader or older slices of the platform:
 
-## Orchestrator Hardening
+- `PROJECT_FULL_DOCUMENTATION_EN.md`
+- `SOURCECRAFT_PUBLICATION_REPORT.md`
+- `LLM_COST_CACHE_BLUEPRINT.md`
 
-- `AI_BRIDGE_HARDENING_BACKLOG.md` - micro-task backlog
-- `AI_BRIDGE_EXECUTION_PLAN_R1_R4.md` - encapsulated by-agent plan
-- `GEMINI_AUTO_ROUTING_MODULE_PLAN.md` - Gemini routing plan
-- `LLM_COST_CACHE_BLUEPRINT.md` - non-breaking rollout plan for prompt cache efficiency and cost telemetry
-
-## Session Memory
-
-- `AI_BRIDGE_SESSION_MEMORY.md` - architecture and security model for session memory
-- `AI_BRIDGE_SESSION_MEMORY_BACKLOG.md` - micro-task decomposition
-- `AI_BRIDGE_SESSION_MEMORY_RELEASE_PLAN.md` - rollout plan
-
-## Publication Notes
-
-- `SOURCECRAFT_PUBLICATION_REPORT.md` - human-readable publication report for SourceCraft, including runtime changes, new features, and operational impact
-- `RELEASE_SUMMARY_LAYERED_RUNTIME_MEMORY_AND_MULTI_AGENT_ORCHESTRATION.md` - release summary for intake normalization, routing-profile propagation, and orchestration guardrail improvements
-- SourceCraft publication summary: SourceCraft now ships with explicit websocket routing hints, session isolation, degraded boot behavior for unsupported host bridge paths, and safer message serialization in the orchestration transport layer.
+When you update the runtime, update `SYSTEM_OVERVIEW.md` and `RUNTIME_CHANGES_AND_MIGRATION_NOTES.md` first. That keeps the high-level story accurate and makes the rest of the documentation easier to trust.

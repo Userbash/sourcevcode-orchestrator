@@ -83,6 +83,14 @@ class GatewayFailingAgent(BaseAgent):
         )
 
 
+class LowConfidenceReviewAgent(BaseAgent):
+    def __init__(self, agent_id: str = "reviewer-1") -> None:
+        super().__init__(agent_id, ["review"])
+
+    def run(self, task: Task, memory_context: dict | None = None):
+        return self.result(task, "Review completed with reservations.", confidence=0.45)
+
+
 def _orchestrator_with_agents(code_agent: BaseAgent | None = None, fix_agent: BaseAgent | None = None) -> Orchestrator:
     orchestrator = Orchestrator()
     orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"))
@@ -98,8 +106,14 @@ def _orchestrator_with_agents(code_agent: BaseAgent | None = None, fix_agent: Ba
     orchestrator._openai_template_agent_ids = set()
     return orchestrator
 
+
+def _disable_state_persistence(orchestrator: Orchestrator) -> Orchestrator:
+    orchestrator.state_store.save_session_state = lambda *args, **kwargs: {"version": 1}
+    orchestrator.state_store.record_invalidation = lambda *args, **kwargs: None
+    return orchestrator
+
 def test_full_cycle_plan_code_test_review_done():
-    orchestrator = _orchestrator_with_agents()
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents())
 
     task = Task(TaskType.PLAN, TaskInput("Build feature", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
     result = asyncio.run(orchestrator.run(task))
@@ -113,7 +127,7 @@ def test_full_cycle_plan_code_test_review_done():
 
 
 def test_full_cycle_delegates_failed_code_to_fix_agent_and_finishes():
-    orchestrator = _orchestrator_with_agents(FailingCodeAgent("code-main"), FixAgent("fix-1"))
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(FailingCodeAgent("code-main"), FixAgent("fix-1")))
 
     task = Task(TaskType.PLAN, TaskInput("Build feature with a failing first implementation", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
     result = asyncio.run(orchestrator.run(task))
@@ -603,3 +617,96 @@ def test_sync_openai_template_workers_filters_runtime_ineligible_models(tmp_path
     assert review_models
     assert "claude-opus-4-8" not in review_models
     assert all(model in {"gpt-5.5", "deepseek-v4-pro", "gpt-5.4"} for model in review_models)
+
+
+def test_orchestration_report_approved_quorum_includes_dag_and_validation_ring():
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents())
+
+    task = Task(TaskType.PLAN, TaskInput("Build feature", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
+    result = asyncio.run(orchestrator.run(task))
+    report = result["orchestration_report"]
+
+    node_types = {node["task_type"] for node in report["execution_dag"]["nodes"]}
+    type_by_id = {node["task_id"]: node["task_type"] for node in report["execution_dag"]["nodes"]}
+    edges = report["execution_dag"]["edges"]
+
+    assert result["status"] == "done"
+    assert report["status"] == "APPROVED"
+    assert report["quorum_verified"] is True
+    assert report["execution_dag"]["root_task_id"] == task.task_id
+    assert {"plan", "code", "test", "review"}.issubset(node_types)
+    assert any(type_by_id[edge["from"]] == "plan" and type_by_id[edge["to"]] == "code" for edge in edges)
+    assert any(type_by_id[edge["to"]] == "test" for edge in edges)
+    assert any(type_by_id[edge["to"]] == "review" for edge in edges)
+    assert report["validation_ring"]["security_gate"]["status"] == "PASS"
+    assert report["validation_ring"]["tester"]["status"] == "PASS"
+    assert report["validation_ring"]["reviewer"]["status"] == "PASS"
+    assert report["fix_attempts_spent"] == 0
+
+
+
+def test_orchestration_report_allows_review_failure_when_quorum_threshold_is_met():
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents())
+    orchestrator.feedback.retry_limit = 0
+    orchestrator.attach_local_agent("reviewer-1", LowConfidenceReviewAgent("reviewer-1"))
+
+    task = Task(TaskType.PLAN, TaskInput("Build feature with review warnings", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
+    result = asyncio.run(orchestrator.run(task))
+    report = result["orchestration_report"]
+
+    assert result["status"] == "done"
+    assert report["status"] == "APPROVED"
+    assert report["quorum_verified"] is True
+    assert report["validation_ring"]["reviewer"]["status"] == "FAIL"
+    assert report["validation_ring"]["tester"]["status"] == "PASS"
+    assert report["validation_ring"]["security_gate"]["status"] == "PASS"
+
+
+
+def test_orchestration_report_rejects_when_code_lane_fails():
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(FailingCodeAgent("code-main")))
+
+    task = Task(TaskType.PLAN, TaskInput("Build feature with a failing first implementation", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
+    result = asyncio.run(orchestrator.run(task))
+    report = result["orchestration_report"]
+
+    assert result["status"] == "failed"
+    assert report["status"] == "REJECTED"
+    assert report["quorum_verified"] is False
+    assert report["fix_attempts_spent"] >= 1
+    assert any(row.get("event_type") == "FIX_LOOP" for row in result["live_trace"])
+
+
+
+def test_orchestration_report_counts_fix_loop_attempts_when_recovery_succeeds():
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(FailingCodeAgent("code-main"), FixAgent("fix-1")))
+
+    task = Task(TaskType.PLAN, TaskInput("Build feature with a failing first implementation", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
+    result = asyncio.run(orchestrator.run(task))
+    report = result["orchestration_report"]
+
+    assert result["status"] == "done"
+    assert report["status"] == "APPROVED"
+    assert report["fix_attempts_spent"] >= 1
+    assert any(row.get("event_type") == "FIX_LOOP" for row in result["live_trace"])
+
+def test_orchestrator_module_state_exposes_memory_warmup_report():
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents())
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput(
+            "Implement backend and frontend changes for the feature with tests aligned",
+            files=["backend/app.py", "frontend/ui.tsx"],
+            acceptance_criteria=["backend updated", "frontend updated"],
+        ),
+        TaskContext("demo", ".", "main"),
+    )
+    task.routing_hints = {"parallelize_code": True, "parallel_branches": 2}
+
+    result = asyncio.run(orchestrator.run(task))
+
+    report = result["module_state"]["memory_warmup_report"]
+    assert report["parallel_batches_total"] >= 1
+    assert report["status"] in {"active", "conflict"}
+    assert "conflict_total" in report

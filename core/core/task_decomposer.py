@@ -300,6 +300,7 @@ class TaskDecomposer:
         draft_layers: list[dict[str, Any]] = []
         tasks: list[Task] = []
         id_by_layer: dict[str, str] = {}
+        layer_task_ids: dict[str, list[str]] = {}
         pending_dependencies: list[tuple[Task, list[str]]] = []
         root_priority = task.priority
         for index, layer in enumerate(layers):
@@ -354,15 +355,16 @@ class TaskDecomposer:
                     )
                     agent_atomic.required_capability = agent_capability
                     id_by_layer[f"{layer_name}_{agent_hint}"] = agent_atomic.task_id
+                    layer_task_ids[f"{layer_name}_{agent_hint}"] = [agent_atomic.task_id]
                     group_task_ids.append(agent_atomic.task_id)
                     tasks.append(agent_atomic)
                     
                     # Track dependencies for these group tasks later
                     pending_dependencies.append((agent_atomic, self._ensure_list(layer.get("dependencies"))))
                 
-                # We don't add the original "layer_name" task, instead we map layer_name to the first of the group for dep resolution
                 if group_task_ids:
-                    id_by_layer[layer_name] = group_task_ids[0] # Simplification
+                    id_by_layer[layer_name] = group_task_ids[0]
+                    layer_task_ids[layer_name] = list(group_task_ids)
                 continue
 
             atomic = Task(
@@ -380,6 +382,7 @@ class TaskDecomposer:
             atomic.required_capability = capability
             atomic.routing_hints["parallel_group"] = bool(group_execution and len(sub_agents) > 1)
             id_by_layer[layer_name] = atomic.task_id
+            layer_task_ids[layer_name] = [atomic.task_id]
             tasks.append(atomic)
             pending_dependencies.append((atomic, self._ensure_list(layer.get("dependencies"))))
 
@@ -391,9 +394,14 @@ class TaskDecomposer:
         for atomic, deps in pending_dependencies:
             if deps:
                 for dep in deps:
-                    dep_id = id_by_layer.get(dep) or id_by_layer.get(dep.strip())
-                    if dep_id and dep_id != atomic.task_id and dep_id not in atomic.dependencies:
-                        atomic.dependencies.append(dep_id)
+                    dep_name = dep.strip()
+                    dep_ids = layer_task_ids.get(dep) or layer_task_ids.get(dep_name)
+                    if not dep_ids:
+                        fallback = id_by_layer.get(dep) or id_by_layer.get(dep_name)
+                        dep_ids = [fallback] if fallback else []
+                    for dep_id in dep_ids:
+                        if dep_id and dep_id != atomic.task_id and dep_id not in atomic.dependencies:
+                            atomic.dependencies.append(dep_id)
             elif previous_task_id and previous_task_id not in atomic.dependencies:
                 # Heuristic: keep chain if no deps specified, UNLESS it's explicitly marked as parallel_group
                 # or it has no sub_agents.
@@ -417,7 +425,7 @@ class TaskDecomposer:
         plan = Task(TaskType.PLAN, TaskInput(f"Plan: {description}", acceptance_criteria=["execution plan created"]), context, plan_priority, parent_task_id=task.task_id)
         code = Task(TaskType.CODE, TaskInput(f"Implement: {description}", files=task.input.files, constraints=task.input.constraints, acceptance_criteria=task.input.acceptance_criteria), context, execution_priority, parent_task_id=task.task_id, dependencies=[plan.task_id])
         test = Task(TaskType.TEST, TaskInput(f"Test: {description}", files=task.input.files, acceptance_criteria=["tests pass"]), context, execution_priority, parent_task_id=task.task_id, dependencies=[code.task_id])
-        review = Task(TaskType.REVIEW, TaskInput(f"Review: {description}", files=task.input.files, acceptance_criteria=["review pass"]), context, review_priority, parent_task_id=task.task_id, dependencies=[test.task_id])
+        review = Task(TaskType.REVIEW, TaskInput(f"Review: {description}", files=task.input.files, acceptance_criteria=["review pass"]), context, review_priority, parent_task_id=task.task_id, dependencies=[code.task_id])
         tasks = [plan, code, test, review]
         for atomic in tasks:
             self._decorate(atomic)
