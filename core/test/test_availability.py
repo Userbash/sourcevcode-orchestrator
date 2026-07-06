@@ -252,3 +252,12 @@ def test_check_openai_exposes_endpoint_manifest(monkeypatch) -> None:
     health = ModelAvailability().check_openai()
 
     assert health.diagnostics["endpoint_manifest"]["endpoints"]["codex"].endswith("/backend-api/codex")
+
+
+def test_check_ai_kernel_disabled_by_env_returns_non_failing_health(monkeypatch) -> None:
+    monkeypatch.setenv("AI_KERNEL_ENABLED", "false")
+
+    health = ModelAvailability().check_ai_kernel()
+
+    assert health.status == ProviderStatus.HEALTHY
+    assert health.diagnostics["status"] == "disabled_by_env"

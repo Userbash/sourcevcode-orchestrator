@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.core.env_loader import load_env_file
-from core.core.openai_provider import resolve_openai_provider_config
+from core.core.openai_provider import openai_endpoint_manifest, resolve_openai_provider_config, resolve_openai_provider_identity
 from core.core.provider_credentials import credential_snapshot
 
 load_env_file(".env")
@@ -48,26 +48,37 @@ def _extract_text(payload: Any) -> str:
 def build_summary() -> dict[str, object]:
     credential = credential_snapshot(("OPENAI_API_KEY", "CODEX_SALE_API_KEY"))
     config = resolve_openai_provider_config()
+    configured = bool(credential.get("configured")) or bool(str(config.api_key or "").strip())
+    usable_by_policy = bool(credential.get("usable")) or bool(str(config.api_key or "").strip())
+    identity = resolve_openai_provider_identity(config)
+    endpoint_manifest = openai_endpoint_manifest(config)
     summary: dict[str, object] = {
         "provider": "openai",
-        "configured": bool(credential.get("configured")),
-        "usable_by_policy": bool(credential.get("usable")),
+        "provider_id": identity["provider_id"],
+        "provider_name": identity["provider_name"],
+        "configured": configured,
+        "usable_by_policy": usable_by_policy,
         "placeholder": bool(credential.get("placeholder")),
+        "api_key": "Loading..." if configured else None,
         "base_url": config.base_url,
         "models_endpoint": config.models_endpoint,
         "chat_completions_endpoint": config.chat_completions_endpoint,
         "responses_endpoint": config.responses_endpoint,
+        "messages_endpoint": config.messages_endpoint,
+        "messages_count_tokens_endpoint": config.messages_count_tokens_endpoint,
+        "codex_endpoint": config.codex_endpoint,
+        "endpoint_manifest": endpoint_manifest,
         "default_model": config.default_model,
         "ready": False,
     }
-    if not credential.get("usable"):
+    if not usable_by_policy:
         summary["error"] = "openai_api_key_missing_or_placeholder"
         return summary
 
     with httpx.Client(timeout=30.0) as client:
-        models_probe = {"ok": False, "status_code": None, "model_count": 0, "sample_models": [], "error": None}
-        chat_probe = {"ok": False, "status_code": None, "response_sample": "", "error": None}
-        responses_probe = {"ok": False, "status_code": None, "response_sample": "", "error": None}
+        models_probe = {"ok": False, "status_code": None, "model_count": 0, "sample_models": [], "models": [], "error": None, "request_uri": config.models_endpoint}
+        chat_probe = {"ok": False, "status_code": None, "response_sample": "", "error": None, "request_uri": config.chat_completions_endpoint}
+        responses_probe = {"ok": False, "status_code": None, "response_sample": "", "error": None, "request_uri": config.responses_endpoint}
         model_name = config.default_model
 
         try:
@@ -83,7 +94,8 @@ def build_summary() -> dict[str, object]:
                         models.append(model_id.strip())
                 models_probe["ok"] = True
                 models_probe["model_count"] = len(models)
-                models_probe["sample_models"] = models[:8]
+                models_probe["sample_models"] = models[:24]
+                models_probe["models"] = models
                 if model_name not in models and models:
                     model_name = models[0]
             else:

@@ -190,3 +190,44 @@ def test_run_diagnostics_builds_remediation_plan_for_degraded_ai_models(monkeypa
     assert report["status"] == "degraded"
     assert report["remediation_plan"][0]["name"] == "antigravity"
     assert report["readiness"]["provider_ready"] is False
+
+
+
+def test_run_diagnostics_includes_transport_audit_when_requested(monkeypatch):
+    contracts_payload = {
+        "ok": True,
+        "status": "ok",
+        "checks": [
+            {"name": "transport_contract", "layer": "transport", "status": "ok", "ok": True, "source": "diagnostic_contracts"},
+        ],
+        "diagnostic_matrix": {"source": "diagnostic_contracts", "layers": {"transport": {"status": "healthy", "ok": True, "check_count": 1}}},
+    }
+    contracts_module = SimpleNamespace(
+        DIAGNOSTIC_SCHEMA_VERSION="diagnostics.v1",
+        run_diagnostic_matrix=lambda **kwargs: contracts_payload,
+    )
+    monkeypatch.setattr(SelfDiagnosticModule, "_load_diagnostic_contracts", staticmethod(lambda: contracts_module))
+    monkeypatch.setattr(
+        SelfDiagnosticModule,
+        "_build_transport_report",
+        lambda self: {
+            "status": "degraded",
+            "ws_endpoints": ["/chat/ws", "/ws/providers/inventory", "/ws/providers/runtime_inventory", "/ws/providers/models/index"],
+            "http_endpoints": ["/health", "/providers/inventory"],
+            "message_bus_backends": ["inmemory"],
+            "direct_module_calls": ["local_llm", "sourcecraft"],
+            "summary": {"fully_ws": False, "control_plane_transport": "http", "event_stream_transport": "hybrid"},
+            "migration_plan": [{"phase": "phase_1", "title": "Keep HTTP control-plane"}],
+        },
+    )
+
+    module = SelfDiagnosticModule()
+    api = _build_api(module_manager=_FakeModuleManager({"worker": _FakeModule()}), memory=SimpleNamespace(backend=object(), _sessions={}))
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {}}, "antigravity_status": {"ready": True}}
+    asyncio.run(module.on_load(api))
+    report = asyncio.run(module.run_diagnostics(layers=["transport"]))
+
+    assert report["requested_layers"] == ["transport"]
+    assert report["transport"]["summary"]["fully_ws"] is False
+    assert report["transport"]["ws_endpoints"] == ["/chat/ws", "/ws/providers/inventory", "/ws/providers/runtime_inventory", "/ws/providers/models/index"]
+    assert report["layer_checks"][0]["layer"] == "transport"

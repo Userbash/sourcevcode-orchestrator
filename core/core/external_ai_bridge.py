@@ -17,7 +17,14 @@ except Exception:  # pragma: no cover
     stop_after_attempt = None  # type: ignore
     wait_exponential_jitter = None  # type: ignore
 
-from core.core.gemini_runtime_router import AntigravityRuntimeRouter
+from core.core.antigravity_provider import (
+    antigravity_request_headers,
+    extract_antigravity_response_text,
+    resolve_antigravity_model_alias,
+    resolve_antigravity_provider_config,
+)
+from core.core.antigravity_runtime_router import AntigravityRuntimeRouter
+from core.core.mimo_provider import extract_mimo_response_text, invoke_mimo_native
 from core.core.host_bridge import HostBridge
 from core.core.models import Task
 from core.core.provider_credentials import sync_provider_env_aliases
@@ -38,13 +45,10 @@ class ExternalAIBridge:
     def __init__(self, host_bridge: HostBridge | None = None) -> None:
         self.host_bridge = host_bridge
         self.router = AntigravityRuntimeRouter()
+        cfg = resolve_antigravity_provider_config()
         self.proxy_url = self._normalize_base_url(os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", ""))
-        self.api_base_url = self._normalize_base_url(
-            os.getenv(
-                "AI_BRIDGE_ANTIGRAVITY_API_BASE_URL",
-                os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
-            )
-        )
+        self.api_base_url = self._normalize_base_url(os.getenv("AI_BRIDGE_ANTIGRAVITY_API_BASE_URL", cfg.base_url))
+        self.chat_completions_endpoint = cfg.chat_completions_endpoint
         self.api_key = (
             os.getenv("ANTIGRAVITY_API_KEY")
             or os.getenv("GEMINI_API_KEY")
@@ -113,13 +117,8 @@ class ExternalAIBridge:
         base_url = self._endpoint_base_url()
         if not base_url:
             raise RuntimeError("antigravity_api_base_url_missing")
-        headers: dict[str, str] = {}
+        headers = antigravity_request_headers(self.api_key) if self.api_key else {}
         query: dict[str, Any] = dict(params or {})
-        if self.api_key:
-            if "generativelanguage.googleapis.com" in base_url:
-                query.setdefault("key", self.api_key)
-            else:
-                headers.setdefault("Authorization", f"Bearer {self.api_key}")
         url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
         return httpx.request(method, url, params=query or None, json=json_body, headers=headers or None, timeout=timeout_sec)
 
@@ -187,26 +186,7 @@ class ExternalAIBridge:
             value = str(payload.get(key) or "").strip()
             if value:
                 return value
-        candidates = payload.get("candidates")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                content = candidate.get("content")
-                if not isinstance(content, dict):
-                    continue
-                parts = content.get("parts")
-                if not isinstance(parts, list):
-                    continue
-                chunks: list[str] = []
-                for part in parts:
-                    if isinstance(part, dict):
-                        text = str(part.get("text") or "").strip()
-                        if text:
-                            chunks.append(text)
-                if chunks:
-                    return "\n".join(chunks).strip()
-        return ""
+        return extract_antigravity_response_text(payload)
 
     @staticmethod
     def classify_error(raw_error: str, task: Task | None = None, api: Any | None = None, model: str = "unknown") -> str:
@@ -254,28 +234,127 @@ class ExternalAIBridge:
         if not self.api_key:
             return BridgeExecResult(False, "", "missing_api_key", "antigravity", model, 0, error_type="auth_fail")
         try:
+            resolved_model = resolve_antigravity_model_alias(model)
             if self.proxy_url:
                 response = self._request_json("POST", "prompt", timeout_sec=timeout_sec + 10, json_body={"prompt": prompt, "timeout_sec": timeout_sec})
             else:
-                response = self._request_json(
-                    "POST",
-                    f"models/{model}:generateContent",
-                    timeout_sec=timeout_sec + 10,
-                    json_body={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
+                response = httpx.post(
+                    self.chat_completions_endpoint,
+                    headers=antigravity_request_headers(self.api_key),
+                    json={
+                        "model": resolved_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_completion_tokens": 1200,
+                        "temperature": 0.2,
+                        "stream": False,
+                    },
+                    timeout=timeout_sec + 10,
                 )
             payload = response.json() if response.content else {}
             output = self._extract_text(payload).strip()
             err = str(payload.get("stderr") or payload.get("error") or "").strip() if isinstance(payload, dict) else ""
             if response.status_code == 200 and output and not self._response_output_error(output, err):
-                return BridgeExecResult(True, output, "", "antigravity", model, 1, error_type="none")
+                return BridgeExecResult(True, output, "", "antigravity", resolved_model, 1, error_type="none")
             error = err or response.text[:500] or "antigravity_api_error"
             output_error = self._response_output_error(output, error)
             if output_error:
                 error = output_error
-            return BridgeExecResult(False, "", error, "antigravity", model, 1, error_type=self.classify_error(error))
+            return BridgeExecResult(False, "", error, "antigravity", resolved_model, 1, error_type=self.classify_error(error))
         except Exception as exc:
             err = f"execution_error: {exc}"
             return BridgeExecResult(False, "", err, "antigravity", model, 1, error_type=self.classify_error(err))
+
+    @staticmethod
+    def _provider_fallback_enabled() -> bool:
+        return os.getenv("AI_BRIDGE_ANTIGRAVITY_ENABLE_PROVIDER_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _fallback_triggered(error_type: str, raw_error: str) -> bool:
+        normalized_type = str(error_type or "").strip().lower()
+        text = str(raw_error or "").strip().lower()
+        if normalized_type in {"quota_exhaustion", "api_timeout", "tcp_timeout"}:
+            return True
+        markers = [
+            "user location is not supported",
+            "failed_precondition",
+            "resource_exhausted",
+            "quota exceeded",
+            "too many requests",
+            "high demand",
+            "temporarily unavailable",
+            "unavailable",
+            '"status": "unavailable"',
+            '"code": 503',
+            '"code": 429',
+            '"code": 400',
+        ]
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _mimo_fallback_model() -> str:
+        return str(os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro") or "xiaomi/mimo-v2.5-pro").strip()
+
+    @staticmethod
+    def _ai_kernel_fallback_base_url() -> str:
+        return str(os.getenv("AI_KERNEL_BASE_URL", "http://127.0.0.1:8012/v1") or "http://127.0.0.1:8012/v1").strip().rstrip('/')
+
+    @staticmethod
+    def _ai_kernel_fallback_model() -> str:
+        return str(os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip()
+
+    @staticmethod
+    def _ai_kernel_fallback_key() -> str:
+        return str(os.getenv("AI_KERNEL_API_KEY", "local") or "local").strip()
+
+    def _run_prompt_via_mimo_fallback(self, prompt: str, timeout_sec: int) -> BridgeExecResult:
+        model = self._mimo_fallback_model()
+        payload, error_text, status_code = invoke_mimo_native(model, prompt, timeout_sec=float(timeout_sec))
+        output = extract_mimo_response_text(payload) if payload else ""
+        if output.strip():
+            return BridgeExecResult(True, output.strip(), "", "mimo", model, 1, error_type="provider_fallback")
+        error = error_text or (f"status_code={status_code}" if status_code is not None else "mimo_fallback_failed")
+        return BridgeExecResult(False, "", error, "mimo", model, 1, error_type=self.classify_error(error))
+
+    def _run_prompt_via_ai_kernel_fallback(self, prompt: str, timeout_sec: int) -> BridgeExecResult:
+        model = self._ai_kernel_fallback_model()
+        base_url = self._ai_kernel_fallback_base_url()
+        try:
+            response = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self._ai_kernel_fallback_key()}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "stream": False,
+                },
+                timeout=timeout_sec + 10,
+            )
+            payload = response.json() if response.content else {}
+            output = self._extract_text(payload).strip()
+            if response.status_code == 200 and output:
+                return BridgeExecResult(True, output, "", "ai_kernel", model, 1, error_type="provider_fallback")
+            error = response.text[:500] or f"ai_kernel_status_{response.status_code}"
+            return BridgeExecResult(False, "", error, "ai_kernel", model, 1, error_type=self.classify_error(error))
+        except Exception as exc:
+            err = f"ai_kernel_fallback_error: {exc}"
+            return BridgeExecResult(False, "", err, "ai_kernel", model, 1, error_type=self.classify_error(err))
+
+    def _run_provider_fallbacks(self, prompt: str, timeout_sec: int, *, error_type: str, raw_error: str) -> BridgeExecResult | None:
+        if not self._provider_fallback_enabled() or not self._fallback_triggered(error_type, raw_error):
+            return None
+        mimo_result = self._run_prompt_via_mimo_fallback(prompt, timeout_sec)
+        if mimo_result.ok:
+            return mimo_result
+        ai_kernel_result = self._run_prompt_via_ai_kernel_fallback(prompt, timeout_sec)
+        if ai_kernel_result.ok:
+            return ai_kernel_result
+        combined = raw_error
+        if mimo_result.error:
+            combined = f"{combined} | mimo_fallback={mimo_result.error}".strip(" |")
+        if ai_kernel_result.error:
+            combined = f"{combined} | ai_kernel_fallback={ai_kernel_result.error}".strip(" |")
+        return BridgeExecResult(False, "", combined or "provider_fallback_exhausted", "antigravity", "provider-fallback", 1, error_type=error_type or "unknown")
 
     @staticmethod
     def _response_output_error(stdout: str, stderr: str = "") -> str:
@@ -294,7 +373,10 @@ class ExternalAIBridge:
     def run_antigravity_cli(self, task: Task, prompt: str, timeout_sec: int = 120) -> BridgeExecResult:
         proxied = self._run_prompt_via_proxy(prompt, timeout_sec)
         if proxied is not None:
-            return proxied
+            if proxied.ok:
+                return proxied
+            fallback = self._run_provider_fallbacks(prompt, timeout_sec, error_type=proxied.error_type, raw_error=proxied.error)
+            return fallback or proxied
         retries = self._retries()
         plan = self.router.build_plan(task, prompt)
         attempts = 0
@@ -319,6 +401,9 @@ class ExternalAIBridge:
                             last_error = result.error or "unknown"
                             if self._is_capacity_error(last_error) or self._is_token_error(last_error) or self.classify_error(last_error) in {"quota_exhaustion", "auth_fail"}:
                                 raise RuntimeError(last_error)
+                            fallback = self._run_provider_fallbacks(prompt, timeout_sec, error_type=result.error_type, raw_error=last_error)
+                            if fallback is not None:
+                                return fallback
                             return result
                 except RetryError as exc:
                     last_error = str(exc)
@@ -346,9 +431,16 @@ class ExternalAIBridge:
                 if retryable:
                     getattr(self.router, "block_model", lambda *args, **kwargs: None)(task, model)
                     break
+                fallback = self._run_provider_fallbacks(prompt, timeout_sec, error_type=classified, raw_error=last_error)
+                if fallback is not None:
+                    return fallback
                 return BridgeExecResult(False, "", last_error, "antigravity", model, attempts, error_type=classified)
 
-        return BridgeExecResult(False, "", f"routing_exhausted: {last_error}", "antigravity", plan.models[-1], attempts, error_type=self.classify_error(last_error))
+        final_error = f"routing_exhausted: {last_error}"
+        fallback = self._run_provider_fallbacks(prompt, timeout_sec, error_type=self.classify_error(last_error), raw_error=final_error)
+        if fallback is not None:
+            return fallback
+        return BridgeExecResult(False, "", final_error, "antigravity", plan.models[-1], attempts, error_type=self.classify_error(last_error))
 
     def run_antigravity(self, task: Task, prompt: str, timeout_sec: int = 120) -> BridgeExecResult:
         return self.run_antigravity_cli(task, prompt, timeout_sec=timeout_sec)

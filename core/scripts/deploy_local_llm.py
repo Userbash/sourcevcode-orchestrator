@@ -61,7 +61,7 @@ def detect_gpu_runtime() -> dict[str, object]:
             '--group-add keep-groups',
             '--device nvidia.com/gpu=all',
         ])
-        return {'backend': backend, 'container_args': [], 'additional_flags': flags, 'env': env}
+        return {'backend': backend, 'container_args': ['--nvidia'], 'additional_flags': flags, 'env': env}
     if backend == 'amd':
         env['OLLAMA_GPU_ENABLED'] = '1'
         flags.extend(['--device /dev/kfd', '--device /dev/dri', '--group-add keep-groups'])

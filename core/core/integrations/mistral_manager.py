@@ -13,11 +13,18 @@ logger = logging.getLogger("MistralManager")
 
 
 class MistralManager:
+    @staticmethod
+    def _resolve_base_url() -> str:
+        configured = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
+        if "host.containers.internal:8012" in configured or "127.0.0.1:8012" in configured or "localhost:8012" in configured:
+            return "https://api.mistral.ai/v1"
+        return configured or "https://api.mistral.ai/v1"
+
     def __init__(self, *, api_key: str | None = None) -> None:
         load_env_file()
         load_env_file(".env.bridge", override=True)
         self.api_key = api_key or os.getenv("MISTRAL_API_KEY")
-        self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
+        self.base_url = self._resolve_base_url()
         self.timeout = self._read_timeout()
         self.registry = MistralModelRegistry()
 

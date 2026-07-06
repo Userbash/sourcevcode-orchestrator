@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from core.core.gemini_model_registry import AntigravityModelRegistry
+from core.core.antigravity_model_registry import AntigravityModelRegistry
 
 
 def test_antigravity_registry_falls_back_to_cache_when_live_fetch_raises(tmp_path, monkeypatch):
@@ -63,7 +62,7 @@ def test_antigravity_registry_fetches_models_from_http_catalog(tmp_path, monkeyp
             ]
         })
 
-    monkeypatch.setattr("core.core.gemini_model_registry.httpx.get", fake_get)
+    monkeypatch.setattr("core.core.antigravity_model_registry.httpx.get", fake_get)
 
     registry = AntigravityModelRegistry()
 

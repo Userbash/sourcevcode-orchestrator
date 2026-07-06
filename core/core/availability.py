@@ -19,8 +19,8 @@ try:
 except Exception:  # pragma: no cover - optional in minimal test envs
     httpx = None  # type: ignore
 
-from .gemini_model_registry import AntigravityModelRegistry
-from .gemini_runtime_router import AntigravityRuntimeRouter
+from .antigravity_model_registry import AntigravityModelRegistry
+from .antigravity_runtime_router import AntigravityRuntimeRouter
 from .env_loader import load_env_file
 from .external_ai_bridge import ExternalAIBridge
 from .provider_credentials import credential_snapshot
@@ -549,6 +549,8 @@ class ModelAvailability:
         return self._cache(health)
 
     def check_ai_kernel(self, *, live: bool | None = None) -> ProviderHealth:
+        if os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+            return self._cache(ProviderHealth("ai_kernel", ProviderStatus.HEALTHY, 0.0, datetime.now(UTC), diagnostics={"provider": "ai_kernel", "enabled": False, "status": "disabled_by_env"}))
         start = datetime.now(UTC)
         base_url = (os.getenv("AI_KERNEL_BASE_URL") or "http://127.0.0.1:8012/v1").rstrip('/')
         diagnostics: dict[str, Any] = {
@@ -611,13 +613,15 @@ class ModelAvailability:
         return self._cache(health)
 
     def check_all(self) -> dict[str, ProviderHealth]:
-        return {
+        payload = {
             "antigravity": self.check_antigravity(),
             "mistral": self.check_mistral(),
             "openai": self.check_openai(),
             "mimo": self.check_mimo(),
-            "ai_kernel": self.check_ai_kernel(),
         }
+        if os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            payload["ai_kernel"] = self.check_ai_kernel()
+        return payload
 
     def cached_report(self) -> dict[str, dict]:
         return {provider: health.as_dict() for provider, health in sorted(self._health_cache.items())}

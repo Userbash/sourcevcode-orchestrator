@@ -7,12 +7,16 @@ from core.core.ai_kernel_bridge import AIKernelBridge
 
 
 class _HostBridge:
-    def __init__(self) -> None:
+    def __init__(self, *, host_available: bool = True) -> None:
         self.commands: list[list[str]] = []
+        self.host_available = host_available
 
     def execute(self, args, **kwargs):
         self.commands.append(list(args))
         return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    def can_execute_on_host(self) -> bool:
+        return self.host_available
 
 
 def test_ai_kernel_bridge_starts_service_when_probe_is_down(monkeypatch, tmp_path):
@@ -44,7 +48,7 @@ exit 0
 
     assert bridge.ensure_ready('hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m') is True
     assert bridge.host_bridge.commands
-    assert any('nohup' in ' '.join(cmd) for cmd in bridge.host_bridge.commands)
+    assert any(cmd[:3] == ['systemctl', '--user', 'start'] for cmd in bridge.host_bridge.commands)
 
 
 def test_ai_kernel_bridge_reports_false_when_autostart_disabled(monkeypatch, tmp_path):
@@ -127,4 +131,49 @@ def test_ai_kernel_bridge_skips_duplicate_start_when_pid_is_alive(monkeypatch, t
     monkeypatch.setattr(AIKernelBridge, '_service_process_active', lambda self: True)
 
     assert bridge.start_service() is True
+    assert bridge.host_bridge.commands == []
+
+
+def test_ai_kernel_bridge_runtime_probe_falls_back_to_local_subprocess(monkeypatch, tmp_path):
+    bridge = AIKernelBridge(
+        serve_script=tmp_path / 'serve.sh',
+        install_script=tmp_path / 'install.sh',
+        host_bridge=_HostBridge(),
+    )
+
+    def _fake_execute(args, **kwargs):
+        if list(args)[0].endswith('/bin/python'):
+            return SimpleNamespace(returncode=1, stdout='', stderr="ModuleNotFoundError: No module named 'llama_cpp'")
+        return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(bridge.host_bridge, 'execute', _fake_execute)
+    monkeypatch.setattr('core.core.ai_kernel_bridge.subprocess.run', lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='', stderr=''))
+
+    assert bridge._runtime_dependency_ready() is True
+
+
+def test_ai_kernel_bridge_rejects_unsupported_ws_transport():
+    bridge = AIKernelBridge(
+        base_url="ws://127.0.0.1:8012/v1",
+        host_bridge=_HostBridge(),
+    )
+
+    probe = bridge.probe()
+
+    assert probe["ok"] is False
+    assert probe["error"] == "unsupported_ai_kernel_transport:ws"
+
+
+def test_ai_kernel_bridge_skips_remote_management_without_host_bridge(monkeypatch, tmp_path):
+    bridge = AIKernelBridge(
+        base_url="http://host.containers.internal:8012/v1",
+        serve_script=tmp_path / "serve.sh",
+        install_script=tmp_path / "install.sh",
+        host_bridge=_HostBridge(host_available=False),
+    )
+    monkeypatch.setenv("AI_BRIDGE_AUTOSTART_AI_KERNEL", "true")
+    monkeypatch.setenv("AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE", "true")
+    monkeypatch.setattr(AIKernelBridge, "probe", lambda self: {"ok": False, "status_code": None, "models": [], "error": "connection refused"})
+
+    assert bridge.ensure_ready("hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m") is False
     assert bridge.host_bridge.commands == []

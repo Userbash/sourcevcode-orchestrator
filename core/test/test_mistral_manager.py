@@ -39,3 +39,11 @@ def test_mistral_manager_uses_cached_registry_when_live_probe_fails(monkeypatch)
     assert probe["ok"] is False
     assert probe["models"] == ["mistral-large-latest", "codestral-latest"]
     assert probe["inventory_source"] == "cache"
+
+
+def test_mistral_manager_ignores_local_proxy_base_url(monkeypatch):
+    monkeypatch.setenv("MISTRAL_BASE_URL", "http://host.containers.internal:8012/v1")
+
+    manager = MistralManager(api_key="mistral_nonsecret_key_value_1234567890")
+
+    assert manager.base_url == "https://api.mistral.ai/v1"

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 from typing import Iterable, MutableMapping
+
+from .openai_bazzite_endpoint import load_openai_endpoint_discovery
+from .codex_user_config import sync_codex_user_env
 from urllib.parse import urlparse
 
 
@@ -87,6 +90,7 @@ def sync_provider_env_aliases(
     override: bool = False,
 ) -> MutableMapping[str, str]:
     target = env if env is not None else os.environ
+    sync_codex_user_env(target, override=override)
 
     antigravity_key = _first_value(target, _ANTIGRAVITY_KEY_ENV_NAMES)
     if antigravity_key:
@@ -133,12 +137,28 @@ def _mask_secret(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+def _discovered_openai_snapshot() -> dict[str, object]:
+    payload = load_openai_endpoint_discovery()
+    api_key = str(payload.get("api_key") or "").strip()
+    if not api_key:
+        return {}
+    placeholder = _is_placeholder(api_key)
+    return {
+        "env_var": "OPENAI_ENDPOINT_DISCOVERY_PATH",
+        "configured": True,
+        "usable": bool(api_key and not placeholder),
+        "placeholder": placeholder,
+        "preview": _mask_secret(api_key),
+        "source": str(payload.get("source") or "discovery"),
+    }
+
+
 def _is_placeholder(value: str) -> bool:
     raw = (value or "").strip()
     if not raw:
         return False
     lowered = raw.lower()
-    if lowered in {"test", "demo", "dummy", "null", "none", "sk-test"}:
+    if lowered in {"test", "demo", "dummy", "null", "none", "sk-test", "local"}:
         return True
     return any(marker in lowered for marker in _GENERIC_PLACEHOLDER_MARKERS)
 
@@ -157,6 +177,10 @@ def credential_snapshot(env_names: Iterable[str]) -> dict[str, object]:
             "placeholder": placeholder,
             "preview": _mask_secret(value),
         }
+    if any(name in _OPENAI_KEY_ENV_NAMES for name in env_names):
+        discovered = _discovered_openai_snapshot()
+        if discovered:
+            return discovered
     return {
         "env_var": None,
         "configured": False,

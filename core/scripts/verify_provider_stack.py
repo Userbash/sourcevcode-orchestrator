@@ -83,6 +83,8 @@ def _mimo_native_run_summary() -> dict[str, object]:
 
 
 def _ai_kernel_summary() -> dict[str, object]:
+    if os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        return {"configured": False, "ready": False, "error": "ai_kernel_disabled_by_env", "model_count": 0, "sample_models": [], "status_code": None, "base_url": None, "model_alias": None}
     base_url = (os.getenv("AI_KERNEL_BASE_URL") or "http://127.0.0.1:8012/v1").rstrip('/')
     model_alias = (os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip()
     try:

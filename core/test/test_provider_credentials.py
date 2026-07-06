@@ -51,7 +51,7 @@ def test_load_env_file_syncs_github_aliases(tmp_path, monkeypatch) -> None:
 
 
 def test_load_env_file_syncs_openai_codex_sale_aliases(tmp_path, monkeypatch) -> None:
-    for env_name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_SALE_API_KEY", "CODEX_SALE_BASE_URL", "OPENAI_TCP_PROBE_HOSTS"):
+    for env_name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "AI_BRIDGE_OPENAI_BASE_URL", "AI_BRIDGE_OPENAI_MODELS_ENDPOINT", "AI_BRIDGE_OPENAI_CHAT_COMPLETIONS_ENDPOINT", "AI_BRIDGE_OPENAI_RESPONSES_ENDPOINT", "CODEX_SALE_API_KEY", "CODEX_SALE_BASE_URL", "OPENAI_TCP_PROBE_HOSTS"):
         monkeypatch.delenv(env_name, raising=False)
 
     env_file = tmp_path / ".env.bridge"
@@ -80,3 +80,27 @@ def test_load_default_env_cascades_local_secrets(tmp_path, monkeypatch) -> None:
 
     assert os.getenv("MIMO_API_KEY") == "mimo_nonsecret_key_value_1234567890"
     assert os.getenv("JWT_SECRET") == "test-secret"
+
+
+def test_local_placeholder_key_is_not_treated_as_usable_credential(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "local")
+
+    snapshot = credential_snapshot(("OPENAI_API_KEY",))
+
+    assert snapshot["configured"] is True
+    assert snapshot["usable"] is False
+    assert snapshot["placeholder"] is True
+
+
+def test_openai_credential_snapshot_uses_discovery_artifact(tmp_path, monkeypatch) -> None:
+    discovery = tmp_path / "openai_endpoint_discovery.json"
+    discovery.write_text('{"api_key":"openai_nonsecret_key_value_1234567890","usable":true,"source":"codex-sale.env"}', encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_SALE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_ENDPOINT_DISCOVERY_PATH", str(discovery))
+
+    snapshot = credential_snapshot(("OPENAI_API_KEY", "CODEX_SALE_API_KEY"))
+
+    assert snapshot["configured"] is True
+    assert snapshot["usable"] is True
+    assert snapshot["env_var"] == "OPENAI_ENDPOINT_DISCOVERY_PATH"

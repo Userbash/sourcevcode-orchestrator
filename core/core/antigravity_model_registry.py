@@ -152,5 +152,3 @@ class AntigravityModelRegistry:
         return AntigravityModelCatalog(models, lite, flash, pro, thinking)
 
 
-GeminiModelCatalog = AntigravityModelCatalog
-GeminiModelRegistry = AntigravityModelRegistry

@@ -14,7 +14,7 @@ from .data_plane_monitor import (
     postgres_status_summary,
 )
 from .external_ai_bridge import ExternalAIBridge
-from .gemini_runtime_router import AntigravityRuntimeRouter
+from .antigravity_runtime_router import AntigravityRuntimeRouter
 from .model_selector import ModelChoice
 from .models import (
     CompatModel,
@@ -32,6 +32,7 @@ from .models import (
 from .provider_budget_router import ProviderBudgetRouter
 from .provider_credentials import credential_snapshot
 from .session_memory import MemoryScope, SessionMemory
+from .transport_audit import build_transport_audit
 
 
 DIAGNOSTIC_LAYER_ORDER: tuple[str, ...] = (
@@ -39,6 +40,7 @@ DIAGNOSTIC_LAYER_ORDER: tuple[str, ...] = (
     "planning",
     "routing",
     "execution",
+    "transport",
     "memory",
     "providers",
     "observability",
@@ -339,6 +341,58 @@ _CONTRACTS: tuple[DiagnosticContract, ...] = (
             "orchestrator",
         ],
     ),
+
+_contract(
+    "transport",
+    summary="Transport contract audits which orchestration paths are WS, HTTP, MessageBus, or direct in-process calls.",
+    entry_points=[
+        "core.core.transport_audit.build_transport_audit",
+        "core.core.orchestrator.Orchestrator.build_transport_audit",
+        "core.scripts.orchestrator_daemon._build_http_app",
+    ],
+    dependencies=[
+        "FastAPI",
+        "WebSocket",
+        "MessageBus",
+        "InventoryStreamHub",
+    ],
+    inputs=[
+        "orchestrator runtime bindings",
+        "message bus backend",
+        "inventory stream hub presence",
+    ],
+    outputs=[
+        "transport summary",
+        "subsystem classification",
+        "safe ws migration plan",
+    ],
+    invariants=[
+        "Audit is descriptive and must not require live network access.",
+        "Control-plane HTTP endpoints stay explicitly classified as HTTP.",
+        "WS-only readiness is reported as a fact, not forced as a passing condition.",
+    ],
+    failure_signatures=[
+        "transport_audit_invalid",
+        "transport_summary_missing",
+        "transport_subsystems_invalid",
+        "transport_migration_plan_missing",
+    ],
+    command_examples=[
+        "python -c \"from core.core.orchestrator import Orchestrator; o=Orchestrator(); print(o.build_transport_audit())\"",
+        "pytest core/test/test_self_diagnostic_module.py -k transport -q",
+    ],
+    test_targets=[
+        "core/test/test_self_diagnostic_module.py::test_run_diagnostics_includes_transport_audit_when_requested",
+        "core/test/test_orchestrator_daemon_diagnostics.py::test_transport_audit_route_returns_payload",
+    ],
+    covered_modules=[
+        "orchestrator",
+        "message_bus",
+        "rabbitmq_bus",
+        "inventory_stream_hub",
+        "self_diagnostic",
+    ],
+),
     _contract(
         "memory",
         summary="Memory contract performs a local roundtrip probe against SessionMemory and validates cleanup.",
@@ -804,6 +858,31 @@ def _resolve_memory(api: Any) -> SessionMemory | None:
     return memory if isinstance(memory, SessionMemory) else None
 
 
+def _transport_check(api: Any) -> DiagnosticCheckResult:
+    audit = build_transport_audit(api)
+    failures: list[str] = []
+    summary = audit.get('summary') if isinstance(audit, dict) else None
+    subsystems = audit.get('subsystems') if isinstance(audit, dict) else None
+    migration_plan = audit.get('migration_plan') if isinstance(audit, dict) else None
+    message_bus = audit.get('message_bus') if isinstance(audit, dict) else None
+    if not isinstance(summary, dict):
+        failures.append('transport_summary_missing')
+    if not isinstance(subsystems, list):
+        failures.append('transport_subsystems_invalid')
+    if not isinstance(migration_plan, list) or not migration_plan:
+        failures.append('transport_migration_plan_missing')
+    if not isinstance(message_bus, dict):
+        failures.append('transport_audit_invalid')
+    ok = not failures
+    return DiagnosticCheckResult(
+        layer='transport',
+        ok=ok,
+        summary='Transport audit completed and classified runtime paths.' if ok else 'Transport audit payload is incomplete.',
+        failures=failures,
+        observed=audit if isinstance(audit, dict) else {},
+    )
+
+
 def _memory_check(api: Any) -> DiagnosticCheckResult:
     memory = _resolve_memory(api)
     if memory is None:
@@ -1212,6 +1291,7 @@ _CHECKS = {
     "planning": _planning_check,
     "routing": _routing_check,
     "execution": _execution_check,
+    "transport": _transport_check,
     "memory": _memory_check,
     "providers": _providers_check,
     "observability": _observability_check,

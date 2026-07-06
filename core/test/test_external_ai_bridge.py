@@ -27,24 +27,26 @@ class _Response:
 def test_bridge_uses_direct_api_generation(monkeypatch):
     bridge = ExternalAIBridge()
     bridge.proxy_url = ""
-    bridge.api_base_url = "https://example.test/v1beta"
+    bridge.api_base_url = "https://example.test/v1beta/openai"
+    bridge.chat_completions_endpoint = "https://example.test/v1beta/openai/chat/completions"
     bridge.api_key = "token"
     bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite", "antigravity-flash"]))
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, dict[str, object]]] = []
 
-    def fake_request(method, url, params=None, json=None, headers=None, timeout=None):
-        calls.append((method, url))
-        assert headers == {"Authorization": "Bearer token"}
-        assert "generateContent" in url
-        return _Response(200, {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]})
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(("POST", url, json or {}))
+        assert headers == {"Content-Type": "application/json", "api-key": "token", "Authorization": "Bearer token"}
+        assert url == "https://example.test/v1beta/openai/chat/completions"
+        assert json["model"] == "gemini-2.5-flash-lite"
+        return _Response(200, {"choices": [{"message": {"content": "ok"}}]})
 
-    monkeypatch.setattr("core.core.external_ai_bridge.httpx.request", fake_request)
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.post", fake_post)
 
     result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
 
     assert result.ok is True
     assert result.output == "ok"
-    assert calls == [("POST", "https://example.test/v1beta/models/antigravity-flash-lite:generateContent")]
+    assert calls == [("POST", "https://example.test/v1beta/openai/chat/completions", {"model": "gemini-2.5-flash-lite", "messages": [{"role": "user", "content": "prompt"}], "max_completion_tokens": 1200, "temperature": 0.2, "stream": False})]
 
 
 def test_bridge_uses_http_proxy_prompt_flow(monkeypatch):
@@ -71,14 +73,15 @@ def test_bridge_uses_http_proxy_prompt_flow(monkeypatch):
 def test_bridge_treats_auth_prompt_output_as_failure(monkeypatch):
     bridge = ExternalAIBridge()
     bridge.proxy_url = ""
-    bridge.api_base_url = "https://example.test/v1beta"
+    bridge.api_base_url = "https://example.test/v1beta/openai"
+    bridge.chat_completions_endpoint = "https://example.test/v1beta/openai/chat/completions"
     bridge.api_key = "token"
     bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite"]))
 
-    def fake_request(method, url, params=None, json=None, headers=None, timeout=None):
-        return _Response(200, {"candidates": [{"content": {"parts": [{"text": "Authentication required. Error: authentication timed out."}]}}]})
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _Response(200, {"choices": [{"message": {"content": "Authentication required. Error: authentication timed out."}}]})
 
-    monkeypatch.setattr("core.core.external_ai_bridge.httpx.request", fake_request)
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.post", fake_post)
 
     result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
 
@@ -114,3 +117,24 @@ def test_classify_error_covers_common_api_failures():
     assert ExternalAIBridge.classify_error("gateway timeout 504") == "api_timeout"
     assert ExternalAIBridge.classify_error("resource_exhausted 429") == "quota_exhaustion"
     assert ExternalAIBridge.classify_error("invalid api key") == "auth_fail"
+
+
+def test_bridge_falls_back_to_mimo_when_antigravity_upstream_is_unavailable(monkeypatch):
+    bridge = ExternalAIBridge()
+    bridge.proxy_url = ""
+    bridge.chat_completions_endpoint = "https://example.test/v1beta/openai/chat/completions"
+    bridge.api_key = "token"
+    bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite"]))
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _Response(503, {}, text='[{"error":{"code":503,"message":"high demand","status":"UNAVAILABLE"}}]')
+
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.post", fake_post)
+    monkeypatch.setattr("core.core.external_ai_bridge.invoke_mimo_native", lambda model, prompt, timeout_sec=45.0, max_completion_tokens=1200, temperature=0.2: ({"choices": [{"message": {"content": "mimo ok"}}]}, None, 200))
+    monkeypatch.setattr("core.core.external_ai_bridge.extract_mimo_response_text", lambda payload: "mimo ok")
+
+    result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
+
+    assert result.ok is True
+    assert result.provider == "mimo"
+    assert result.output == "mimo ok"

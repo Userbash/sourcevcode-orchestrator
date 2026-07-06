@@ -26,6 +26,8 @@ _LAYER_ALIASES = {
     "models": "ai_models",
     "provider": "providers",
     "providers": "providers",
+    "transport": "transport",
+    "transports": "transport",
     "matrix": "matrix",
     "layer": "matrix",
     "layers": "matrix",
@@ -136,7 +138,7 @@ class SelfDiagnosticModule:
         }
 
     def _build_report_skeleton(self, selected_layers: set[str] | None, contracts_module: Any | None = None) -> Dict[str, Any]:
-        requested_layers = sorted(selected_layers) if selected_layers else ["components", "memory", "ai_models", "matrix"]
+        requested_layers = sorted(selected_layers) if selected_layers else ["components", "memory", "ai_models", "transport", "matrix"]
         return {
             "schema_version": getattr(contracts_module, "DIAGNOSTIC_SCHEMA_VERSION", _DEFAULT_SCHEMA_VERSION),
             "status": "healthy",
@@ -144,6 +146,7 @@ class SelfDiagnosticModule:
             "components": {},
             "memory": {},
             "ai_models": {},
+            "transport": {},
             "antigravity_status": {},
             "requested_layers": requested_layers,
             "layer_checks": [],
@@ -234,6 +237,8 @@ class SelfDiagnosticModule:
             self._populate_memory_report(report)
         if self._layer_requested(selected_layers, "ai_models"):
             self._populate_ai_model_report(report)
+        if self._layer_requested(selected_layers, "transport"):
+            report["transport"] = self._build_transport_report()
         report["layer_checks"] = self._build_legacy_layer_checks(report)
         self._refresh_matrix_from_checks(report, source="legacy")
 
@@ -305,6 +310,16 @@ class SelfDiagnosticModule:
             report["ai_models"] = {"status": "error", "error": str(exc)}
             self._degrade(report)
 
+
+
+
+    def _build_transport_report(self) -> Dict[str, Any]:
+        try:
+            from .transport_audit import build_transport_audit
+            return build_transport_audit(self._api)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc), "summary": {"fully_ws": False}}
+
     def _build_legacy_layer_checks(self, report: Dict[str, Any]) -> list[Dict[str, Any]]:
         checks: list[Dict[str, Any]] = []
         for name, component in report.get("components", {}).items():
@@ -348,6 +363,20 @@ class SelfDiagnosticModule:
                     "ok": status in _SUCCESS_STATUSES,
                     "details": {k: v for k, v in model.items() if k not in {"status", "error"}},
                     "error": model.get("error"),
+                    "source": "legacy",
+                }
+            )
+        transport = report.get("transport")
+        if isinstance(transport, dict) and transport:
+            status = str(transport.get("status") or "unknown")
+            checks.append(
+                {
+                    "name": "transport",
+                    "layer": "transport",
+                    "status": status,
+                    "ok": status in _SUCCESS_STATUSES,
+                    "details": {k: v for k, v in transport.items() if k not in {"status", "error"}},
+                    "error": transport.get("error"),
                     "source": "legacy",
                 }
             )
@@ -606,7 +635,7 @@ class SelfDiagnosticModule:
             matrix = dict(payload["diagnostic_matrix"])
             matrix.setdefault("source", "diagnostic_contracts")
             matrix.setdefault("checks", checks)
-            matrix.setdefault("selected_layers", sorted(selected_layers) if selected_layers else ["components", "memory", "ai_models", "matrix"])
+            matrix.setdefault("selected_layers", sorted(selected_layers) if selected_layers else ["components", "memory", "ai_models", "transport", "matrix"])
             return matrix
         return self._derive_matrix(checks, selected_layers, source="diagnostic_contracts")
 
@@ -668,7 +697,7 @@ class SelfDiagnosticModule:
                 bucket["ok"] = False
         return {
             "source": source,
-            "selected_layers": sorted(selected_layers) if selected_layers else ["components", "memory", "ai_models", "matrix"],
+            "selected_layers": sorted(selected_layers) if selected_layers else ["components", "memory", "ai_models", "transport", "matrix"],
             "layers": layer_summary,
             "check_count": len(checks),
             "checks": checks,

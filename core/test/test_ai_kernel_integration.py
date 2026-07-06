@@ -17,12 +17,21 @@ def test_ai_kernel_summary_ready(monkeypatch):
 
 
 def test_provider_inventory_service_collects_ai_kernel(monkeypatch):
-    class _Response:
-        status_code = 200
-        content = b'1'
-        def json(self):
-            return {'data': [{'id': 'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'}]}
-    monkeypatch.setattr('core.core.provider_inventory_service.requests.get', lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(
+        'core.core.ai_kernel_bridge.AIKernelBridge.gate',
+        lambda self, model_name=None, ensure_ready=False: {
+            'base_url': 'http://127.0.0.1:8012/v1',
+            'ready': True,
+            'reachable': True,
+            'model_alias_present': True,
+            'models': ['hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'],
+            'probe': {'ok': True, 'status_code': 200, 'models': ['hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'], 'error': None},
+            'attempted_autostart': ensure_ready,
+            'service_process_active': True,
+            'autostart_enabled': True,
+            'manage_remote_enabled': False,
+        },
+    )
     service = ProviderInventoryService()
     payload = service.collect(force_refresh=False)
     assert 'ai_kernel' in payload
@@ -49,6 +58,9 @@ def test_availability_ai_kernel_healthy(monkeypatch):
 def test_ai_kernel_agent_health_ready(monkeypatch):
     class _Response:
         status_code = 200
+        content = b'1'
+        def json(self):
+            return {'data': [{'id': 'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'}]}
     monkeypatch.setattr('core.agents.ai_kernel_agent.httpx.Client.get', lambda *args, **kwargs: _Response())
     health = AIKernelAgent().health()
     assert health.status.value == 'ready'
@@ -59,6 +71,9 @@ def test_ai_kernel_agent_health_falls_back_to_host_internal(monkeypatch):
 
     class _Response:
         status_code = 200
+        content = b'1'
+        def json(self):
+            return {'data': [{'id': 'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'}]}
 
     def _fake_get(_self, url, *args, **kwargs):
         urls.append(url)

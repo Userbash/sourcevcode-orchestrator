@@ -455,7 +455,7 @@ def build_diagnostic_expansion_execution_plan(*, repo_path: str | None = None, b
             description="Deepen provider diagnostics with normalized readiness axes and optional live probe separation.",
             files=[
                 "core/core/external_ai_bridge.py",
-                "core/core/gemini_runtime_router.py",
+                "core/core/antigravity_runtime_router.py",
                 "core/core/diagnostic_contracts.py",
             ],
             constraints=_GLOBAL_CONSTRAINTS + ["Live provider probes must stay optional and explicitly gated."],

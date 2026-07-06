@@ -9,6 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+SUPPORTED_HTTP_SCHEMES = {"http", "https"}
+SYSTEMD_USER_SERVICE_NAME = "ai-kernel.service"
+
 import requests
 
 from core.core.host_bridge import HostBridge
@@ -78,6 +81,44 @@ class AIKernelBridge:
     def _headers(self) -> dict[str, str]:
         return {'Authorization': f'Bearer {self.api_key}'}
 
+    def _transport_supported(self) -> bool:
+        parsed = urlsplit(self.base_url)
+        return (parsed.scheme or 'http').lower() in SUPPORTED_HTTP_SCHEMES
+
+    def _host_control_available(self) -> bool:
+        return bool(getattr(self.host_bridge, 'can_execute_on_host', lambda: True)())
+
+    def _service_name(self) -> str:
+        return (os.getenv('AI_KERNEL_SERVICE_NAME') or SYSTEMD_USER_SERVICE_NAME).strip() or SYSTEMD_USER_SERVICE_NAME
+
+    def _systemd_available(self) -> bool:
+        if not self._host_control_available():
+            return False
+        result = self._run(['systemctl', '--user', '--version'])
+        return result.returncode == 0
+
+    def _systemd_unit_installed(self) -> bool:
+        if not self._systemd_available():
+            return False
+        result = self._run(['systemctl', '--user', 'status', self._service_name()])
+        return result.returncode in {0, 3}
+
+    def _install_systemd_unit(self) -> bool:
+        install_helper = self._resolve_host_path('scripts/ai-kernel/install_user_service.sh')
+        if not self._path_exists(install_helper):
+            logger.warning('AI kernel service install helper is missing: %s', install_helper)
+            return False
+        result = self._run(['bash', str(install_helper)])
+        return result.returncode == 0
+
+    def _start_via_systemd(self) -> bool:
+        if not self._systemd_available():
+            return False
+        if not self._systemd_unit_installed() and not self._install_systemd_unit():
+            return False
+        result = self._run(['systemctl', '--user', 'start', self._service_name()])
+        return result.returncode == 0
+
     def _host_home(self) -> Path:
         candidate = (os.getenv('AI_KERNEL_HOST_HOME') or os.getenv('HOST_HOME') or '').strip()
         if candidate:
@@ -112,12 +153,23 @@ class AIKernelBridge:
 
     def _runtime_dependency_ready(self) -> bool:
         runtime_python = self._runtime_python()
-        result = self._run([str(runtime_python), '-c', 'import llama_cpp, llama_cpp.server'])
+        try:
+            result = self._run([str(runtime_python), '-c', 'import llama_cpp, llama_cpp.server'])
+        except FileNotFoundError:
+            logger.debug('AI kernel runtime python is missing: %s', runtime_python)
+            return False
+        if result.returncode != 0 and runtime_python.exists():
+            # Some host-bridge environments misreport venv imports; retry locally before declaring the runtime broken.
+            result = subprocess.run([str(runtime_python), '-c', 'import llama_cpp, llama_cpp.server'], capture_output=True, text=True)
         if result.returncode != 0:
             logger.debug('AI kernel runtime probe failed for %s: %s', runtime_python, (result.stderr or result.stdout).strip())
         return result.returncode == 0
 
     def _path_exists(self, path: Path) -> bool:
+        if path.exists():
+            return True
+        if not self._host_control_available():
+            return False
         result = self._run(['sh', '-lc', f'test -e {shlex.quote(str(path))}'])
         return result.returncode == 0
 
@@ -136,6 +188,8 @@ class AIKernelBridge:
         return result.returncode == 0
 
     def probe(self) -> dict[str, object]:
+        if not self._transport_supported():
+            return {'ok': False, 'status_code': None, 'models': [], 'error': f'unsupported_ai_kernel_transport:{urlsplit(self.base_url).scheme or "unknown"}'}
         try:
             response = requests.get(f'{self.base_url}/models', headers=self._headers(), timeout=5.0)
             payload = response.json() if response.content else {}
@@ -159,6 +213,9 @@ class AIKernelBridge:
     def _ensure_dependencies(self) -> bool:
         serve_script = self._resolve_host_path(self.serve_script)
         install_script = self._resolve_host_path(self.install_script)
+        if not self._host_control_available() and not serve_script.exists():
+            logger.warning('AI kernel host control is unavailable inside this runtime; cannot inspect or start host service for %s.', self.base_url)
+            return False
         if self._path_exists(serve_script) and self._runtime_dependency_ready():
             return True
         if not self._auto_install_enabled():
@@ -176,6 +233,9 @@ class AIKernelBridge:
         if self._service_process_active():
             logger.info('AI kernel process is already running; waiting for readiness.')
             return True
+        if self._start_via_systemd():
+            logger.info('AI kernel start requested via systemd user unit %s.', self._service_name())
+            return True
         if not self._path_exists(serve_script):
             logger.warning('AI kernel serve script is missing: %s', serve_script)
             return False
@@ -190,7 +250,39 @@ class AIKernelBridge:
             f'>> {shlex.quote(str(log_path))} 2>&1 < /dev/null & echo $! > {shlex.quote(str(pid_path))}'
         )
         result = self._run(['bash', '-lc', cmd])
+        if result.returncode != 0:
+            result = subprocess.run(['bash', '-lc', cmd], capture_output=True, text=True)
         return result.returncode == 0
+
+    def gate(self, *, model_name: str | None = None, ensure_ready: bool = False) -> dict[str, object]:
+        target_model = (model_name or self.model_alias).strip() or self.model_alias
+        attempted_autostart = False
+        probe = self.probe()
+        ready_now = target_model in (probe.get('models') or []) if isinstance(probe.get('models'), list) and target_model else bool(probe.get('ok'))
+        if ensure_ready and not ready_now:
+            attempted_autostart = True
+            self.ensure_ready(target_model)
+            probe = self.probe()
+        models = [str(item).strip() for item in (probe.get('models') or []) if str(item).strip()] if isinstance(probe.get('models'), list) else []
+        alias_present = target_model in models if target_model else bool(models)
+        ready = bool(probe.get('ok')) and alias_present
+        return {
+            'provider': 'ai_kernel',
+            'enabled': os.getenv('AI_KERNEL_ENABLED', 'true').strip().lower() in {'1', 'true', 'yes', 'on'},
+            'base_url': self.base_url,
+            'transport_supported': self._transport_supported(),
+            'host_control_available': self._host_control_available(),
+            'model_name': target_model,
+            'ready': ready,
+            'reachable': bool(probe.get('ok')) or bool(models),
+            'model_alias_present': alias_present,
+            'models': models,
+            'probe': probe,
+            'attempted_autostart': attempted_autostart,
+            'service_process_active': self._service_process_active(),
+            'autostart_enabled': self._autostart_enabled(),
+            'manage_remote_enabled': self._manage_remote_enabled(),
+        }
 
     def ensure_ready(self, model_name: str | None = None) -> bool:
         target_model = (model_name or self.model_alias).strip() or self.model_alias
@@ -201,6 +293,12 @@ class AIKernelBridge:
             return False
         if not self._targets_local_runtime():
             logger.warning('AI kernel base_url points to external runtime %s; local autostart/install skipped for %s.', self.base_url, target_model)
+            return False
+        if not self._transport_supported():
+            logger.warning('AI kernel base_url %s uses unsupported transport; only HTTP(S) OpenAI-compatible endpoints are supported.', self.base_url)
+            return False
+        if self._manage_remote_enabled() and not self._host_control_available() and urlsplit(self.base_url).hostname == 'host.containers.internal':
+            logger.warning('AI kernel manage_remote is enabled but this runtime has no host bridge; start the host service via bootstrap and keep provider access over HTTP.')
             return False
         if not self._ensure_dependencies():
             logger.warning('AI kernel dependencies are not ready for %s.', target_model)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from core.core.agent_registry import AgentRegistry
 from core.core.healthcheck import HealthChecker
-from core.agents.gemini_agent import GeminiAgent
+from core.agents.antigravity_agent import AntigravityDirectAgent
 from core.core.security import SecurityManager, SecurityPolicy
 
 def main() -> None:

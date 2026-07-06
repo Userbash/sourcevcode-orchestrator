@@ -44,7 +44,7 @@ def resolve_antigravity_provider_config() -> AntigravityProviderConfig:
     base_url = explicit_base_url or "https://generativelanguage.googleapis.com/v1beta/openai"
     models_endpoint = _normalize_url(_first_env("ANTIGRAVITY_MODELS_ENDPOINT", "ANTIGRAVITY_API_MODELS_ENDPOINT")) or _join_url(base_url, "models")
     chat_endpoint = _normalize_url(_first_env("ANTIGRAVITY_CHAT_COMPLETIONS_ENDPOINT", "ANTIGRAVITY_API_CHAT_COMPLETIONS_ENDPOINT")) or _join_url(base_url, "chat/completions")
-    default_model = _first_env("ANTIGRAVITY_DEFAULT_MODEL", "GEMINI_DEFAULT_MODEL") or "antigravity-pro"
+    default_model = _first_env("ANTIGRAVITY_DEFAULT_MODEL", "GEMINI_DEFAULT_MODEL") or "gemini-2.5-flash-lite"
     auth_header_name = "api-key" if api_key else "api-key"
     return AntigravityProviderConfig(
         api_key=api_key,
@@ -80,6 +80,28 @@ def antigravity_endpoint_manifest(config: AntigravityProviderConfig | None = Non
             "chat": "chat_completions",
         },
     }
+
+
+_LEGACY_MODEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "antigravity-flash-lite": ("gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemini-flash-lite-latest"),
+    "antigravity-flash": ("gemini-2.5-flash-lite", "gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"),
+    "antigravity-pro": ("gemini-2.5-pro", "gemini-pro-latest", "antigravity-preview-05-2026"),
+    "antigravity-thinking": ("gemini-2.5-pro", "gemini-3.1-pro-preview", "deep-research-pro-preview-12-2025"),
+}
+
+
+def resolve_antigravity_model_alias(model_name: str, available_models: list[str] | None = None) -> str:
+    normalized = _normalize_model_name(model_name)
+    if not normalized:
+        normalized = _normalize_model_name(resolve_antigravity_provider_config().default_model)
+    candidates = _LEGACY_MODEL_ALIASES.get(normalized)
+    available = {_normalize_model_name(item) for item in (available_models or []) if _normalize_model_name(item)}
+    if candidates:
+        for candidate in candidates:
+            candidate_name = _normalize_model_name(candidate)
+            if not available or candidate_name in available:
+                return candidate_name
+    return normalized
 
 
 def _normalize_model_name(raw: str) -> str:

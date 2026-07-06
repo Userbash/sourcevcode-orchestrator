@@ -7,8 +7,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from core.core.antigravity_provider import (
+    antigravity_request_headers,
+    extract_antigravity_response_text,
+    resolve_antigravity_model_alias,
+    resolve_antigravity_provider_config,
+)
 from core.core.env_loader import load_env_file
-from core.core.gemini_model_registry import AntigravityModelRegistry
+from core.core.antigravity_model_registry import AntigravityModelRegistry
 from core.core.host_bridge import HostBridge
 from .antigravity_session_store import AntigravitySessionStore
 
@@ -29,12 +35,13 @@ class AntigravityManager:
             or os.getenv("GOOGLE_API_KEY")
             or ""
         ).strip()
+        cfg = resolve_antigravity_provider_config()
         self.api_base_url = self._normalize_base_url(
-            os.getenv(
-                "AI_BRIDGE_ANTIGRAVITY_API_BASE_URL",
-                os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
-            )
+            os.getenv("AI_BRIDGE_ANTIGRAVITY_API_BASE_URL", cfg.base_url)
         )
+        self.models_endpoint = cfg.models_endpoint
+        self.chat_completions_endpoint = cfg.chat_completions_endpoint
+        self.default_model = cfg.default_model
         self.proxy_url = self._normalize_base_url(os.getenv("AI_BRIDGE_ANTIGRAVITY_PROXY_URL", ""))
         self.session_store = AntigravitySessionStore()
         self.registry = AntigravityModelRegistry()
@@ -118,13 +125,8 @@ class AntigravityManager:
         base_url = self._endpoint_base_url()
         if not base_url:
             raise RuntimeError("antigravity_api_base_url_missing")
-        headers: dict[str, str] = {}
+        headers = antigravity_request_headers(self.api_key) if self.api_key else {}
         query: dict[str, Any] = dict(params or {})
-        if self.api_key:
-            if "generativelanguage.googleapis.com" in base_url:
-                query.setdefault("key", self.api_key)
-            else:
-                headers.setdefault("Authorization", f"Bearer {self.api_key}")
         url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
         return httpx.request(method, url, params=query or None, json=json_body, headers=headers or None, timeout=timeout or self.probe_timeout)
 
@@ -155,32 +157,7 @@ class AntigravityManager:
 
     @staticmethod
     def _generation_text_from_payload(payload: Any) -> str:
-        if not isinstance(payload, dict):
-            return ""
-        for key in ("stdout", "text", "output", "response"):
-            value = str(payload.get(key) or "").strip()
-            if value:
-                return value
-        candidates = payload.get("candidates")
-        if isinstance(candidates, list):
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                content = candidate.get("content")
-                if not isinstance(content, dict):
-                    continue
-                parts = content.get("parts")
-                if not isinstance(parts, list):
-                    continue
-                chunks: list[str] = []
-                for part in parts:
-                    if isinstance(part, dict):
-                        text = str(part.get("text") or "").strip()
-                        if text:
-                            chunks.append(text)
-                if chunks:
-                    return "\n".join(chunks).strip()
-        return ""
+        return extract_antigravity_response_text(payload)
 
     def _probe_generation(self, model_name: str | None = None) -> dict[str, Any]:
         prompt = "healthcheck: reply with ok"
@@ -199,12 +176,18 @@ class AntigravityManager:
                 ok = bool(payload.get("ok") if isinstance(payload, dict) else response.status_code == 200)
                 return {"ok": ok, "status_code": response.status_code, "stdout": stdout, "stderr": stderr, "error": None if ok else (stderr or response.text[:500]), "auth_mode": "api_key", "model": model_name or "proxy"}
 
-            chosen_model = model_name or "antigravity-flash"
-            response = self._request_json(
-                "POST",
-                f"models/{chosen_model}:generateContent",
+            chosen_model = resolve_antigravity_model_alias(model_name or self.default_model)
+            response = httpx.post(
+                self.chat_completions_endpoint,
+                headers=antigravity_request_headers(self.api_key),
+                json={
+                    "model": chosen_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_completion_tokens": 32,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
                 timeout=timeout + 10,
-                json_body={"contents": [{"role": "user", "parts": [{"text": prompt}]}]},
             )
             payload = response.json() if response.content else {}
             stdout = self._generation_text_from_payload(payload)
@@ -316,7 +299,7 @@ class AntigravityManager:
         if not self.api_key:
             return {"ok": False, "stdout": "", "stderr": "missing_api_key", "error": "missing_api_key", "status_code": None, "models": [], "auth_mode": self._api_mode(), "probe_kind": "inventory", "inventory_source": "api_key"}
         try:
-            response = self._request_json("GET", "models", timeout=self.probe_timeout)
+            response = httpx.get(self.models_endpoint, headers=antigravity_request_headers(self.api_key), timeout=self.probe_timeout)
             payload = response.json() if response.content else {}
             models = self._models_from_payload(payload)
             stdout = "\n".join(models)
@@ -347,7 +330,27 @@ class AntigravityManager:
         return []
 
     def _generation_probe(self, models: list[str]) -> dict[str, Any]:
-        return self._probe_generation(models[0] if models else None)
+        ordered: list[str] = []
+        preferred_candidates = [
+            self.default_model,
+            "antigravity-flash",
+            "antigravity-flash-lite",
+            *(models or []),
+        ]
+        seen: set[str] = set()
+        for candidate in preferred_candidates:
+            resolved = resolve_antigravity_model_alias(candidate, models)
+            if not resolved or resolved in seen:
+                continue
+            seen.add(resolved)
+            ordered.append(resolved)
+        last = {"ok": False, "stdout": "", "stderr": "no_models_available", "error": "no_models_available", "status_code": None, "auth_mode": "api_key"}
+        for candidate in ordered:
+            probe = self._probe_generation(candidate)
+            if probe.get("ok"):
+                return probe
+            last = probe
+        return last
 
     def status(self) -> dict[str, Any]:
         models_res = self.probe_api_key_models()

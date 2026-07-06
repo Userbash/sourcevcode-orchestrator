@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 
+from core.core.antigravity_provider import antigravity_request_headers, resolve_antigravity_model_alias, resolve_antigravity_provider_config
+
 HOST = "0.0.0.0"
 PORT = 8765
 
@@ -23,7 +25,8 @@ def _normalize_base_url(url: str) -> str:
 
 
 def _api_base_url() -> str:
-    return _normalize_base_url(os.getenv("AI_BRIDGE_ANTIGRAVITY_API_BASE_URL", os.getenv("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")))
+    cfg = resolve_antigravity_provider_config()
+    return _normalize_base_url(os.getenv("AI_BRIDGE_ANTIGRAVITY_API_BASE_URL", cfg.base_url))
 
 
 def _api_key() -> str:
@@ -31,18 +34,13 @@ def _api_key() -> str:
 
 
 def _headers(base_url: str) -> dict[str, str]:
+    _ = base_url
     key = _api_key()
-    if not key:
-        return {}
-    if "generativelanguage.googleapis.com" in base_url:
-        return {}
-    return {"Authorization": f"Bearer {key}"}
+    return antigravity_request_headers(key) if key else {}
 
 
 def _params(base_url: str) -> dict[str, str]:
-    key = _api_key()
-    if key and "generativelanguage.googleapis.com" in base_url:
-        return {"key": key}
+    _ = base_url
     return {}
 
 
@@ -142,11 +140,23 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode('utf-8') or '{}')
             prompt = str(payload.get('prompt', '')).strip()
             timeout = int(payload.get('timeout_sec', 120))
-            model = str(payload.get('model') or os.getenv('ANTIGRAVITY_DEFAULT_MODEL', os.getenv('GEMINI_DEFAULT_MODEL', 'antigravity-flash'))).strip() or 'antigravity-flash'
+            model = resolve_antigravity_model_alias(str(payload.get('model') or os.getenv('ANTIGRAVITY_DEFAULT_MODEL', os.getenv('GEMINI_DEFAULT_MODEL', 'gemini-2.5-flash'))).strip() or 'gemini-2.5-flash')
             if not prompt:
                 self._send(400, {'ok': False, 'error': 'prompt_required'})
                 return
-            response = _request('POST', f'models/{model}:generateContent', json_body={'contents': [{'role': 'user', 'parts': [{'text': prompt}]}]}, timeout=max(10, timeout + 10))
+            cfg = resolve_antigravity_provider_config()
+            response = httpx.post(
+                cfg.chat_completions_endpoint,
+                headers=antigravity_request_headers(_api_key()),
+                json={
+                    'model': model,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'max_completion_tokens': 1200,
+                    'temperature': 0.2,
+                    'stream': False,
+                },
+                timeout=max(10, timeout + 10),
+            )
             data = response.json() if response.content else {}
             stdout = _generation_text(data)
             self._send(200, {'ok': response.status_code == 200, 'stdout': stdout, 'stderr': '' if response.status_code == 200 else response.text[:500], 'status_code': response.status_code})

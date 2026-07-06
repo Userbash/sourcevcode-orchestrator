@@ -65,8 +65,13 @@ class AIKernelAgent(BaseAgent):
                         last_error = f'{exc}@{base_url}'
                         continue
                     if response.status_code == 200:
-                        self.base_url = base_url
-                        return AgentHealth(agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities)
+                        models_payload = response.json() if getattr(response, 'content', None) else {}
+                        models = [str(item.get('id') or '').strip() for item in (models_payload.get('data') or []) if str(item.get('id') or '').strip()] if isinstance(models_payload, dict) else []
+                        if not models or self.model_name in models:
+                            self.base_url = base_url
+                            return AgentHealth(agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities)
+                        last_error = f'ai_kernel_model_missing@{base_url}'
+                        continue
                     last_error = f'ai_kernel_status_{response.status_code}@{base_url}'
             status = AgentStatus.FAILED if last_error and 'refused' in last_error.lower() else AgentStatus.DEGRADED
             return AgentHealth(agent_id=self.agent_id, status=status, capabilities=self.capabilities, last_error=last_error)

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 
+from .ai_kernel_agent import AIKernelAgent
 from .base_agent import BaseAgent
-from .gemini_agent import GeminiAgent
+from .antigravity_agent import AntigravityDirectAgent
+from .mimo_agent import MimoAgent
 from core.core.external_ai_bridge import ExternalAIBridge
 from core.core.integrations.antigravity_manager import AntigravityManager
 from core.core.models import AgentHealth, AgentStatus, Task, TaskStatus
@@ -17,10 +19,88 @@ class AntigravityAgent(BaseAgent):
         self.timeout_sec = self._resolve_timeout()
         self.provider = "antigravity"
 
+    @staticmethod
+    def _provider_fallback_enabled() -> bool:
+        return os.getenv("AI_BRIDGE_ANTIGRAVITY_ENABLE_PROVIDER_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _fallback_triggered(error_type: str, raw_error: str) -> bool:
+        normalized_type = str(error_type or "").strip().lower()
+        text = str(raw_error or "").strip().lower()
+        if normalized_type in {"quota_exhaustion", "api_timeout", "tcp_timeout"}:
+            return True
+        return any(marker in text for marker in [
+            "user location is not supported",
+            "failed_precondition",
+            "resource_exhausted",
+            "quota exceeded",
+            "too many requests",
+            "high demand",
+            "temporarily unavailable",
+            "unavailable",
+            '"code": 503',
+            '"code": 429',
+            '"code": 400',
+        ])
+
+    def _provider_fallback_health(self) -> tuple[str, AgentHealth] | None:
+        if not self._provider_fallback_enabled():
+            return None
+        candidates = [
+            ("mimo", MimoAgent("mimo-router-1", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"))),
+            ("ai_kernel", AIKernelAgent("ai-kernel-qwen36-1")),
+        ]
+        for provider_name, agent in candidates:
+            try:
+                health = agent.health()
+            except Exception:
+                continue
+            if str(getattr(getattr(health, "status", None), "value", getattr(health, "status", ""))).strip().lower() == "ready":
+                return provider_name, health
+        return None
+
+    def _run_provider_fallbacks(self, task: Task, memory_context: dict | None = None, bridge_error: str = "", bridge_error_type: str = ""):
+        if not self._provider_fallback_enabled() or not self._fallback_triggered(bridge_error_type, bridge_error):
+            return None
+        candidates = [
+            ("mimo", MimoAgent(f"{self.agent_id}-mimo-fallback", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"))),
+            ("ai_kernel", AIKernelAgent(f"{self.agent_id}-ai-kernel-fallback")),
+        ]
+        for provider_name, agent in candidates:
+            try:
+                candidate_task = task.model_copy(deep=True)
+                if provider_name == "mimo":
+                    candidate_task.assigned_model = os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro")
+                elif provider_name == "ai_kernel":
+                    candidate_task.assigned_model = os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m")
+                result = agent.run(candidate_task, memory_context=memory_context)
+            except Exception as exc:
+                self.last_error = f"{provider_name}_fallback_error: {exc}"
+                continue
+            if result.status == TaskStatus.DONE:
+                result.output.summary = f"[antigravity->{provider_name}-fallback] {result.output.summary}".strip()
+                return result
+        self.last_error = bridge_error or self.last_error
+        return None
+
     def health(self) -> AgentHealth:
         status_payload = AntigravityManager().status()
         if bool(status_payload.get("ready")):
             return AgentHealth(agent_id=self.agent_id, status=AgentStatus.READY, capabilities=self.capabilities)
+
+        fallback_health = self._provider_fallback_health()
+        if fallback_health is not None:
+            provider_name, health = fallback_health
+            return AgentHealth(
+                agent_id=self.agent_id,
+                status=AgentStatus.READY,
+                capabilities=self.capabilities,
+                active_tasks=self.active_tasks,
+                queue_depth=self.queue_depth,
+                avg_latency_ms=self.avg_latency_ms,
+                success_rate=1.0,
+                last_error=f"antigravity_upstream_degraded_using_{provider_name}_fallback",
+            )
 
         api_probe = status_payload.get("api_probe") if isinstance(status_payload.get("api_probe"), dict) else {}
         auth_probe = status_payload.get("auth_probe") if isinstance(status_payload.get("auth_probe"), dict) else {}
@@ -45,7 +125,7 @@ class AntigravityAgent(BaseAgent):
 
     def run(self, task: Task, memory_context: dict | None = None):
         pytest_test = os.getenv("PYTEST_CURRENT_TEST", "")
-        if pytest_test and "test_gemini_cli_agent.py" not in pytest_test:
+        if pytest_test and "test_antigravity_cli_agent.py" not in pytest_test:
             result = self.result(task, "Antigravity test-mode execution completed.", TaskStatus.DONE)
             result.provider = "antigravity"
             result.model_name = os.getenv("ANTIGRAVITY_API_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
@@ -78,7 +158,14 @@ class AntigravityAgent(BaseAgent):
             bridge_result = bridge.run_antigravity(task, prompt, timeout_sec=self.timeout_sec)
 
             if bridge_result.ok:
-                return self.result(task, bridge_result.output, TaskStatus.DONE)
+                summary = bridge_result.output
+                if bridge_result.provider != "antigravity":
+                    summary = f"[antigravity->{bridge_result.provider}-fallback] {summary}".strip()
+                return self.result(task, summary, TaskStatus.DONE, provider=bridge_result.provider, model_name=bridge_result.model)
+
+            fallback = self._run_provider_fallbacks(task, memory_context=memory_context, bridge_error=bridge_result.error, bridge_error_type=bridge_result.error_type)
+            if fallback is not None:
+                return fallback
 
             fallback = self._run_api_fallback(task, memory_context=memory_context, bridge_error=bridge_result.error)
             if fallback is not None:
@@ -107,7 +194,7 @@ class AntigravityAgent(BaseAgent):
         if not api_key:
             return None
         model_name = os.getenv("ANTIGRAVITY_DEFAULT_MODEL", os.getenv("ANTIGRAVITY_API_MODEL", os.getenv("GEMINI_MODEL", "antigravity-pro")))
-        agent = GeminiAgent(f"{self.agent_id}-api", model_name=model_name)
+        agent = AntigravityDirectAgent(f"{self.agent_id}-api", model_name=model_name)
         result = agent.run(task, memory_context=memory_context)
         if result.status == TaskStatus.DONE:
             result.output.summary = f"[antigravity-api-fallback] {result.output.summary}".strip()
@@ -126,4 +213,3 @@ class AntigravityAgent(BaseAgent):
 
 
 AntigravityCLIAgent = AntigravityAgent
-GeminiCLIAgent = AntigravityAgent

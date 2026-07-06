@@ -112,3 +112,13 @@ def test_translate_dh_via_distrobox(monkeypatch):
         "origin",
         "main",
     ]
+
+
+def test_detect_mode_recognizes_containerenv(monkeypatch):
+    bridge = HostBridge()
+
+    monkeypatch.setattr("core.core.host_bridge.shutil.which", lambda _name: None)
+    monkeypatch.setattr("core.core.host_bridge.Path.exists", lambda self: str(self) == "/run/.containerenv")
+
+    assert bridge.detect_mode() == "container"
+    assert bridge.can_execute_on_host() is False

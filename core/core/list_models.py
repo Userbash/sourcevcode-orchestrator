@@ -1,4 +1,4 @@
-from .gemini_model_registry import AntigravityModelRegistry
+from .antigravity_model_registry import AntigravityModelRegistry
 import os
 
 # Ensure the API key is set if needed for the registry to work

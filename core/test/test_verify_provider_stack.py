@@ -83,3 +83,12 @@ def test_verify_provider_stack_uses_mimo_credential_snapshot(monkeypatch, capsys
     output = capsys.readouterr().out
     assert '"credential_env": "MIMO_API_KEY"' in output
     assert '"github_token_configured": false' in output
+
+
+def test_ai_kernel_summary_respects_disabled_env(monkeypatch):
+    monkeypatch.setenv("AI_KERNEL_ENABLED", "false")
+
+    summary = verify_provider_stack._ai_kernel_summary()
+
+    assert summary["configured"] is False
+    assert summary["error"] == "ai_kernel_disabled_by_env"

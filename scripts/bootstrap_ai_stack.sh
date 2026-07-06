@@ -14,9 +14,16 @@ LOCAL_MODEL="${AI_BRIDGE_LOCAL_LLM_MODEL:-qwen2.5:0.5b}"
 ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-8000}"
 ORCHESTRATOR_CONTAINER_PORT="${ORCHESTRATOR_CONTAINER_PORT:-8000}"
 OLLAMA_PORT="${AI_BRIDGE_LOCAL_LLM_PORT:-11434}"
+AI_KERNEL_PORT="${AI_KERNEL_PORT:-8012}"
+ORCHESTRATOR_HEALTH_PATH="${ORCHESTRATOR_HEALTH_PATH:-/health}"
+ORCHESTRATOR_READY_ATTEMPTS="${ORCHESTRATOR_READY_ATTEMPTS:-120}"
+ORCHESTRATOR_READY_SLEEP_SEC="${ORCHESTRATOR_READY_SLEEP_SEC:-2}"
 RUN_LOCAL_LLM=1
+RUN_AI_KERNEL=1
 RUN_AGY_LOGIN=0
 BUILD_IMAGE=1
+AI_BRIDGE_POSTGRES_PASSWORD="${AI_BRIDGE_POSTGRES_PASSWORD:-change_me_local_db_password}"
+AI_BRIDGE_RABBITMQ_PASSWORD="${AI_BRIDGE_RABBITMQ_PASSWORD:-change_me_local_rabbitmq_password}"
 
 host_run() {
   if command -v flatpak-spawn >/dev/null 2>&1; then
@@ -33,6 +40,7 @@ Usage: $(basename "$0") [options]
 Options:
   --model NAME           Ollama model to pull. Default: ${LOCAL_MODEL}
   --skip-local-llm       Do not start/pull local Ollama model.
+  --skip-ai-kernel       Do not start/verify local AI Kernel on port ${AI_KERNEL_PORT}.
   --agy-login            Run Antigravity login helper if agy is installed.
   --no-build             Reuse existing orchestrator image.
   -h, --help             Show this help.
@@ -47,6 +55,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-local-llm)
       RUN_LOCAL_LLM=0
+      shift
+      ;;
+    --skip-ai-kernel)
+      RUN_AI_KERNEL=0
       shift
       ;;
     --agy-login)
@@ -93,15 +105,28 @@ ensure_env_files() {
 }
 
 load_env_files() {
-  set -a
-  . "$PROJECT_ROOT/.env"
-  . "$PROJECT_ROOT/.env.bridge"
-  . "$PROJECT_ROOT/.env.gemini.local"
-  set +a
+  local file
+  for file in "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.bridge" "$PROJECT_ROOT/.env.gemini.local"; do
+    set +e
+    set -a
+    . "$file"
+    local rc=$?
+    set +a
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "[ERROR] Failed to load env file: $file" >&2
+      echo "[ERROR] Quote values that contain spaces, for example: VAR='command with args'" >&2
+      exit "$rc"
+    fi
+  done
 
   LOCAL_MODEL="${AI_BRIDGE_LOCAL_LLM_MODEL:-$LOCAL_MODEL}"
   ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-$ORCHESTRATOR_PORT}"
   OLLAMA_PORT="${AI_BRIDGE_LOCAL_LLM_PORT:-$OLLAMA_PORT}"
+  AI_KERNEL_PORT="${AI_KERNEL_PORT:-$AI_KERNEL_PORT}"
+  ORCHESTRATOR_HEALTH_PATH="${ORCHESTRATOR_HEALTH_PATH:-$ORCHESTRATOR_HEALTH_PATH}"
+  ORCHESTRATOR_READY_ATTEMPTS="${ORCHESTRATOR_READY_ATTEMPTS:-$ORCHESTRATOR_READY_ATTEMPTS}"
+  ORCHESTRATOR_READY_SLEEP_SEC="${ORCHESTRATOR_READY_SLEEP_SEC:-$ORCHESTRATOR_READY_SLEEP_SEC}"
 }
 
 ensure_host_requirements() {
@@ -168,12 +193,16 @@ wait_for_http() {
   local sleep_sec="$3"
   local i
   for i in $(seq 1 "$attempts"); do
-    if host_run curl -fsS "$url" >/dev/null 2>&1; then
+    if host_run curl --max-time 5 -fsS "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep "$sleep_sec"
   done
   return 1
+}
+
+wait_for_ai_kernel() {
+  wait_for_http "http://127.0.0.1:${AI_KERNEL_PORT}/v1/models" 90 2
 }
 
 wait_for_pg() {
@@ -207,7 +236,7 @@ start_postgres() {
       --name "$POSTGRES_CONTAINER" \
       -p 5432:5432 \
       -e POSTGRES_USER=ai_bridge \
-      -e POSTGRES_PASSWORD=ai_bridge_password \
+      -e POSTGRES_PASSWORD="$AI_BRIDGE_POSTGRES_PASSWORD" \
       -e POSTGRES_DB=ai_bridge \
       -v "${PG_VOLUME_NAME}:/var/lib/postgresql/data" \
       docker.io/library/postgres:16-alpine \
@@ -231,7 +260,7 @@ start_rabbitmq() {
       -p 5672:5672 \
       -p 15672:15672 \
       -e RABBITMQ_DEFAULT_USER=guest \
-      -e RABBITMQ_DEFAULT_PASS=guest \
+      -e RABBITMQ_DEFAULT_PASS="$AI_BRIDGE_RABBITMQ_PASSWORD" \
       docker.io/library/rabbitmq:3-management >/dev/null
   fi
   wait_for_rabbitmq || {
@@ -262,8 +291,12 @@ start_local_llm() {
     exit 1
   }
 
-  log "Pulling local model ${LOCAL_MODEL}..."
-  host_run podman exec "$OLLAMA_CONTAINER" ollama pull "$LOCAL_MODEL"
+  if host_run sh -lc "curl --max-time 10 -fsS http://127.0.0.1:${OLLAMA_PORT}/api/tags | tr -d '[:space:]' | grep -F '\"name\":\"${LOCAL_MODEL}\"' >/dev/null"; then
+    log "Local model ${LOCAL_MODEL} is already present. Skipping pull."
+  else
+    log "Pulling local model ${LOCAL_MODEL}..."
+    host_run podman exec "$OLLAMA_CONTAINER" ollama pull "$LOCAL_MODEL"
+  fi
 }
 
 build_orchestrator_image() {
@@ -273,6 +306,56 @@ build_orchestrator_image() {
   fi
   log "Building orchestrator image ${ORCHESTRATOR_IMAGE}..."
   host_run podman build -f "$PROJECT_ROOT/core/Dockerfile" -t "$ORCHESTRATOR_IMAGE" "$PROJECT_ROOT"
+}
+
+start_ai_kernel() {
+  case "${AI_KERNEL_ENABLED:-true}" in
+    1|true|yes|on) ;;
+    *)
+      log "AI Kernel disabled by env. Skipping host-side startup."
+      return 0
+      ;;
+  esac
+
+  local install_script="$PROJECT_ROOT/scripts/ai-kernel/install_hauhaucs_qwen36.sh"
+  local serve_script="$PROJECT_ROOT/scripts/ai-kernel/serve_hauhaucs_qwen36_q4km.sh"
+  local runtime_python="${AI_KERNEL_RUNTIME_PYTHON:-${XDG_CACHE_HOME:-$HOME/.cache}/ai-kernel/venvs/llama-cpp/bin/python}"
+  local log_path="${AI_KERNEL_LOG_PATH:-/tmp/ai-kernel-server.log}"
+  local pid_path="${AI_KERNEL_PID_PATH:-/tmp/ai-kernel-server.pid}"
+
+  if wait_for_ai_kernel; then
+    log "AI Kernel is already reachable on 127.0.0.1:${AI_KERNEL_PORT}."
+    return 0
+  fi
+
+  if [ ! -x "$runtime_python" ] || ! host_run "$runtime_python" -c "import llama_cpp, llama_cpp.server" >/dev/null 2>&1; then
+    log "Installing AI Kernel runtime dependencies..."
+    host_run bash "$install_script"
+  fi
+
+  if [ -f "$pid_path" ]; then
+    local existing_pid
+    existing_pid="$(cat "$pid_path" 2>/dev/null || true)"
+    if [ -n "$existing_pid" ] && host_run sh -lc "kill -0 $existing_pid" >/dev/null 2>&1; then
+      log "AI Kernel process already running with pid $existing_pid."
+    else
+      rm -f "$pid_path"
+    fi
+  fi
+
+  if ! wait_for_ai_kernel; then
+    log "Starting AI Kernel on 127.0.0.1:${AI_KERNEL_PORT} via systemd user service..."
+    host_run bash "$PROJECT_ROOT/scripts/ai-kernel/install_user_service.sh"
+    host_run systemctl --user start "${AI_KERNEL_SERVICE_NAME:-ai-kernel.service}"
+  fi
+
+  wait_for_ai_kernel || {
+    if [ -f "$log_path" ]; then
+      tail -n 120 "$log_path" >&2 || true
+    fi
+    echo "[ERROR] AI Kernel did not become ready on port ${AI_KERNEL_PORT}." >&2
+    exit 1
+  }
 }
 
 start_orchestrator() {
@@ -301,7 +384,7 @@ start_orchestrator() {
     -e AI_KERNEL_API_KEY="${AI_KERNEL_API_KEY:-local}" \
     -e AI_KERNEL_MODEL_ALIAS="${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}" \
     -e AI_KERNEL_TCP_PROBE_HOSTS="${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}" \
-    -e AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE="${AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE:-true}" \
+    -e AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE="${AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE:-false}" \
     -e AI_BRIDGE_HOST_WORKSPACE_ROOT="$PROJECT_ROOT" \
     -e AI_KERNEL_HOST_HOME="$HOME" \
     -e AI_BRIDGE_WORKSPACE_ROOT=/workspace \
@@ -326,9 +409,9 @@ start_orchestrator() {
     -v "$PROJECT_ROOT:/workspace:z" \
     "$ORCHESTRATOR_IMAGE" >/dev/null
 
-  wait_for_http "http://127.0.0.1:${ORCHESTRATOR_PORT}/health" 45 1 || {
+  wait_for_http "http://127.0.0.1:${ORCHESTRATOR_PORT}${ORCHESTRATOR_HEALTH_PATH}" "$ORCHESTRATOR_READY_ATTEMPTS" "$ORCHESTRATOR_READY_SLEEP_SEC" || {
     host_run podman logs --tail 120 "$ORCHESTRATOR_CONTAINER" >&2 || true
-    echo "[ERROR] Orchestrator health endpoint did not become ready." >&2
+    echo "[ERROR] Orchestrator health endpoint did not become ready: ${ORCHESTRATOR_HEALTH_PATH} on port ${ORCHESTRATOR_PORT}." >&2
     exit 1
   }
 }
@@ -340,6 +423,29 @@ verify_mistral() {
   else
     warn "MISTRAL_API_KEY is not set in .env.bridge. Mistral provider will stay degraded."
   fi
+}
+
+verify_ai_kernel() {
+  if [ "$RUN_AI_KERNEL" -eq 0 ]; then
+    warn "AI Kernel startup/check skipped by flag."
+    return
+  fi
+
+  log "Verifying AI Kernel connectivity..."
+  host_run podman exec "$ORCHESTRATOR_CONTAINER" python -m core.scripts.verify_provider_stack || warn "AI Kernel/provider verification reported issues."
+}
+
+launch_post_start_verifications() {
+  local verify_log="${AI_BRIDGE_BOOTSTRAP_VERIFY_LOG:-/tmp/hebrew-bootstrap-poststart.log}"
+  (
+    trap '' HUP
+    verify_ai_kernel
+    verify_mistral
+    verify_agy
+  ) >"$verify_log" 2>&1 &
+  local verify_pid=$!
+  disown "$verify_pid" 2>/dev/null || true
+  log "Post-start verification moved to background: pid=${verify_pid} log=${verify_log}"
 }
 
 verify_agy() {
@@ -382,13 +488,15 @@ main() {
   if [ "$RUN_LOCAL_LLM" -eq 1 ]; then
     start_local_llm
   fi
+  if [ "$RUN_AI_KERNEL" -eq 1 ]; then
+    start_ai_kernel
+  fi
 
   start_postgres
   start_rabbitmq
   build_orchestrator_image
   start_orchestrator
-  verify_mistral
-  verify_agy
+  launch_post_start_verifications
   print_summary
 }
 

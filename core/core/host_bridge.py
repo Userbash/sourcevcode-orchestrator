@@ -98,9 +98,13 @@ class HostBridge:
     def detect_mode(self) -> str:
         if shutil.which("flatpak-spawn"):
             return "flatpak-spawn"
-        if os.getenv("IS_CONTAINER") or Path("/.dockerenv").exists():
+        if os.getenv("IS_CONTAINER") or Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
             return "container"
         return "direct"
+
+    def can_execute_on_host(self) -> bool:
+        mode = self.detect_mode()
+        return mode in {"flatpak-spawn", "direct"}
 
     def _host_has_binary(self, binary: str) -> bool:
         mode = self.detect_mode()

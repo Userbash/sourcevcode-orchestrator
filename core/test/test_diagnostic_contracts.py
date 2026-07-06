@@ -105,6 +105,8 @@ def test_run_diagnostic_checks_with_real_orchestrator(monkeypatch, tmp_path):
         assert by_layer["routing"]["observed"]["assigned_agent"] == "orchestrator"
         assert by_layer["execution"]["observed"]["payload_objective"]
         assert by_layer["providers"]["observed"]["preferred_providers"]
+        assert by_layer["transport"]["observed"]["summary"]["fully_ws"] is False
+        assert by_layer["transport"]["observed"]["message_bus"]["event_driven"] is True
         antigravity = by_layer["providers"]["observed"]["providers"]["antigravity"]
         assert "inventory_ok" in antigravity["structural_probe"]["details"]
         assert antigravity["live_ok"] is None

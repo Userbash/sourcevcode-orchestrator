@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from .gemini_model_registry import AntigravityModelRegistry
+from .antigravity_model_registry import AntigravityModelRegistry
 from .models import Complexity, Task, TaskType
 
 
@@ -136,7 +136,3 @@ class AntigravityRuntimeRouter:
         blocked.add(model)
 
 
-# Legacy compatibility aliases.
-GeminiBudgetExhaustedError = AntigravityBudgetExhaustedError
-GeminiRoutingPlan = AntigravityRoutingPlan
-GeminiRuntimeRouter = AntigravityRuntimeRouter

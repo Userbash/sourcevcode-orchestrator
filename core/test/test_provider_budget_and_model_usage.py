@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from core.agents.codex_agent import CodexAgent
-from core.agents.gemini_cli_agent import GeminiCLIAgent
+from core.agents.antigravity_cli_agent import AntigravityCLIAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
@@ -69,7 +69,7 @@ def test_orchestrator_exposes_model_usage_snapshot():
     orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="codex", provider="openai")
     orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", provider="openai")
     orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", provider="openai")
-    orchestrator.attach_local_agent("antigravity-cli-1", GeminiCLIAgent("antigravity-cli-1", sec), agent_type="external_ai", provider="google")
+    orchestrator.attach_local_agent("antigravity-cli-1", AntigravityCLIAgent("antigravity-cli-1", sec), agent_type="external_ai", provider="google")
 
     result = orchestrator.submit_user_task({"type": "plan", "description": "Small feature", "priority": "normal"}, source="test")
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.core.gemini_runtime_router import GeminiRuntimeRouter
+from core.core.antigravity_runtime_router import AntigravityRuntimeRouter
 from core.core.models import Complexity, Task, TaskContext, TaskInput, TaskType
 
 
@@ -16,19 +16,19 @@ def _task(complexity: Complexity, session_id: str = "s1") -> Task:
 
 
 def test_router_prefers_lite_for_low_complexity():
-    router = GeminiRuntimeRouter()
+    router = AntigravityRuntimeRouter()
     plan = router.build_plan(_task(Complexity.LOW), "small prompt")
     assert plan.models[0] == "antigravity-flash-lite"
 
 
 def test_router_prefers_pro_for_high_complexity():
-    router = GeminiRuntimeRouter()
+    router = AntigravityRuntimeRouter()
     plan = router.build_plan(_task(Complexity.HIGH), "large refactor task")
     assert plan.models[0] == "antigravity-pro"
 
 
 def test_router_tracks_session_usage():
-    router = GeminiRuntimeRouter()
+    router = AntigravityRuntimeRouter()
     task = _task(Complexity.MEDIUM, session_id="sess-usage")
     before = router.build_plan(task, "abc")
     router.register_usage(task, 10_000)
@@ -37,14 +37,14 @@ def test_router_tracks_session_usage():
 
 
 def test_router_exposes_strategy_profiles():
-    profiles = GeminiRuntimeRouter.strategy_profiles()
+    profiles = AntigravityRuntimeRouter.strategy_profiles()
 
     assert set(profiles) == {"low_cost", "docs_research", "code_fix", "high_reasoning"}
     assert profiles["high_reasoning"][0] == "antigravity-thinking"
 
 
 def test_router_sets_strategy_by_task_type_and_complexity():
-    router = GeminiRuntimeRouter()
+    router = AntigravityRuntimeRouter()
 
     docs_task = _task(Complexity.MEDIUM, session_id="docs-strategy")
     docs_task.type = TaskType.DOCS
