@@ -14,7 +14,7 @@ services:
     environment:
       ORCHESTRATOR_PORT: "8000"
       POSTGRES_USER: ai_bridge
-      POSTGRES_PASSWORD: ai_bridge_password
+      POSTGRES_PASSWORD: ${AI_BRIDGE_POSTGRES_PASSWORD:-change_me_local_db_password}
       POSTGRES_DB: ai_bridge
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=200", "-c", "effective_cache_size=768MB", "-c", "work_mem=16MB"]
     ports:
@@ -59,7 +59,7 @@ services:
       AI_BRIDGE_EASY_DIFFUSION_MODELS: ${AI_BRIDGE_EASY_DIFFUSION_MODELS:-}
       AI_BRIDGE_EASY_DIFFUSION_DEFAULT_MODEL: ${AI_BRIDGE_EASY_DIFFUSION_DEFAULT_MODEL:-}
       AI_BRIDGE_MEMORY_ENABLED: "true"
-      AI_BRIDGE_MEMORY_DATABASE_URL: postgresql+psycopg2://ai_bridge:ai_bridge_password@db:5432/ai_bridge
+      AI_BRIDGE_MEMORY_DATABASE_URL: postgresql+psycopg2://ai_bridge:${AI_BRIDGE_POSTGRES_PASSWORD:-change_me_local_db_password}@db:5432/ai_bridge
       AI_BRIDGE_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
       AI_BRIDGE_MESSAGE_BUS_BACKEND: rabbitmq
       AI_BRIDGE_MEMORY_STORE_DIR: /app/memory_store
@@ -81,7 +81,7 @@ services:
         export NODE_PATH=/var/home/sanya/.npm-packages/lib/node_modules$${NODE_PATH:+:$$NODE_PATH}
         export PYTHONPATH=/app
         export AI_BRIDGE_MEMORY_ENABLED=true
-        export AI_BRIDGE_MEMORY_DATABASE_URL=postgresql+psycopg2://ai_bridge:ai_bridge_password@db:5432/ai_bridge
+        export AI_BRIDGE_MEMORY_DATABASE_URL=postgresql+psycopg2://ai_bridge:${AI_BRIDGE_POSTGRES_PASSWORD:-change_me_local_db_password}@db:5432/ai_bridge
         export AI_BRIDGE_RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
         export AI_BRIDGE_MESSAGE_BUS_BACKEND=rabbitmq
 
@@ -127,7 +127,7 @@ services:
       - "15672:15672"
     environment:
       RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_PASS: ${AI_BRIDGE_RABBITMQ_PASSWORD:-change_me_local_rabbitmq_password}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s

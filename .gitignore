@@ -122,3 +122,22 @@ Neko_Throne_work/
 .codex/
 backups/
 reports/
+
+# Publication safety
+.envrc
+.direnv/
+*.pid
+*.pid.lock
+*.sqlite
+*.sqlite3
+*.db
+*.local.yaml
+config/*.local.yaml
+*.seed
+*.key.pub
+*.session
+*.session-journal
+*.token
+*.credentials
+secrets/
+**/__pycache__/

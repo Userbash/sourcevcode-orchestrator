@@ -10,7 +10,8 @@ ORCHESTRATOR_IMAGE="localhost/hebrew-orchestrator:latest"
 PG_VOLUME_NAME="${PG_VOLUME_NAME:-hebrew_pgdata}"
 REDIS_VOLUME_NAME="${REDIS_VOLUME_NAME:-hebrew_redisdata}"
 AVATAR_VOLUME_NAME="${AVATAR_VOLUME_NAME:-hebrew_avatar_uploads}"
-JWT_SECRET="${JWT_SECRET:-dev_local_jwt_secret_2026_change_me}"
+JWT_SECRET="${JWT_SECRET:-}"
+DB_PASSWORD="${DB_PASSWORD:-}"
 BACKEND_PORT="${BACKEND_PORT:-3001}"
 FRONTEND_PORT="${FRONTEND_PORT:-8081}"
 ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-8000}"
@@ -50,6 +51,17 @@ validate_secret() {
   fi
 }
 
+ensure_db_password() {
+  if [ -z "$DB_PASSWORD" ]; then
+    DB_PASSWORD="$(python3 - <<'PYS'
+import secrets
+print(secrets.token_urlsafe(24))
+PYS
+)"
+    echo "[WARN] DB_PASSWORD was not set; generated an ephemeral local password for this run."
+  fi
+}
+
 assert_port_free() {
   local port="$1"
   local owner=""
@@ -62,6 +74,7 @@ assert_port_free() {
 
 echo "Starting project containers manually via BridgeOS..."
 validate_secret
+ensure_db_password
 
 if ! image_exists "$BACKEND_IMAGE"; then
   echo "[ERROR] Backend image is missing: $BACKEND_IMAGE"
@@ -101,7 +114,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   --name hebrew_ai_postgres \
   --network hebrew-net \
   -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres123 \
+  -e POSTGRES_PASSWORD="$DB_PASSWORD" \
   -e POSTGRES_DB=hebrew_ai_db \
   -v "$PG_VOLUME_NAME":/var/lib/postgresql/data:Z \
   --security-opt no-new-privileges \
@@ -130,7 +143,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   -e AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION="${AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION:-true}" \
   -e AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS="${AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS:-false}" \
   -e AI_BRIDGE_MEMORY_ENABLED="${AI_BRIDGE_MEMORY_ENABLED:-true}" \
-  -e AI_BRIDGE_MEMORY_DATABASE_URL="${AI_BRIDGE_MEMORY_DATABASE_URL:-postgresql+asyncpg://postgres:postgres123@hebrew_ai_postgres:5432/hebrew_ai_db}" \
+  -e AI_BRIDGE_MEMORY_DATABASE_URL="${AI_BRIDGE_MEMORY_DATABASE_URL:-postgresql+asyncpg://postgres:${DB_PASSWORD}@hebrew_ai_postgres:5432/hebrew_ai_db}" \
   "$ORCHESTRATOR_IMAGE"
 
 echo "Starting Backend..."
@@ -145,7 +158,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   -e DB_HOST=hebrew_ai_postgres \
   -e DB_PORT=5432 \
   -e DB_USER=postgres \
-  -e DB_PASSWORD=postgres123 \
+  -e DB_PASSWORD="$DB_PASSWORD" \
   -e DB_NAME=hebrew_ai_db \
   -e REDIS_HOST=hebrew_ai_redis \
   -e REDIS_PORT=6379 \

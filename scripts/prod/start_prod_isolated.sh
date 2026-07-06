@@ -7,7 +7,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APP_DOMAIN_NAME="${APP_DOMAIN_NAME:-app.local}"
 ADMIN_DOMAIN_NAME="${ADMIN_DOMAIN_NAME:-admin.local}"
 ADMIN_ALLOW_CIDR="${ADMIN_ALLOW_CIDR:-127.0.0.1/32}"
-JWT_SECRET="${JWT_SECRET:-change_me_prod_secret}"
+JWT_SECRET="${JWT_SECRET:-}"
+DB_PASSWORD="${DB_PASSWORD:-}"
 PG_VOLUME_NAME="${PG_VOLUME_NAME:-hebrew_pgdata}"
 REDIS_VOLUME_NAME="${REDIS_VOLUME_NAME:-hebrew_redisdata}"
 AVATAR_VOLUME_NAME="${AVATAR_VOLUME_NAME:-hebrew_avatar_uploads}"
@@ -26,6 +27,11 @@ image_exists() {
 validate_required_env() {
   if [ "${#JWT_SECRET}" -lt 32 ]; then
     echo "[prod] ERROR: JWT_SECRET must be at least 32 characters"
+    exit 1
+  fi
+
+  if [ -z "$DB_PASSWORD" ] || [ "${#DB_PASSWORD}" -lt 24 ]; then
+    echo "[prod] ERROR: DB_PASSWORD must be set and at least 24 characters"
     exit 1
   fi
 
@@ -76,7 +82,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   --name hebrew_ai_postgres \
   --network hebrew-net \
   -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=postgres123 \
+  -e POSTGRES_PASSWORD="$DB_PASSWORD" \
   -e POSTGRES_DB=hebrew_ai_db \
   -v "$PG_VOLUME_NAME":/var/lib/postgresql/data:Z \
   --security-opt no-new-privileges \
@@ -100,7 +106,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   -e DB_HOST=hebrew_ai_postgres \
   -e DB_PORT=5432 \
   -e DB_USER=postgres \
-  -e DB_PASSWORD=postgres123 \
+  -e DB_PASSWORD="$DB_PASSWORD" \
   -e DB_NAME=hebrew_ai_db \
   -e REDIS_HOST=hebrew_ai_redis \
   -e REDIS_PORT=6379 \
