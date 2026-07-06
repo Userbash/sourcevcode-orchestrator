@@ -211,18 +211,44 @@ class TaskDecomposer:
         looks_large = len(task.input.files) > 1 or len(task.input.acceptance_criteria) > 1 or len(task.input.description.strip()) >= 80
         if not explicit and not profile_parallel and complexity not in {Complexity.HIGH, Complexity.CRITICAL} and not looks_large:
             return None
+        socraticode_hint = hints.get("socraticode") if isinstance(hints.get("socraticode"), dict) else {}
+        socraticode_coverage = hints.get("socraticode_context_coverage") if isinstance(hints.get("socraticode_context_coverage"), dict) else {}
+        if not socraticode_coverage and isinstance(socraticode_hint.get("context_coverage"), dict):
+            socraticode_coverage = socraticode_hint.get("context_coverage")
+        socraticode_parallelism = hints.get("socraticode_parallelism") if isinstance(hints.get("socraticode_parallelism"), dict) else {}
+        socraticode_routing = socraticode_hint.get("routing_recommendations") if isinstance(socraticode_hint.get("routing_recommendations"), dict) else {}
+        socraticode_score = socraticode_coverage.get("score")
+        if socraticode_score is None:
+            socraticode_score = socraticode_coverage.get("coverage_ratio")
+        if socraticode_score is None:
+            socraticode_score = socraticode_coverage.get("ratio")
+        try:
+            socraticode_score = float(socraticode_score)
+        except (TypeError, ValueError):
+            socraticode_score = 0.0
+        socraticode_status = str(socraticode_coverage.get("status") or "").strip().lower()
+        suggested_parallel_branches = socraticode_parallelism.get("recommended_parallel_branches")
+        if suggested_parallel_branches is None:
+            suggested_parallel_branches = socraticode_routing.get("reduce_parallel_branches_to")
+
         max_branches_raw = str(hints.get("parallel_branches") or "").strip()
         if max_branches_raw.isdigit():
             max_branches = max(2, int(max_branches_raw))
         else:
             try:
-                max_branches = max(2, int(__import__("os").getenv("AI_BRIDGE_PARALLEL_CODE_BRANCHES_MAX", "4")))
+                max_branches = max(2, int(__import__("os").getenv("AI_BRIDGE_PARALLEL_CODE_BRANCHES_MAX", "10")))
             except ValueError:
-                max_branches = 4
+                max_branches = 10
+        try:
+            suggested_parallel_branches = int(suggested_parallel_branches)
+        except (TypeError, ValueError):
+            suggested_parallel_branches = None
+        if suggested_parallel_branches is not None and suggested_parallel_branches >= 2 and (socraticode_score >= 0.9 or socraticode_status in {"strong", "good"}):
+            max_branches = min(max_branches, suggested_parallel_branches)
         selected_agents = agents[:min(len(agents), max_branches)]
         branch_templates = self._openai_template_candidates(advisory_context, "code_parallel")
         review_templates = self._openai_template_candidates(advisory_context, "review_primary")
-        branch_labels = ["primary", "fast", "safe", "alt", "review-ready", "fallback"]
+        branch_labels = ["primary", "fast", "safe", "alt", "review-ready", "fallback", "backend", "frontend", "infra", "stability"]
         branches: list[Task] = []
         for idx, agent_id in enumerate(selected_agents):
             label = branch_labels[idx] if idx < len(branch_labels) else f"branch-{idx+1}"

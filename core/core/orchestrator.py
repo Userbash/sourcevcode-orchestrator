@@ -53,6 +53,10 @@ from .local_model_manager_module import LocalModelManagerModule
 from .provider_budget_router import ProviderBudgetRouter
 from .mimo_status import mimo_enabled, mimo_failure_threshold, mimo_failure_window_sec, mimo_suppression_ttl_sec
 from .provider_inventory_service import ProviderInventoryService
+from .transport_audit import build_transport_audit
+from .inventory_stream_hub import InventoryStreamHub
+from .runtime_event_stream_hub import RuntimeEventStreamHub
+from .inventory_scoring_policy import InventoryScoringPolicy
 from .openai_runtime_router import OpenAIRuntimeRouter
 from .model_replacement_policy import ModelReplacementPolicy
 from .cold_boot_module import ColdBootModule
@@ -75,6 +79,8 @@ from .local_llm_bridge import LocalLLMBridge
 from .ai_kernel_bridge import AIKernelBridge
 from .local_llm_module import LocalLLMModule
 from .sourcecraft_module import SourceCraftModule
+from .socraticode_bridge import SocratiCodeBridge
+from .socraticode_module import SocratiCodeModule
 from .reasoning_module import ReasoningModule
 from .reasoning_protocol import ReasoningStreamAdapter
 from .risk_advisor_module import RiskAdvisorModule
@@ -161,6 +167,8 @@ class Orchestrator:
 
     def emit_event(self, event_name: str, payload: dict[str, Any]) -> None:
         self.console.emit(event_name, str(payload))
+        if hasattr(self, "runtime_event_stream_hub"):
+            self.runtime_event_stream_hub.publish_workflow_event(str(payload.get("task_id") or payload.get("workflow_id") or event_name), {"event_name": event_name, **dict(payload or {})})
 
     
     @staticmethod
@@ -190,6 +198,10 @@ class Orchestrator:
             "last_conflict": bool(last_snapshot.get("validation_memory_conflict")),
             "last_conflict_reasons": list(last_snapshot.get("validation_memory_conflict_reasons") or []),
         }
+
+
+    def build_transport_audit(self) -> dict[str, Any]:
+        return build_transport_audit(self)
 
     def module_state(self) -> dict[str, Any]:
         state = self.module_manager.finalize()
@@ -439,6 +451,8 @@ class Orchestrator:
                         providers[str(provider).strip().lower()] = dict(state)
         except Exception:
             pass
+        if self._testing_mode():
+            return {"providers": providers}
         antigravity = self._antigravity_status_snapshot()
         if isinstance(antigravity, dict) and antigravity:
             providers["antigravity"] = antigravity
@@ -645,13 +659,22 @@ class Orchestrator:
         self.orchestration_config = components.orchestration_config
         self.scheduler = components.scheduler
         self.message_bus = components.message_bus
+        try:
+            self.message_bus.subscribe("delivery.events", self._on_delivery_event)
+        except Exception:
+            pass
         self.healthcheck = components.healthcheck
         self.healthcheck.set_module_state_source(self.module_state)
         self.healthcheck.set_local_health_resolver(self._local_agent_health)
         self.availability = ModelAvailability()
         self.provider_inventory = ProviderInventoryService()
+        self.inventory_stream_hub = InventoryStreamHub()
+        self.runtime_event_stream_hub = RuntimeEventStreamHub()
         self.model_replacement_policy = ModelReplacementPolicy()
         self._provider_inventory_snapshot: dict[str, Any] = self.provider_inventory.read_snapshot()
+        self.inventory_stream_hub.publish(self._provider_inventory_snapshot)
+        self.load_balancer.set_inventory_sources(runtime_inventory_source=self.inventory_stream_hub.provider_runtime_entry, model_lookup_source=self.inventory_stream_hub.find_model)
+        self.load_balancer.set_runtime_event_source(agent_runtime_source=self.runtime_event_stream_hub.agent_snapshot)
         self.feedback = components.feedback
         self.metrics = components.metrics
         self.kpi = components.kpi
@@ -678,6 +701,7 @@ class Orchestrator:
         self.memory_consolidator = components.memory_consolidator
         self.layered_context_memory = self.session_memory.layered
         self.provider_budget_router = ProviderBudgetRouter()
+        self.socraticode_bridge = SocratiCodeBridge()
         self.state_store = PostgresStateStore()
         self.cache_guard = CacheGuard()
         self.kpi_events = KPIEventLogger.from_env()
@@ -698,10 +722,19 @@ class Orchestrator:
         self._training_consolidation_task: asyncio.Task[None] | None = None
         self._kpi_dashboard_task: asyncio.Task[None] | None = None
         self._provider_inventory_task: asyncio.Task[None] | None = None
+        self._agent_probe_task: asyncio.Task[None] | None = None
         self._provider_inventory_stop = threading.Event()
+        self._agent_probe_stop = threading.Event()
         self._training_consolidation_interval_sec = max(60, int(self.orchestration_config.training_consolidation_interval_sec))
+        self._agent_probe_interval_sec = max(5, int(os.getenv("AI_BRIDGE_AGENT_PROBE_INTERVAL_SEC", "30") or "30"))
+        self._agent_suppression_ttl_sec = max(60, int(os.getenv("AI_BRIDGE_AGENT_SUPPRESSION_TTL_SEC", "300") or "300"))
+        self._agent_probe_failures: dict[str, int] = {}
+        self._agent_suppressed_until: dict[str, datetime] = {}
+        self._agent_recent_errors: dict[str, list[datetime]] = defaultdict(list)
+        self._agent_last_probe: dict[str, dict[str, Any]] = {}
         self._kpi_dashboard_interval_sec = max(300, int(getattr(self.orchestration_config, "kpi_dashboard_interval_sec", 3600)))
         self._provider_inventory_refresh_interval_sec = max(60, int(getattr(self.orchestration_config, "provider_inventory_refresh_interval_sec", 1800)))
+        self._provider_hot_refresh_interval_sec = max(10, int(os.getenv("AI_BRIDGE_PROVIDER_HOT_REFRESH_INTERVAL_SEC", "30") or "30"))
         self._openai_template_agent_ids: set[str] = set()
         self.local_llm_bridge = LocalLLMBridge(host_bridge=self.host_bridge)
         self.ai_kernel_bridge = AIKernelBridge(host_bridge=self.host_bridge)
@@ -744,6 +777,7 @@ class Orchestrator:
 
         self.module_manager.register(LocalLLMModule())
         self.module_manager.register(SourceCraftModule())
+        self.module_manager.register(SocratiCodeModule())
         self.module_manager.register(VoiceListenerModule())
         self.module_manager.register(ReasoningModule())
         self.module_manager.register(RiskAdvisorModule())
@@ -762,10 +796,11 @@ class Orchestrator:
         self.validation_memory_gate = self.module_manager.get_module("validation_memory_gate")
         self.mimo_director.set_vfs_source(self.module_manager.get_module("unified_vfs"))
         self.mimo_director.safe_sync()
-        try:
-            self._refresh_provider_inventory_snapshot(force_refresh=False)
-        except Exception as exc:
-            self.console.emit("INVENTORY", f"initial provider inventory refresh failed: {exc}")
+        if not self._testing_mode():
+            try:
+                self._refresh_provider_inventory_snapshot(force_refresh=False)
+            except Exception as exc:
+                self.console.emit("INVENTORY", f"initial provider inventory refresh failed: {exc}")
         self.module_manager.load("smart_decomposer")
         self.module_manager.load("prompt_optimizer")
         self.module_manager.load("chat_bus")
@@ -787,6 +822,10 @@ class Orchestrator:
                 self.module_manager.load("sourcecraft")
             except Exception as exc:
                 self.console.emit("SOURCECRAFT", f"degraded at boot: {exc}")
+        try:
+            self.module_manager.load("socraticode")
+        except Exception as exc:
+            self.console.emit("SOCRATICODE", f"degraded at boot: {exc}")
         if not self._testing_mode():
             self.module_manager.load("voice_listener")
             self.module_manager.load("reasoning")
@@ -1099,7 +1138,8 @@ class Orchestrator:
             if isinstance(diagnostics, dict):
                 diagnostics["worker_sync"] = template_sync
         participation = self.provider_inventory.build_participation_snapshot(self.registry.list_agents())
-        self._provider_inventory_snapshot = {"updated_at": int(__import__("time").time()), "providers": payload, "participation": participation}
+        runtime_inventory = self.provider_inventory.build_all_provider_runtime_inventories(force_refresh=False, usage_snapshot=self.module_manager.get_module("model_usage").finalize() if self.module_manager.get_module("model_usage") and hasattr(self.module_manager.get_module("model_usage"), "finalize") else {}, suppression_snapshot=self.provider_budget_router.suppression_snapshot())
+        self._provider_inventory_snapshot = {"updated_at": int(__import__("time").time()), "providers": payload, "participation": participation, "runtime_inventory": runtime_inventory, "model_index": self.provider_inventory.model_index_summary()}
         self._provider_inventory_snapshot["provider_suppression"] = self._sync_provider_suppression(
             payload if isinstance(payload, dict) else {},
             participation if isinstance(participation, dict) else {},
@@ -1107,6 +1147,8 @@ class Orchestrator:
         self._provider_inventory_snapshot["provider_budget_router"] = {
             "global_suppression": self.provider_budget_router.suppression_snapshot(),
         }
+        self.inventory_stream_hub.publish(self._provider_inventory_snapshot)
+        self.refresh_routing_weights()
         self._update_model_replacement_snapshot()
         return self._provider_inventory_snapshot
 
@@ -1167,13 +1209,302 @@ class Orchestrator:
         )
         return target_agent_id, target_agent_record, recommendation
 
+
+    def _prune_agent_recent_errors(self, agent_id: str, *, now: datetime | None = None) -> list[datetime]:
+        current = now or datetime.now(UTC)
+        window_start = current.timestamp() - 300
+        rows = [item for item in self._agent_recent_errors.get(agent_id, []) if item.timestamp() >= window_start]
+        self._agent_recent_errors[agent_id] = rows
+        return rows
+
+    def suppress_lane(self, agent_id: str, *, reason: str, seconds: int | None = None) -> dict[str, Any]:
+        agent = self.registry.get(agent_id)
+        until = datetime.fromtimestamp(datetime.now(UTC).timestamp() + float(seconds or self._agent_suppression_ttl_sec), tz=UTC)
+        self._agent_suppressed_until[agent_id] = until
+        if agent is not None:
+            agent.status = AgentStatus.OFFLINE
+            agent.metrics.status = agent.status
+            agent.metrics.priority_score = 0.0
+            agent.disabled_reason = reason
+        if hasattr(self, "runtime_event_stream_hub"):
+            self.runtime_event_stream_hub.publish_agent_event(agent_id, {"status": "suppressed", "reason": reason, "source": "suppress_lane"})
+        return {
+            "agent_id": agent_id,
+            "reason": reason,
+            "suppressed_until": until.isoformat(),
+        }
+
+    def recover_lane(self, agent_id: str) -> dict[str, Any]:
+        agent = self.registry.get(agent_id)
+        self._agent_suppressed_until.pop(agent_id, None)
+        self._agent_probe_failures.pop(agent_id, None)
+        self._agent_recent_errors.pop(agent_id, None)
+        if agent is not None:
+            agent.status = AgentStatus.READY
+            agent.metrics.status = agent.status
+            agent.metrics.priority_score = 1.0
+            agent.metrics.error_rate = 0.0
+            agent.disabled_reason = None
+        if hasattr(self, "runtime_event_stream_hub"):
+            self.runtime_event_stream_hub.publish_agent_event(agent_id, {"status": "ready", "source": "recover_lane"})
+        return {"agent_id": agent_id, "status": "ready"}
+
+    def _provider_runtime_inventory_entry(self, provider: str) -> dict[str, Any]:
+        snapshot = self._provider_inventory_snapshot if isinstance(self._provider_inventory_snapshot, dict) else {}
+        runtime = snapshot.get("runtime_inventory") if isinstance(snapshot.get("runtime_inventory"), dict) else {}
+        providers = runtime.get("providers") if isinstance(runtime.get("providers"), dict) else {}
+        return providers.get(self._normalize_provider(provider), {}) if isinstance(providers, dict) else {}
+
+    def _inventory_lane_score(self, agent: Any) -> float:
+        provider = self._normalize_provider(str(getattr(agent, "provider", "") or ""))
+        if provider in {"", "local"}:
+            return 0.0
+        runtime_entry = self._provider_runtime_inventory_entry(provider)
+        if not isinstance(runtime_entry, dict) or not runtime_entry:
+            return 0.0
+        diagnostics = runtime_entry.get("diagnostics") if isinstance(runtime_entry.get("diagnostics"), dict) else {}
+        status = str(runtime_entry.get("status") or diagnostics.get("inventory_status") or "").strip().lower()
+        model_name = str(getattr(agent, "model_name", "") or "").strip()
+        model_row = self.provider_inventory.find_model(model_name) or {}
+        return InventoryScoringPolicy.lane_bonus(
+            provider=provider,
+            runtime_entry=runtime_entry,
+            model_row=model_row,
+            model_name=model_name,
+        )
+
+    def refresh_routing_weights(self) -> dict[str, float]:
+        weights: dict[str, float] = {}
+        now = datetime.now(UTC)
+        for agent in self.registry.list_agents():
+            suppressed_until = self._agent_suppressed_until.get(agent.id)
+            if suppressed_until and suppressed_until > now:
+                agent.metrics.priority_score = 0.0
+                weights[agent.id] = 0.0
+                continue
+            if suppressed_until and suppressed_until <= now:
+                self._agent_suppressed_until.pop(agent.id, None)
+            if agent.status in {AgentStatus.OFFLINE, AgentStatus.FAILED, AgentStatus.DISABLED, AgentStatus.OVERLOADED}:
+                base_priority = 0.0
+            elif float(agent.metrics.error_rate or 0.0) > 0.5:
+                base_priority = 0.0
+            elif agent.status == AgentStatus.DEGRADED:
+                base_priority = 0.35
+            else:
+                base_priority = 1.0
+            lane_bonus = self._inventory_lane_score(agent)
+            agent.metrics.priority_score = max(0.0, min(1.5, base_priority + lane_bonus))
+            weights[agent.id] = float(agent.metrics.priority_score or 0.0)
+        return weights
+
+    def probe_provider_runtime(self, provider: str) -> dict[str, Any]:
+        health = self.availability.check_provider(provider, live=True)
+        return {
+            "provider": provider,
+            "status": health.status.value,
+            "ok": health.status in {ProviderStatus.HEALTHY, ProviderStatus.DEGRADED},
+            "error": health.error,
+            "latency_ms": health.latency_ms,
+        }
+
+    def probe_agent_runtime(self, agent_id: str) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        agent_record = self.registry.get(agent_id)
+        if agent_record is None:
+            return {"agent_id": agent_id, "ok": False, "status": "missing", "error": "agent_missing"}
+
+        suppressed_until = self._agent_suppressed_until.get(agent_id)
+        if suppressed_until and suppressed_until > now:
+            agent_record.status = AgentStatus.OFFLINE
+            agent_record.metrics.status = agent_record.status
+            agent_record.metrics.priority_score = 0.0
+            return {
+                "agent_id": agent_id,
+                "ok": False,
+                "status": "suppressed",
+                "error": agent_record.disabled_reason or "suppressed",
+                "suppressed_until": suppressed_until.isoformat(),
+            }
+        if suppressed_until and suppressed_until <= now:
+            self.recover_lane(agent_id)
+
+        if str(agent_record.endpoint).startswith("local://") and agent_id not in self.local_agents:
+            self._agent_probe_failures[agent_id] = self._agent_probe_failures.get(agent_id, 0) + 1
+            self._agent_recent_errors.setdefault(agent_id, []).append(now)
+            self._prune_agent_recent_errors(agent_id, now=now)
+            self.suppress_lane(agent_id, reason="zombie_runtime_missing")
+            self._agent_last_probe[agent_id] = {"agent_id": agent_id, "ok": False, "status": "offline", "error": "zombie_runtime_missing"}
+            return dict(self._agent_last_probe[agent_id])
+
+        started = time.monotonic()
+        try:
+            health = self.healthcheck.check_agent(agent_id)
+        except Exception as exc:
+            latency_ms = (time.monotonic() - started) * 1000
+            failures = self._agent_probe_failures.get(agent_id, 0) + 1
+            self._agent_probe_failures[agent_id] = failures
+            self._agent_recent_errors.setdefault(agent_id, []).append(now)
+            recent = self._prune_agent_recent_errors(agent_id, now=now)
+            if failures >= 2:
+                self.suppress_lane(agent_id, reason=str(exc))
+            elif agent_record.status != AgentStatus.OFFLINE:
+                agent_record.status = AgentStatus.DEGRADED
+                agent_record.metrics.status = agent_record.status
+            agent_record.metrics.error_rate = min(1.0, len(recent) / 2.0)
+            self.refresh_routing_weights()
+            self._agent_last_probe[agent_id] = {
+                "agent_id": agent_id,
+                "ok": False,
+                "status": agent_record.status.value,
+                "error": str(exc),
+                "latency_ms": latency_ms,
+            }
+            if hasattr(self, "runtime_event_stream_hub"):
+                self.runtime_event_stream_hub.publish_agent_event(agent_id, {**self._agent_last_probe[agent_id], "source": "probe_agent_runtime"})
+            return dict(self._agent_last_probe[agent_id])
+
+        latency_ms = (time.monotonic() - started) * 1000
+        self.registry.update_health(health)
+        error_text = str(getattr(health, "last_error", "") or "").strip()
+        status_value = getattr(health, "status", AgentStatus.READY)
+        rate_limited = "429" in error_text or "rate" in error_text.lower()
+        slow_probe = latency_ms >= float(os.getenv("AI_BRIDGE_AGENT_DEGRADED_LATENCY_MS", "5000") or "5000")
+        hard_failure = status_value in {AgentStatus.OFFLINE, AgentStatus.FAILED, AgentStatus.UNREACHABLE, AgentStatus.DISABLED} or (error_text and not rate_limited)
+
+        if hard_failure:
+            failures = self._agent_probe_failures.get(agent_id, 0) + 1
+            self._agent_probe_failures[agent_id] = failures
+            self._agent_recent_errors.setdefault(agent_id, []).append(now)
+            recent = self._prune_agent_recent_errors(agent_id, now=now)
+            if failures >= 2:
+                self.suppress_lane(agent_id, reason=error_text or status_value.value)
+            else:
+                agent_record.status = AgentStatus.DEGRADED
+                agent_record.metrics.status = agent_record.status
+            agent_record.metrics.error_rate = min(1.0, len(recent) / 2.0)
+            self.refresh_routing_weights()
+            self._agent_last_probe[agent_id] = {
+                "agent_id": agent_id,
+                "ok": False,
+                "status": agent_record.status.value,
+                "error": error_text or status_value.value,
+                "latency_ms": latency_ms,
+            }
+            if hasattr(self, "runtime_event_stream_hub"):
+                self.runtime_event_stream_hub.publish_agent_event(agent_id, {**self._agent_last_probe[agent_id], "source": "probe_agent_runtime"})
+            return dict(self._agent_last_probe[agent_id])
+
+        self._agent_probe_failures[agent_id] = 0
+        self._agent_recent_errors[agent_id] = []
+        if rate_limited or slow_probe or status_value == AgentStatus.DEGRADED:
+            agent_record.status = AgentStatus.DEGRADED
+            agent_record.metrics.status = agent_record.status
+            agent_record.metrics.error_rate = 0.25
+        else:
+            self.recover_lane(agent_id)
+            agent_record.status = AgentStatus.READY
+            agent_record.metrics.status = agent_record.status
+            agent_record.metrics.error_rate = 0.0
+        self.refresh_routing_weights()
+        self._agent_last_probe[agent_id] = {
+            "agent_id": agent_id,
+            "ok": True,
+            "status": agent_record.status.value,
+            "error": error_text or None,
+            "latency_ms": latency_ms,
+        }
+        if hasattr(self, "runtime_event_stream_hub"):
+            self.runtime_event_stream_hub.publish_agent_event(agent_id, {**self._agent_last_probe[agent_id], "source": "probe_agent_runtime"})
+        return dict(self._agent_last_probe[agent_id])
+
+    def registry_reconcile(self) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        attached_agents = set(self.local_agents.keys())
+        cached_provider_health = self.availability.cached_report() if hasattr(self.availability, "cached_report") else {}
+        zombies: list[str] = []
+        suppressed: list[str] = []
+        recovered: list[str] = []
+        for agent in self.registry.list_agents():
+            if str(agent.endpoint).startswith("local://") and agent.id not in attached_agents:
+                zombies.append(agent.id)
+                self.suppress_lane(agent.id, reason="zombie_runtime_missing")
+                suppressed.append(agent.id)
+                continue
+            provider_name = self._normalize_provider(str(agent.provider or ""))
+            provider_snapshot = cached_provider_health.get(provider_name, {}) if isinstance(cached_provider_health, dict) else {}
+            provider_status = str(provider_snapshot.get("status") or "").strip().lower()
+            provider_error = str(provider_snapshot.get("error") or provider_status or "provider_unavailable")
+            if provider_name not in {"", "local"} and provider_status in {"offline", "timeout", "auth_failed", "quota_exceeded"}:
+                self.suppress_lane(agent.id, reason=f"provider:{provider_error}")
+                suppressed.append(agent.id)
+                continue
+            if agent.id in self._agent_suppressed_until:
+                suppressed_until = self._agent_suppressed_until.get(agent.id)
+                if suppressed_until and suppressed_until <= now:
+                    self.recover_lane(agent.id)
+                    recovered.append(agent.id)
+        weights = self.refresh_routing_weights()
+        return {
+            "zombies": zombies,
+            "suppressed": suppressed,
+            "recovered": recovered,
+            "weights": weights,
+        }
+
+    async def _agent_health_supervisor_loop(self) -> None:
+        while not self._agent_probe_stop.is_set():
+            try:
+                provider_names = {self._normalize_provider(str(agent.provider or "")) for agent in self.registry.list_agents() if self._normalize_provider(str(agent.provider or "")) not in {"", "local"}}
+                for provider_name in sorted(provider_names):
+                    self.probe_provider_runtime(provider_name)
+                for agent in self.registry.list_agents():
+                    self.probe_agent_runtime(agent.id)
+                self.registry_reconcile()
+            except Exception as exc:
+                self.log("warning", f"[HEALTH] agent supervisor loop failed: {exc}")
+            await asyncio.sleep(self._agent_probe_interval_sec)
+
+    def _refresh_hot_provider_inventory_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        hot_providers = ["local_llm", "ai_kernel", "antigravity"]
+        payload = self._provider_inventory_snapshot if isinstance(self._provider_inventory_snapshot, dict) else {"updated_at": None, "providers": {}}
+        providers = payload.get("providers") if isinstance(payload.get("providers"), dict) else {}
+        for provider in hot_providers:
+            try:
+                providers[self._normalize_provider(provider)] = self.provider_inventory.refresh_provider_entry(provider, force_refresh=force_refresh)
+            except Exception as exc:
+                self.log("warning", f"[INVENTORY] hot refresh failed for {provider}: {exc}")
+        participation = self.provider_inventory.build_participation_snapshot(self.registry.list_agents())
+        runtime_inventory = self.provider_inventory.build_all_provider_runtime_inventories(
+            force_refresh=False,
+            usage_snapshot=self.module_manager.get_module("model_usage").finalize() if self.module_manager.get_module("model_usage") and hasattr(self.module_manager.get_module("model_usage"), "finalize") else {},
+            suppression_snapshot=self.provider_budget_router.suppression_snapshot(),
+        )
+        self._provider_inventory_snapshot = {
+            "updated_at": int(__import__("time").time()),
+            "providers": providers,
+            "participation": participation,
+            "runtime_inventory": runtime_inventory,
+        }
+        self._provider_inventory_snapshot["provider_suppression"] = self._sync_provider_suppression(providers, participation)
+        self._provider_inventory_snapshot["provider_budget_router"] = {"global_suppression": self.provider_budget_router.suppression_snapshot()}
+        self._provider_inventory_snapshot["model_index"] = self.provider_inventory.model_index_summary()
+        self.inventory_stream_hub.publish(self._provider_inventory_snapshot)
+        self.refresh_routing_weights()
+        return self._provider_inventory_snapshot
+
     async def _provider_inventory_loop(self) -> None:
+        next_full_refresh = 0.0
         while not self._provider_inventory_stop.is_set():
             try:
-                self._refresh_provider_inventory_snapshot(force_refresh=True)
+                now = time.monotonic()
+                if now >= next_full_refresh:
+                    self._refresh_provider_inventory_snapshot(force_refresh=True)
+                    next_full_refresh = now + float(self._provider_inventory_refresh_interval_sec)
+                else:
+                    self._refresh_hot_provider_inventory_snapshot(force_refresh=False)
             except Exception as exc:
                 self.log("warning", f"[INVENTORY] provider refresh failed: {exc}")
-            await asyncio.sleep(self._provider_inventory_refresh_interval_sec)
+            await asyncio.sleep(self._provider_hot_refresh_interval_sec)
 
     def _refresh_kpi_dashboard(self) -> dict[str, Any]:
         kpi_log = Path(getattr(self.kpi_events, "file_path", "memory_store/kpi_events.jsonl"))
@@ -1238,6 +1569,8 @@ class Orchestrator:
             self.registry.update_health(agent.health())
         except Exception as exc:
             self.log("warning", f"[KERNEL] Initial health probe failed for {agent_id}: {exc}")
+        if hasattr(self, "runtime_event_stream_hub"):
+            self.runtime_event_stream_hub.publish_agent_event(agent_id, {"status": "ready", "provider": provider, "model_name": model_name, "source": "attach_local_agent"})
         self.log("info", f"[KERNEL] Attached local agent pod: {agent_id} (TPP Enabled)")
 
     def _local_agent_health(self, agent_id: str) -> AgentHealth | None:
@@ -1262,6 +1595,8 @@ class Orchestrator:
         fingerprint = hashlib.md5(str(thoughts).encode()).hexdigest()[:8]
         
         self.message_bus.update_pod_state(agent_id, status, task=task_id, fingerprint=fingerprint)
+        if hasattr(self, "runtime_event_stream_hub"):
+            self.runtime_event_stream_hub.publish_agent_event(agent_id, {"status": status.value, "task_id": task_id, "fingerprint": fingerprint, "source": "pod_state"})
 
     def load_kernel_module(self, name: str) -> None:
         self.module_manager.load(name)
@@ -1302,10 +1637,43 @@ class Orchestrator:
             return module
         return None
 
+    @staticmethod
+    def _is_websocket_source(source: str) -> bool:
+        normalized = str(source or "").strip().lower()
+        return normalized in {"websocket", "ws", "chat_ws", "external_chat"}
+
+    def _prepare_ingress_payload(self, normalized: dict[str, Any], *, source: str) -> dict[str, Any]:
+        prepared = dict(normalized or {})
+        if self._is_websocket_source(source) or self._is_websocket_source(str(prepared.get("source") or "")):
+            prepared["source"] = "websocket"
+            prepared.setdefault("channel", "ws")
+            prepared.setdefault("interactive", True)
+            prepared.setdefault("ingress_path", "websocket_internal_chat")
+            prepared.setdefault("text_preparation_mode", "automatic")
+            prepared.setdefault("frame_contract_mode", "required")
+            message = prepared.get("message") or prepared.get("description")
+            if isinstance(message, str) and message.strip():
+                prepared.setdefault("description", message.strip())
+        return prepared
+
+    def _apply_ingress_contract(self, task: Task, prepared_payload: dict[str, Any], *, source: str) -> None:
+        if not isinstance(task.routing_hints, dict):
+            task.routing_hints = {}
+        if self._is_websocket_source(source) or self._is_websocket_source(str(prepared_payload.get("source") or "")):
+            task.routing_hints.setdefault("source", "websocket")
+            task.routing_hints.setdefault("channel", "ws")
+            task.routing_hints.setdefault("interactive", True)
+            task.routing_hints["ingress_path"] = str(prepared_payload.get("ingress_path") or "websocket_internal_chat")
+            task.routing_hints["text_preparation_mode"] = str(prepared_payload.get("text_preparation_mode") or "automatic")
+            task.routing_hints["frame_contract_mode"] = str(prepared_payload.get("frame_contract_mode") or "required")
+            task.routing_hints["auto_prepare_text"] = True
+            task.routing_hints["external_chat"] = True
+
     async def submit_user_task_async(self, payload: object, source: str = "user_input") -> dict[str, object]:
         from .task_submission_api import create_standard_task, normalize_user_payload, validate_normalized_payload
 
         normalized = normalize_user_payload(payload)
+        normalized = self._prepare_ingress_payload(normalized, source=source)
         ok, issues = validate_normalized_payload(normalized)
         if not ok:
             message = "; ".join(issues) or "invalid_input"
@@ -1335,6 +1703,11 @@ class Orchestrator:
                     normalized.update(triggered)
 
         task = create_standard_task(normalized)
+        self._apply_ingress_contract(task, normalized, source=source)
+        latest_frame = task.routing_hints.get("frame_orchestrator") if isinstance(task.routing_hints, dict) else None
+        if isinstance(latest_frame, dict):
+            self._latest_frame_orchestrator = latest_frame
+            self._latest_frame_xml_package = task.routing_hints.get("frame_xml_package")
         control = self._control_module()
         if control is not None:
             control.register_submission(task, source=source)
@@ -1350,6 +1723,7 @@ class Orchestrator:
         from .task_submission_api import create_standard_task, normalize_user_payload, validate_normalized_payload
 
         normalized = normalize_user_payload(payload)
+        normalized = self._prepare_ingress_payload(normalized, source=source)
         ok, issues = validate_normalized_payload(normalized)
         if not ok:
             message = "; ".join(issues) or "invalid_input"
@@ -1379,6 +1753,11 @@ class Orchestrator:
                     normalized.update(triggered)
 
         task = create_standard_task(normalized)
+        self._apply_ingress_contract(task, normalized, source=source)
+        latest_frame = task.routing_hints.get("frame_orchestrator") if isinstance(task.routing_hints, dict) else None
+        if isinstance(latest_frame, dict):
+            self._latest_frame_orchestrator = latest_frame
+            self._latest_frame_xml_package = task.routing_hints.get("frame_xml_package")
         control = self._control_module()
         if control is not None:
             control.register_submission(task, source=source)
@@ -1470,6 +1849,7 @@ class Orchestrator:
         skip = exclude or set()
         normalized = [self._normalize_provider(p) for p in providers]
         for provider in normalized:
+            candidates = []
             for record in self.registry.list_agents():
                 if record.id in skip:
                     continue
@@ -1480,7 +1860,10 @@ class Orchestrator:
                 if not is_agent_routable(record, priority):
                     continue
                 if record.id in self.local_agents:
-                    return record.id
+                    candidates.append(record)
+            if candidates:
+                candidates.sort(key=lambda record: (self._inventory_lane_score(record), float(record.metrics.priority_score or 0.0), -float(record.metrics.avg_latency_ms or 0.0)), reverse=True)
+                return candidates[0].id
         return None
 
     @staticmethod
@@ -1521,7 +1904,7 @@ class Orchestrator:
             if hinted:
                 hinted_ids = {item.id for item in hinted}
                 candidates = hinted + [record for record in candidates if record.id not in hinted_ids]
-        return sorted(candidates, key=lambda record: self.scheduler.agent_score(record, capability), reverse=True)
+        return sorted(candidates, key=lambda record: (self._inventory_lane_score(record), self.scheduler.agent_score(record, capability), float(record.metrics.priority_score or 0.0)), reverse=True)
 
     def _preassign_parallel_batch_agents(self, tasks: list[Task]) -> dict[str, str]:
         assignments: dict[str, str] = {}
@@ -2771,6 +3154,8 @@ class Orchestrator:
                 "errors_count": len(result.errors or []),
             }
             self.kpi_events.write(lifecycle_payload)
+            if hasattr(self, "runtime_event_stream_hub"):
+                self.runtime_event_stream_hub.publish_workflow_event(task.task_id, dict(lifecycle_payload))
             self.kpi_events.append_fallback(lifecycle_payload)
             guard_decision = self.cache_guard.observe(
                 session_id=session_id,
@@ -3036,6 +3421,13 @@ class Orchestrator:
             except Exception as exc:
                 self.log("warning", f"[INVENTORY] initial provider refresh failed: {exc}")
             self._provider_inventory_task = asyncio.create_task(self._provider_inventory_loop())
+        if self._agent_probe_task is None or self._agent_probe_task.done():
+            self._agent_probe_stop.clear()
+            try:
+                self.registry_reconcile()
+            except Exception as exc:
+                self.log("warning", f"[HEALTH] initial registry reconcile failed: {exc}")
+            self._agent_probe_task = asyncio.create_task(self._agent_health_supervisor_loop())
         listener = TaskListener(self)
         try:
             await listener.start()
@@ -3043,6 +3435,7 @@ class Orchestrator:
             self._training_consolidation_stop.set()
             self._kpi_dashboard_stop.set()
             self._provider_inventory_stop.set()
+            self._agent_probe_stop.set()
             if self._training_consolidation_task is not None:
                 self._training_consolidation_task.cancel()
                 try:
@@ -3063,6 +3456,14 @@ class Orchestrator:
                 self._provider_inventory_task.cancel()
                 try:
                     await self._provider_inventory_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            if self._agent_probe_task is not None:
+                self._agent_probe_task.cancel()
+                try:
+                    await self._agent_probe_task
                 except asyncio.CancelledError:
                     pass
                 except Exception:

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from .models import AgentRecord, AgentStatus, Priority, Task
 from .model_value import compute_model_value
+from .inventory_scoring_policy import InventoryScoringPolicy
 
 
 UNROUTABLE_AGENT_STATUSES = {
@@ -28,6 +29,10 @@ def agent_accepts_task_priority(agent: AgentRecord, priority: Priority | str | N
 def is_agent_routable(agent: AgentRecord, priority: Priority | str | None = None) -> bool:
     if agent.status in UNROUTABLE_AGENT_STATUSES:
         return False
+    if float(agent.metrics.error_rate or 0.0) > 0.5:
+        return False
+    if float(agent.metrics.priority_score or 0.0) <= 0.0:
+        return False
     if agent_load_ratio(agent) > 1:
         agent.status = AgentStatus.OVERLOADED
         agent.metrics.status = agent.status
@@ -38,9 +43,28 @@ def is_agent_routable(agent: AgentRecord, priority: Priority | str | None = None
 class LoadBalancer:
     def __init__(self, overload_threshold: float = 0.85) -> None:
         self.overload_threshold = overload_threshold
+        self._inventory_snapshot_source = None
+        self._model_lookup_source = None
+        self._agent_runtime_source = None
+
+    def set_inventory_sources(self, *, runtime_inventory_source=None, model_lookup_source=None) -> None:
+        self._inventory_snapshot_source = runtime_inventory_source
+        self._model_lookup_source = model_lookup_source
+
+    def set_runtime_event_source(self, *, agent_runtime_source=None) -> None:
+        self._agent_runtime_source = agent_runtime_source
 
     def score(self, agent: AgentRecord, capability: str, priority: Priority | str | None = None, task: Task | None = None) -> float:
         if not is_agent_routable(agent, priority):
+            return float("-inf")
+        runtime_agent = {}
+        if callable(self._agent_runtime_source):
+            try:
+                runtime_agent = self._agent_runtime_source(str(agent.id)) or {}
+            except Exception:
+                runtime_agent = {}
+        runtime_status = str(runtime_agent.get("status") or "").strip().lower()
+        if runtime_status in {"offline", "failed", "suppressed", "overloaded"}:
             return float("-inf")
         
         # Calibration formula (Section 6): 
@@ -68,7 +92,30 @@ class LoadBalancer:
         cost_score = float(value["components"]["cost_efficiency"])
         
         overload_penalty = self._overload_penalty(agent)
+        runtime_entry = {}
+        if callable(self._inventory_snapshot_source):
+            try:
+                runtime_entry = self._inventory_snapshot_source(str(agent.provider or "")) or {}
+            except Exception:
+                runtime_entry = {}
+        model_row = {}
+        if callable(self._model_lookup_source):
+            try:
+                model_row = self._model_lookup_source(str(agent.model_name or "")) or {}
+            except Exception:
+                model_row = {}
+        inventory_bonus = InventoryScoringPolicy.lane_bonus(
+            provider=str(agent.provider or ""),
+            runtime_entry=runtime_entry,
+            model_row=model_row,
+            model_name=str(agent.model_name or ""),
+        )
         secure_bonus = 0.0
+        runtime_penalty = 0.0
+        if runtime_status == "degraded":
+            runtime_penalty = 0.2
+        elif runtime_status == "busy":
+            runtime_penalty = 0.1
         if priority in {Priority.HIGH, Priority.CRITICAL, "high", "critical"}:
             secure_hint = f"{agent.id} {agent.model_name}".lower()
             if any(token in secure_hint for token in ("secure", "senior")):
@@ -96,7 +143,9 @@ class LoadBalancer:
             + cost_score * 0.04
             + specialization_score * 0.05
             + secure_bonus
+            + inventory_bonus
             - overload_penalty
+            - runtime_penalty
         ) * agent.metrics.priority_score
 
     async def score_async(self, agent: AgentRecord, capability: str, priority: Priority | str | None = None, task: Task | None = None) -> float:

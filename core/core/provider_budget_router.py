@@ -150,6 +150,24 @@ class ProviderBudgetRouter:
         choice_complexity = getattr(choice, "complexity", task.complexity)
         cost_tier = str((task.routing_hints or {}).get("cost_tier") or "").strip().lower()
         source = str((task.routing_hints or {}).get("source") or "").strip().lower()
+        socraticode_hint = (task.routing_hints or {}).get("socraticode") if isinstance(task.routing_hints, dict) else {}
+        socraticode_hint = socraticode_hint if isinstance(socraticode_hint, dict) else {}
+        socraticode_coverage = socraticode_hint.get("context_coverage") if isinstance(socraticode_hint.get("context_coverage"), dict) else {}
+        socraticode_cost = (task.routing_hints or {}).get("socraticode_cost_downgrade") if isinstance(task.routing_hints, dict) else {}
+        socraticode_cost = socraticode_cost if isinstance(socraticode_cost, dict) else {}
+        socraticode_routing = socraticode_hint.get("routing_recommendations") if isinstance(socraticode_hint.get("routing_recommendations"), dict) else {}
+        socraticode_score = socraticode_coverage.get("score")
+        if socraticode_score is None:
+            socraticode_score = socraticode_coverage.get("coverage_ratio")
+        if socraticode_score is None:
+            socraticode_score = socraticode_coverage.get("ratio")
+        try:
+            socraticode_score = float(socraticode_score)
+        except (TypeError, ValueError):
+            socraticode_score = 0.0
+        socraticode_status = str(socraticode_coverage.get("status") or "").strip().lower()
+        socraticode_prefer_low_cost = bool(socraticode_cost.get("eligible")) or bool(socraticode_routing.get("prefer_low_cost_lanes"))
+        socraticode_preferred_provider = str(socraticode_cost.get("preferred_provider") or socraticode_routing.get("prefer_provider") or "").strip().lower()
 
         profile = self._normalized_text_profile(task)
         profile_risk = str(profile.get("risk_bucket") or "").strip().lower()
@@ -221,6 +239,12 @@ class ProviderBudgetRouter:
             base = ["openai", "antigravity", preferred, "mistral", "local"]
         else:
             base = [preferred, "antigravity", "mistral", "local", "openai"]
+
+        if not is_critical and socraticode_prefer_low_cost and (socraticode_score >= 0.9 or socraticode_status == "strong"):
+            cheaper = [p for p in [socraticode_preferred_provider, "local", "mistral", "antigravity"] if isinstance(p, str) and p.strip()]
+            base = [*cheaper, preferred, "openai", *base]
+        elif not is_critical and socraticode_prefer_low_cost and socraticode_preferred_provider:
+            base = [socraticode_preferred_provider, preferred, "mistral", "antigravity", "local", "openai", *base]
 
         seen: set[str] = set()
         ranked: list[str] = []

@@ -1,5 +1,7 @@
 from core.core.agent_registry import AgentRegistry
 from core.core.load_balancer import LoadBalancer
+from core.core.inventory_stream_hub import InventoryStreamHub
+from core.core.runtime_event_stream_hub import RuntimeEventStreamHub
 from core.core.models import AgentStatus, Priority, Task, TaskContext, TaskInput, TaskType
 from core.core.task_router import TaskRouter
 from core.core.orchestrator import Orchestrator
@@ -200,3 +202,159 @@ def test_router_tdd_module_without_route_override_keeps_default_routing():
 
     assert accepted.status.value == "accepted"
     assert accepted.assigned_agent == "tester-1"
+
+
+def test_load_balancer_prefers_resident_ready_lane_when_inventory_sources_are_present():
+    registry = AgentRegistry()
+    local_agent = registry.register('local-hot', 'codex', 'local://local-hot', ['code'], model_name='qwen2.5:32b-instruct-q4_k_m', provider='local_llm')
+    kernel_agent = registry.register('kernel-cold', 'codex', 'local://kernel-cold', ['code'], model_name='hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m', provider='ai_kernel')
+    local_agent.metrics.avg_latency_ms = 150
+    kernel_agent.metrics.avg_latency_ms = 80
+
+    balancer = LoadBalancer()
+    runtime_entries = {
+        'local_llm': {'status': 'ready', 'diagnostics': {'model_present': True, 'default_model': 'qwen2.5:32b-instruct-q4_k_m'}},
+        'ai_kernel': {'status': 'degraded', 'diagnostics': {'inventory_status': 'degraded', 'model_alias_present': False}},
+    }
+    model_rows = {
+        'qwen2.5:32b-instruct-q4_k_m': {'provider': 'local_llm', 'resident': True},
+        'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m': {'provider': 'ai_kernel', 'resident': False},
+    }
+    balancer.set_inventory_sources(
+        runtime_inventory_source=lambda provider: runtime_entries.get(provider, {}),
+        model_lookup_source=lambda model_name: model_rows.get(model_name, {}),
+    )
+
+    chosen = balancer.choose(registry.list_agents(), 'code')
+
+    assert chosen is local_agent
+
+
+
+def test_load_balancer_reacts_to_live_inventory_hub_updates():
+    registry = AgentRegistry()
+    local_agent = registry.register('local-hot', 'codex', 'local://local-hot', ['code'], model_name='qwen2.5:32b-instruct-q4_k_m', provider='local_llm')
+    kernel_agent = registry.register('kernel-fast', 'codex', 'local://kernel-fast', ['code'], model_name='hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m', provider='ai_kernel')
+    local_agent.metrics.avg_latency_ms = 170
+    kernel_agent.metrics.avg_latency_ms = 70
+
+    hub = InventoryStreamHub()
+    balancer = LoadBalancer()
+    balancer.set_inventory_sources(
+        runtime_inventory_source=hub.provider_runtime_entry,
+        model_lookup_source=hub.find_model,
+    )
+
+    hub.publish({
+        'runtime_inventory': {
+            'providers': {
+                'local_llm': {'status': 'offline', 'diagnostics': {'model_present': False, 'default_model': 'qwen2.5:32b-instruct-q4_k_m'}},
+                'ai_kernel': {'status': 'ready', 'diagnostics': {'inventory_status': 'ready', 'model_alias_present': True}},
+            }
+        },
+        'model_index': {
+            'updated_at': 100,
+            'total_models': 2,
+            'provider_counts': {'local_llm': 1, 'ai_kernel': 1},
+            'by_model': {
+                'qwen2.5:32b-instruct-q4_k_m': {'provider': 'local_llm', 'resident': False},
+                'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m': {'provider': 'ai_kernel', 'resident': False},
+            },
+            'by_provider': {
+                'local_llm': ['qwen2.5:32b-instruct-q4_k_m'],
+                'ai_kernel': ['hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'],
+            },
+        },
+    })
+
+    assert balancer.choose(registry.list_agents(), 'code') is kernel_agent
+
+    hub.publish({
+        'runtime_inventory': {
+            'providers': {
+                'local_llm': {'status': 'ready', 'diagnostics': {'model_present': True, 'default_model': 'qwen2.5:32b-instruct-q4_k_m'}},
+                'ai_kernel': {'status': 'degraded', 'diagnostics': {'inventory_status': 'degraded', 'model_alias_present': False}},
+            }
+        },
+        'model_index': {
+            'updated_at': 101,
+            'total_models': 2,
+            'provider_counts': {'local_llm': 1, 'ai_kernel': 1},
+            'by_model': {
+                'qwen2.5:32b-instruct-q4_k_m': {'provider': 'local_llm', 'resident': True},
+                'hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m': {'provider': 'ai_kernel', 'resident': False},
+            },
+            'by_provider': {
+                'local_llm': ['qwen2.5:32b-instruct-q4_k_m'],
+                'ai_kernel': ['hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m'],
+            },
+        },
+    })
+
+    assert balancer.choose(registry.list_agents(), 'code') is local_agent
+
+
+
+def test_load_balancer_honors_live_agent_runtime_events():
+    registry = AgentRegistry()
+    ready_agent = registry.register('coder-ready', 'codex', 'local://coder-ready', ['code'], provider='local_llm', model_name='qwen2.5:32b-instruct-q4_k_m')
+    stale_agent = registry.register('coder-stale', 'codex', 'local://coder-stale', ['code'], provider='openai', model_name='gpt-5.5')
+    ready_agent.metrics.avg_latency_ms = 120
+    stale_agent.metrics.avg_latency_ms = 20
+
+    hub = RuntimeEventStreamHub()
+    balancer = LoadBalancer()
+    balancer.set_runtime_event_source(agent_runtime_source=hub.agent_snapshot)
+
+    hub.publish_agent_event('coder-ready', {'status': 'ready', 'source': 'probe'})
+    hub.publish_agent_event('coder-stale', {'status': 'offline', 'source': 'probe'})
+
+    chosen = balancer.choose(registry.list_agents(), 'code')
+
+    assert chosen is ready_agent
+
+
+def test_router_honors_live_workflow_runtime_preferred_agent_updates():
+    registry = AgentRegistry()
+    registry.register("code-main", "codex", "local://code-main", ["code", "fix"])
+    registry.register("code-alt", "codex", "local://code-alt", ["code", "fix"])
+
+    hub = RuntimeEventStreamHub()
+    router = TaskRouter(registry, LoadBalancer())
+    router.set_runtime_event_source(workflow_runtime_source=hub.snapshot)
+
+    task = Task(TaskType.CODE, TaskInput("Implement runtime-bound routing"), TaskContext("p", ".", "main"))
+    task.routing_hints = {"workflow_id": "wf-live-route"}
+
+    hub.publish_workflow_event("wf-live-route", {"routing_hints": {"preferred_agent_id": "code-alt"}})
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "code-alt"
+
+    next_task = Task(TaskType.CODE, TaskInput("Implement runtime-bound routing follow-up"), TaskContext("p", ".", "main"))
+    next_task.routing_hints = {"workflow_id": "wf-live-route"}
+
+    hub.publish_workflow_event("wf-live-route", {"routing_hints": {"preferred_agent_id": "code-main"}})
+    next_accepted = router.route(next_task)
+
+    assert next_accepted.status.value == "accepted"
+    assert next_accepted.assigned_agent == "code-main"
+
+
+def test_router_honors_live_workflow_runtime_capability_override():
+    registry = AgentRegistry()
+    registry.register("planner", "codex", "local://planner", ["plan"])
+
+    hub = RuntimeEventStreamHub()
+    router = TaskRouter(registry, LoadBalancer())
+    router.set_runtime_event_source(workflow_runtime_source=hub.snapshot)
+
+    task = Task(TaskType.PLAN, TaskInput("Prepare branch governance rollout"), TaskContext("p", ".", "main"))
+    task.routing_hints = {"workflow_id": "wf-sourcecraft-route"}
+
+    hub.publish_workflow_event("wf-sourcecraft-route", {"required_capability": "repo_ops"})
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "orchestrator"

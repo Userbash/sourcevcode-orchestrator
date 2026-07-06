@@ -41,7 +41,7 @@ class OpenAIModelRegistry:
 
     @staticmethod
     def _api_key() -> str:
-        return os.getenv("OPENAI_API_KEY", "").strip()
+        return str(resolve_openai_provider_config().api_key or "").strip()
 
     @staticmethod
     def _is_text_model(model_id: str) -> bool:
@@ -65,11 +65,16 @@ class OpenAIModelRegistry:
         return "http_error", f"models_endpoint_http_{status_code}"
 
     def _fetch_live(self) -> list[str]:
-        key = self._api_key()
         cfg = resolve_openai_provider_config()
+        key = str(cfg.api_key or "").strip()
         endpoint = str(cfg.models_endpoint or "").strip()
         if not key:
-            self._last_diagnostics = OpenAIRegistryDiagnostics(ok=False, error_type="missing_api_key", error_message="OPENAI_API_KEY is not set", endpoint=endpoint)
+            self._last_diagnostics = OpenAIRegistryDiagnostics(
+                ok=False,
+                error_type="missing_api_key",
+                error_message="OpenAI API key is not configured in env or discovery artifact",
+                endpoint=endpoint,
+            )
             return []
         if not endpoint:
             self._last_diagnostics = OpenAIRegistryDiagnostics(ok=False, error_type="missing_models_endpoint", error_message="OpenAI models endpoint is not configured", endpoint=None)

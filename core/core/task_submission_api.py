@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
 from .input_text_normalizer import normalize_text, normalize_text_list
+from .frame_orchestrator import build_frame_orchestrator_package
 from .input_text_quantizer import quantize_input_text
 from .models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
+from .socraticode_bridge import SocratiCodeBridge, SocratiCodeBridgeError
 from .openai_runtime_router import OpenAIRuntimeRouter
 
 
@@ -133,6 +136,128 @@ def _is_meaningful_text(text: str) -> bool:
         if re.match(pattern, lowered):
             return False
     return True
+
+
+_SOCRATICODE_TARGET_TASK_TYPES = {TaskType.CODE, TaskType.REVIEW, TaskType.TEST, TaskType.PLAN}
+
+
+def _socraticode_enabled_for_submission() -> bool:
+    raw = str(os.getenv("SOCRATICODE_ENABLED", "false") or "false").strip().lower()
+    command = str(os.getenv("SOCRATICODE_MCP_COMMAND") or "").strip()
+    return raw in {"1", "true", "yes", "on"} or bool(command)
+
+
+def _normalize_socraticode_annotation(advisory: dict[str, Any], task: Task) -> dict[str, Any]:
+    return {
+        "status": "applied",
+        "bridge_source": "task_submission",
+        "task_type": task.type.value,
+        "repo_path": str(advisory.get("repo_path") or task.context.repo_path or "."),
+        "context_coverage": advisory.get("context_coverage") if isinstance(advisory.get("context_coverage"), dict) else {},
+        "cost_downgrade": advisory.get("cost_downgrade") if isinstance(advisory.get("cost_downgrade"), dict) else {},
+        "parallelism": advisory.get("parallelism") if isinstance(advisory.get("parallelism"), dict) else {},
+        "routing_recommendations": advisory.get("routing_recommendations") if isinstance(advisory.get("routing_recommendations"), dict) else {},
+        "compact_context": advisory.get("compact_context") if isinstance(advisory.get("compact_context"), dict) else {},
+    }
+
+
+def _socraticode_has_strong_coverage(annotation: dict[str, Any]) -> bool:
+    coverage = annotation.get("context_coverage") if isinstance(annotation.get("context_coverage"), dict) else {}
+    status = str(coverage.get("status") or "").strip().lower()
+    score_raw = coverage.get("score", coverage.get("coverage_ratio", coverage.get("ratio", 0.0)))
+    try:
+        score = float(score_raw)
+    except (TypeError, ValueError):
+        score = 0.0
+    return status == "strong" or score >= 0.88
+
+
+def _apply_socraticode_pre_prompt_routing(task: Task, annotation: dict[str, Any]) -> None:
+    if not isinstance(task.routing_hints, dict):
+        task.routing_hints = {}
+    if str(annotation.get("status") or "").strip().lower() != "applied":
+        return
+    if not _socraticode_has_strong_coverage(annotation):
+        return
+
+    cost = annotation.get("cost_downgrade") if isinstance(annotation.get("cost_downgrade"), dict) else {}
+    parallel = annotation.get("parallelism") if isinstance(annotation.get("parallelism"), dict) else {}
+    routing = annotation.get("routing_recommendations") if isinstance(annotation.get("routing_recommendations"), dict) else {}
+
+    original_cost_tier = str(task.routing_hints.get("cost_tier") or "").strip().lower()
+    target_cost_tier = str(cost.get("target_cost_tier") or "").strip().lower()
+    if cost.get("eligible") and target_cost_tier and target_cost_tier != original_cost_tier:
+        if original_cost_tier:
+            task.routing_hints.setdefault("original_cost_tier", original_cost_tier)
+        task.routing_hints["cost_tier"] = target_cost_tier
+        task.routing_hints["socraticode_cost_tier_applied"] = True
+
+    recommended_parallel_raw = parallel.get("recommended_parallel_branches")
+    if recommended_parallel_raw is None:
+        recommended_parallel_raw = routing.get("target_parallel_branches")
+    try:
+        recommended_parallel = int(recommended_parallel_raw) if recommended_parallel_raw is not None else None
+    except (TypeError, ValueError):
+        recommended_parallel = None
+    if recommended_parallel is None or recommended_parallel < 1:
+        return
+
+    current_parallel_raw = task.routing_hints.get("parallel_branches")
+    try:
+        current_parallel = int(current_parallel_raw) if current_parallel_raw is not None else None
+    except (TypeError, ValueError):
+        current_parallel = None
+
+    if current_parallel is not None and recommended_parallel >= current_parallel:
+        return
+
+    if current_parallel is not None:
+        task.routing_hints.setdefault("original_parallel_branches", current_parallel)
+    task.routing_hints["parallel_branches"] = recommended_parallel
+    task.routing_hints["socraticode_parallel_branches_applied"] = True
+
+
+def _apply_socraticode_annotation(task: Task) -> None:
+    if task.type not in _SOCRATICODE_TARGET_TASK_TYPES:
+        return
+    if not _socraticode_enabled_for_submission():
+        return
+    if not isinstance(task.routing_hints, dict):
+        task.routing_hints = {}
+
+    bridge = SocratiCodeBridge(repo_path=str(task.context.repo_path or "."))
+    try:
+        with bridge:
+            advisory = bridge.analyze_task(
+                task=task,
+                context={},
+                description=task.input.description,
+                task_type=task.type.value,
+                routing_hints=task.routing_hints,
+            )
+    except SocratiCodeBridgeError as exc:
+        task.routing_hints["socraticode"] = {
+            "status": "unavailable",
+            "bridge_source": "task_submission",
+            "task_type": task.type.value,
+            "error": str(exc),
+        }
+        return
+    except Exception as exc:
+        task.routing_hints["socraticode"] = {
+            "status": "error",
+            "bridge_source": "task_submission",
+            "task_type": task.type.value,
+            "error": str(exc),
+        }
+        return
+
+    annotation = _normalize_socraticode_annotation(advisory if isinstance(advisory, dict) else {}, task)
+    task.routing_hints["socraticode"] = annotation
+    task.routing_hints["socraticode_context_coverage"] = annotation["context_coverage"]
+    task.routing_hints["socraticode_cost_downgrade"] = annotation["cost_downgrade"]
+    task.routing_hints["socraticode_parallelism"] = annotation["parallelism"]
+    _apply_socraticode_pre_prompt_routing(task, annotation)
 
 
 def _extract_description(data: dict[str, Any]) -> str:
@@ -272,6 +397,10 @@ def create_standard_task(data: dict[str, Any]) -> Task:
             else:
                 task.routing_hints["requested_model_rejected"] = requested_model
         task.routing_hints.setdefault("input_validation", {"status": "ok", "issues": []})
+        _apply_socraticode_annotation(task)
+        frame_package = build_frame_orchestrator_package(task, normalized)
+        task.routing_hints["frame_orchestrator"] = frame_package.as_dict()
+        task.routing_hints["frame_xml_package"] = frame_package.validation.xml_orchestrator_package_output
         return task
     except Exception as e:
         raise ValueError(f"Invalid task data format: {e}") from e

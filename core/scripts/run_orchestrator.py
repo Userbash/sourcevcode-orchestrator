@@ -50,10 +50,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _http_api_enabled() -> bool:
+    raw = os.getenv("AI_BRIDGE_API_ENABLED", "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _start_http_api(orchestrator: Orchestrator, starter=None) -> bool:
+    if not _http_api_enabled():
+        return False
+    if starter is None:
+        from core.scripts.orchestrator_daemon import _start_http_server as starter
+    starter(orchestrator)
+    return True
+
+
 def _attach_default_agents(orchestrator: Orchestrator) -> None:
     from core.agents.ai_kernel_agent import AIKernelAgent
     from core.agents.antigravity_cli_agent import AntigravityCLIAgent
     from core.agents.codex_agent import CodexAgent
+    from core.agents.distributed_coder_agent import DistributedCoderAgent
+    from core.agents.result_merger_agent import ResultMergerAgent
     from core.agents.local_llm_agent import LocalLLMAgent
     from core.agents.mimo_agent import MimoAgent
     from core.agents.mistral_agent import MistralAgent
@@ -77,6 +93,8 @@ def _attach_default_agents(orchestrator: Orchestrator) -> None:
     if _attach_placeholder_agents():
         orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
         orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
+    orchestrator.attach_local_agent("distributed-coder-1", DistributedCoderAgent(), agent_type="custom", critical=False, model_name="distributed-coder-core", provider="local")
+    orchestrator.attach_local_agent("result-merger", ResultMergerAgent(), agent_type="custom", critical=False, model_name="result-merger-core", provider="local")
     orchestrator.attach_local_agent("local-llm-1", LocalLLMAgent("local-llm-1", local_model), agent_type="custom", critical=False, model_name=local_model, provider="local")
     orchestrator.attach_local_agent("ai-kernel-qwen36-1", AIKernelAgent("ai-kernel-qwen36-1"), agent_type="custom", critical=False, model_name=ai_kernel_model, provider="ai_kernel")
 
@@ -105,6 +123,7 @@ async def main(argv: list[str] | None = None) -> None:
     orchestrator = Orchestrator()
     orchestrator.orchestration_config = config
     _attach_default_agents(orchestrator)
+    _start_http_api(orchestrator)
 
     print(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")
     try:

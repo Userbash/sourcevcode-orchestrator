@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover - optional dependency
 from .base_agent import BaseAgent
 from core.core.env_loader import load_env_file
 from core.core.openai_provider import build_openai_client_kwargs
+from core.core.openai_responses_runtime import OpenAIResponsesRuntime
 from core.core.openai_runtime_router import OpenAIRuntimeRouter
 from core.core.models import AgentHealth, AgentResult, AgentStatus, ResultOutput, Task, TaskStatus
 
@@ -162,11 +163,7 @@ class CodexAgent(BaseAgent):
         for model in candidates:
             task.assigned_model = model
             try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
-                )
+                content, total_tokens = self._invoke_openai_model(client, task, model, prompt)
             except Exception as e:
                 err_msg = str(e)
                 last_error = err_msg
@@ -180,9 +177,6 @@ class CodexAgent(BaseAgent):
                     return self.result(task, "OpenAI API error: 401 Unauthorized", TaskStatus.FAILED, 0.0, ["OPENAI_API_KEY is invalid."])
                 raise e
 
-            content = response.choices[0].message.content or ""
-            usage = getattr(response, "usage", None)
-            total_tokens = int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
             if total_tokens:
                 self.openai_router.register_usage(task, total_tokens)
             result = self.result(task, content, TaskStatus.DONE, 0.9)
@@ -197,6 +191,47 @@ class CodexAgent(BaseAgent):
             0.0,
             [last_error or "openai_model_routing_exhausted"],
         )
+
+
+    @staticmethod
+    def _responses_enabled() -> bool:
+        return os.getenv("AI_BRIDGE_OPENAI_USE_RESPONSES", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _usage_total_tokens(response: Any) -> int:
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+        if isinstance(usage, dict):
+            try:
+                return int(usage.get("total_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                return 0
+        try:
+            return int(getattr(usage, "total_tokens", 0) or 0) if usage else 0
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _should_fallback_to_chat_completions(raw_error: str) -> bool:
+        lowered = str(raw_error or "").strip().lower()
+        return "responses" in lowered and any(marker in lowered for marker in ("404", "not found", "unsupported", "unknown", "does not exist"))
+
+    def _invoke_openai_model(self, client: Any, task: Task, model: str, prompt: str) -> tuple[str, int]:
+        if self._responses_enabled() and hasattr(client, "responses"):
+            try:
+                runtime = OpenAIResponsesRuntime(client)
+                run = runtime.run(model=model, input=prompt, temperature=0.2)
+                return run.output_text, self._usage_total_tokens(run.response)
+            except Exception as exc:
+                if not self._should_fallback_to_chat_completions(str(exc)):
+                    raise
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or "", self._usage_total_tokens(response)
 
     @staticmethod
     def _is_chat_capable_model(model_name: str) -> bool:

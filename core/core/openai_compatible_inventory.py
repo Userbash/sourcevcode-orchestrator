@@ -23,6 +23,15 @@ _NON_TEXT_MARKERS = (
     'speech',
 )
 
+_RUNTIME_BLOCK_MARKERS = (
+    'unsupported model',
+    'model is not supported',
+    'invalid model',
+    'does not exist',
+    'not found',
+    'no eligible resources',
+)
+
 
 def is_text_compatible_model(model_id: str) -> bool:
     lowered = str(model_id or '').strip().lower()
@@ -242,6 +251,111 @@ def _template_score(model_id: str, role: str) -> float:
     return round(base, 4)
 
 
+def _validated_row_map(validated_rows: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    mapped: dict[str, dict[str, Any]] = {}
+    for row in validated_rows or []:
+        if not isinstance(row, dict):
+            continue
+        model_name = str(row.get('model') or '').strip()
+        if model_name:
+            mapped[model_name] = row
+    return mapped
+
+
+def _endpoint_ok(row: dict[str, Any], key: str) -> bool:
+    payload = row.get(key) if isinstance(row, dict) else {}
+    return bool((payload or {}).get('ok')) if isinstance(payload, dict) else False
+
+
+def _endpoint_error(row: dict[str, Any], key: str) -> str:
+    payload = row.get(key) if isinstance(row, dict) else {}
+    if not isinstance(payload, dict):
+        return ''
+    return str(payload.get('error') or payload.get('response_sample') or '').strip().lower()
+
+
+def _runtime_status_for_model(model_id: str, row: dict[str, Any] | None) -> str:
+    if not is_text_compatible_model(model_id):
+        return 'non_chat_incompatible'
+    if not row:
+        return 'discovered'
+    chat_ok = _endpoint_ok(row, 'chat_completions')
+    responses_ok = _endpoint_ok(row, 'responses')
+    if chat_ok and responses_ok:
+        return 'routable'
+    combined_error = ' '.join(filter(None, (_endpoint_error(row, 'chat_completions'), _endpoint_error(row, 'responses'))))
+    if any(marker in combined_error for marker in _RUNTIME_BLOCK_MARKERS):
+        return 'blocked'
+    if chat_ok:
+        return 'chat_only'
+    if responses_ok:
+        return 'responses_only'
+    return 'probe_failed'
+
+
+def build_runtime_model_template_manifest(
+    models: list[str],
+    *,
+    validated_rows: list[dict[str, Any]] | None = None,
+    base_url: str = '',
+    default_model: str = '',
+) -> dict[str, Any]:
+    compatible = sorted({str(model).strip() for model in models if str(model).strip()}, key=_family_rank)
+    validated_map = _validated_row_map(validated_rows)
+    roles = ('code_parallel', 'review_primary', 'plan_primary', 'test_primary', 'docs_primary', 'research_primary')
+    rows: list[dict[str, Any]] = []
+    for model in compatible:
+        status = _runtime_status_for_model(model, validated_map.get(model))
+        role_scores = {role: _template_score(model, role) for role in roles}
+        recommended_roles = [name for name, _ in sorted(role_scores.items(), key=lambda item: (-float(item[1]), item[0]))[:3]]
+        row = validated_map.get(model) or {}
+        rows.append({
+            'model_name': model,
+            'family': _family_name(model),
+            'tier': _profile_tier(model),
+            'status': status,
+            'discovered': True,
+            'chat_compatible': is_text_compatible_model(model),
+            'default_candidate': model == str(default_model or '').strip(),
+            'kernel_eligible': status == 'routable',
+            'fallback_candidate': status in {'routable', 'discovered', 'chat_only'},
+            'preferred_task_types': _template_preferred_task_types(model),
+            'strengths': _template_strengths(model),
+            'recommended_roles': recommended_roles,
+            'role_scores': role_scores,
+            'endpoint_capabilities': {
+                'models': True,
+                'chat_completions': _endpoint_ok(row, 'chat_completions'),
+                'responses': _endpoint_ok(row, 'responses'),
+            },
+            'probe': {
+                'chat_completions': row.get('chat_completions', {}) if isinstance(row, dict) else {},
+                'responses': row.get('responses', {}) if isinstance(row, dict) else {},
+            },
+        })
+    summary = {
+        'total_models': len(rows),
+        'routable_count': sum(1 for row in rows if row['status'] == 'routable'),
+        'discovered_count': sum(1 for row in rows if row['status'] == 'discovered'),
+        'blocked_count': sum(1 for row in rows if row['status'] == 'blocked'),
+        'partial_count': sum(1 for row in rows if row['status'] in {'chat_only', 'responses_only'}),
+        'non_chat_count': sum(1 for row in rows if row['status'] == 'non_chat_incompatible'),
+        'probe_failed_count': sum(1 for row in rows if row['status'] == 'probe_failed'),
+    }
+    by_status: dict[str, list[str]] = {}
+    for row in rows:
+        by_status.setdefault(str(row['status']), []).append(str(row['model_name']))
+    return {
+        'generated_at': int(time.time()),
+        'provider': 'openai',
+        'base_url': base_url,
+        'default_model': str(default_model or '').strip(),
+        'summary': summary,
+        'status_index': by_status,
+        'models': rows,
+    }
+
+
 def build_orchestrator_templates(models: list[str], *, base_url: str = '') -> dict[str, Any]:
     compatible = sorted({str(model).strip() for model in models if is_text_compatible_model(model)}, key=_family_rank)
     roles = ('code_parallel', 'review_primary', 'plan_primary', 'test_primary', 'docs_primary', 'research_primary')
@@ -286,13 +400,20 @@ def build_orchestrator_templates(models: list[str], *, base_url: str = '') -> di
     }
 
 
-def sync_openai_compatible_artifacts(models: list[str], *, base_url: str = '') -> dict[str, object]:
+def sync_openai_compatible_artifacts(
+    models: list[str],
+    *,
+    base_url: str = '',
+    validated_rows: list[dict[str, Any]] | None = None,
+    default_model: str = '',
+) -> dict[str, object]:
     compatible = sorted({str(model).strip() for model in models if is_text_compatible_model(model)}, key=_family_rank)
     openai_family = [model for model in compatible if is_openai_family_model(model)]
     cache_path = Path(os.getenv('OPENAI_MODELS_CACHE_PATH', 'core/.cache/openai_models.json'))
     full_cache_path = Path(os.getenv('OPENAI_MODELS_FULL_CACHE_PATH', 'core/.cache/openai_models_full.json'))
     generated_root = Path(os.getenv('OPENAI_GENERATED_PROFILE_DIR', 'core/mimo/profiles/generated/openai_compatible'))
     templates_path = Path(os.getenv('OPENAI_ORCHESTRATOR_TEMPLATES_PATH', str(generated_root / 'orchestrator_templates.json')))
+    model_template_manifest_path = Path(os.getenv('OPENAI_MODEL_TEMPLATE_MANIFEST_PATH', str(generated_root / 'model_template_manifest.json')))
     models_dir = generated_root / 'models'
     combos_dir = generated_root / 'combinations'
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +447,15 @@ def sync_openai_compatible_artifacts(models: list[str], *, base_url: str = '') -
     templates_path.parent.mkdir(parents=True, exist_ok=True)
     templates_path.write_text(json.dumps(template_payload, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
 
+    model_template_manifest = build_runtime_model_template_manifest(
+        compatible,
+        validated_rows=validated_rows,
+        base_url=base_url,
+        default_model=default_model,
+    )
+    model_template_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    model_template_manifest_path.write_text(json.dumps(model_template_manifest, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
+
     endpoint_manifest = openai_endpoint_manifest(resolve_openai_provider_config())
     generated_manifest = {
         'generated_at': ts,
@@ -336,6 +466,7 @@ def sync_openai_compatible_artifacts(models: list[str], *, base_url: str = '') -
         'model_profiles': generated_model_files,
         'combo_profiles': generated_combo_files,
         'orchestrator_templates': str(templates_path.relative_to(generated_root)) if templates_path.is_relative_to(generated_root) else str(templates_path),
+        'model_template_manifest': str(model_template_manifest_path.relative_to(generated_root)) if model_template_manifest_path.is_relative_to(generated_root) else str(model_template_manifest_path),
         'endpoint_manifest': endpoint_manifest,
     }
     (generated_root / 'manifest.json').write_text(json.dumps(generated_manifest, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
@@ -350,7 +481,9 @@ def sync_openai_compatible_artifacts(models: list[str], *, base_url: str = '') -
         'openai_family_models': openai_family,
         'generated_profile_root': str(generated_root),
         'orchestrator_templates_path': str(templates_path),
+        'model_template_manifest_path': str(model_template_manifest_path),
         'endpoint_manifest': endpoint_manifest,
+        'model_template_manifest': model_template_manifest,
     }
     full_cache_path.parent.mkdir(parents=True, exist_ok=True)
     full_cache_path.write_text(json.dumps(full_payload, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
@@ -359,6 +492,8 @@ def sync_openai_compatible_artifacts(models: list[str], *, base_url: str = '') -
         'full_cache_path': str(full_cache_path),
         'generated_profile_root': str(generated_root),
         'orchestrator_templates_path': str(templates_path),
+        'model_template_manifest_path': str(model_template_manifest_path),
+        'model_template_manifest': model_template_manifest,
         'total_models': len(compatible),
         'openai_family_count': len(openai_family),
     }

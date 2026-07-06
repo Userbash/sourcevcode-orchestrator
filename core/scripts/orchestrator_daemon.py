@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import sys
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -26,6 +28,8 @@ load_env_file("/app/.env.bridge")
 from core.core.orchestrator import Orchestrator
 from core.agents.planner_agent import PlannerAgent
 from core.agents.codex_agent import CodexAgent
+from core.agents.distributed_coder_agent import DistributedCoderAgent
+from core.agents.result_merger_agent import ResultMergerAgent
 from core.agents.antigravity_cli_agent import AntigravityCLIAgent
 from core.agents.mistral_agent import MistralAgent
 from core.agents.reviewer_agent import ReviewerAgent
@@ -34,11 +38,46 @@ from core.agents.local_llm_agent import LocalLLMAgent
 from core.agents.ai_kernel_agent import AIKernelAgent
 from core.agents.mimo_agent import MimoAgent
 from core.core.orchestration_config import OrchestrationConfig
+from core.core.orchestrator_transport import (
+    ai_kernel_ensure_payload,
+    ai_kernel_gate_payload,
+    diagnostics_payload,
+    health_payload,
+    local_llm_connect_payload,
+    local_llm_disconnect_payload,
+    local_llm_residents_payload,
+    local_llm_warm_payload,
+    provider_inventory_payload,
+    provider_inventory_single_payload,
+    provider_inventory_stream,
+    provider_model_lookup_payload,
+    provider_models_index_payload,
+    provider_models_index_stream,
+    provider_runtime_inventory_all_payload,
+    provider_runtime_inventory_single_payload,
+    provider_runtime_inventory_stream,
+    runtime_events_stream,
+    socraticode_context_compaction_status_payload,
+    socraticode_context_compaction_status_stream,
+    transport_audit_payload,
+)
 from core.core.security import SecurityManager, SecurityPolicy
 from core.core.provider_credentials import has_usable_credential
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("orchestrator_daemon")
+
+REQUIRED_HTTP_ENDPOINTS = (
+    "/health",
+    "/health/full",
+    "/providers/inventory",
+    "/providers/runtime_inventory",
+    "/providers/models/index",
+    "/providers/ai_kernel/gate",
+    "/health/local_models",
+    "/sourcecraft",
+    "/diagnostics",
+)
 
 
 def _attach_optional_degraded_agents() -> bool:
@@ -58,9 +97,10 @@ def _attach_optional_local_agent(
     model_name: str,
     provider: str,
     critical: bool = False,
+    health_override=None,
 ) -> bool:
     try:
-        health = agent.health()
+        health = health_override if health_override is not None else agent.health()
         status_value = str(getattr(getattr(health, "status", None), "value", getattr(health, "status", "unknown"))).strip().lower()
         if status_value == "ready" or (_attach_optional_degraded_agents() and status_value == "degraded"):
             orchestrator.attach_local_agent(
@@ -85,12 +125,185 @@ def _attach_optional_local_agent(
         return False
 
 
+def _optional_agent_specs(security_manager: SecurityManager) -> list[dict[str, object]]:
+    return [
+        {
+            "agent_id": "antigravity-1",
+            "factory": lambda: AntigravityCLIAgent("antigravity-1", security_manager),
+            "agent_type": "external_ai",
+            "critical": False,
+            "model_name": os.getenv("ANTIGRAVITY_DEFAULT_MODEL", "antigravity-pro"),
+            "provider": "antigravity",
+        },
+        {
+            "agent_id": "mistral-1",
+            "factory": lambda: MistralAgent("mistral-1", security_manager),
+            "agent_type": "external_ai",
+            "critical": False,
+            "model_name": "mistral-large-latest",
+            "provider": "mistral",
+        },
+        {
+            "agent_id": "local-llm-1",
+            "factory": lambda: LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")),
+            "agent_type": "custom",
+            "critical": False,
+            "model_name": os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"),
+            "provider": "local",
+        },
+        {
+            "agent_id": "ai-kernel-qwen36-1",
+            "factory": lambda: AIKernelAgent("ai-kernel-qwen36-1"),
+            "agent_type": "custom",
+            "critical": False,
+            "model_name": os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"),
+            "provider": "ai_kernel",
+        },
+        {
+            "agent_id": "mimo-router-1",
+            "factory": lambda: MimoAgent("mimo-router-1", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro")),
+            "agent_type": "external_ai",
+            "critical": False,
+            "model_name": os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"),
+            "provider": "mimo",
+        },
+    ]
+
+
+def _probe_optional_agent(spec: dict[str, object]) -> tuple[dict[str, object], object, object | None, Exception | None]:
+    agent = None
+    try:
+        factory = spec["factory"]
+        agent = factory()
+        health = agent.health()
+        return spec, agent, health, None
+    except Exception as exc:
+        return spec, agent, None, exc
+
+
+def _background_startup(orchestrator: Orchestrator, security_manager: SecurityManager, *, openai_key: bool, codex_model: str) -> None:
+    try:
+        orchestrator._refresh_provider_inventory_snapshot(force_refresh=True)
+    except Exception as exc:
+        logger.warning(f"[INVENTORY] background warm refresh failed: {exc}")
+
+    try:
+        worker_sync = orchestrator.sync_openai_template_workers(enabled=openai_key, primary_model=codex_model)
+        if worker_sync.get("attached") or worker_sync.get("removed"):
+            logger.info(f"[AGENTS] OpenAI-compatible worker sync: {worker_sync}")
+    except Exception as exc:
+        logger.warning(f"[AGENTS] background worker sync failed: {exc}")
+
+    specs = _optional_agent_specs(security_manager)
+    max_workers = max(1, min(len(specs), int(os.getenv("AI_BRIDGE_OPTIONAL_AGENT_STARTUP_WORKERS", "5") or "5")))
+    results: dict[str, tuple[dict[str, object], object, object | None, Exception | None]] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="optional-agent") as executor:
+        future_map = {executor.submit(_probe_optional_agent, spec): str(spec["agent_id"]) for spec in specs}
+        for future in as_completed(future_map):
+            agent_id = future_map[future]
+            try:
+                results[agent_id] = future.result()
+            except Exception as exc:
+                results[agent_id] = ({"agent_id": agent_id}, None, None, exc)
+
+    for spec in specs:
+        agent_id = str(spec["agent_id"])
+        result_spec, agent, health, exc = results.get(agent_id, (spec, None, None, RuntimeError("missing_startup_probe_result")))
+        if exc is not None or agent is None:
+            logger.warning("[AGENTS] Optional agent %s provider=%s startup healthcheck failed: %s", agent_id, spec.get("provider"), exc)
+            continue
+        _attach_optional_local_agent(
+            orchestrator,
+            agent_id,
+            agent,
+            agent_type=str(result_spec["agent_type"]),
+            critical=bool(result_spec["critical"]),
+            model_name=str(result_spec["model_name"]),
+            provider=str(result_spec["provider"]),
+            health_override=health,
+        )
+
+    logger.info(f"[STARTUP] Background startup complete. Agents bound: {len(orchestrator.registry.list_agents())}")
+
+
+def _launch_background_startup(orchestrator: Orchestrator, security_manager: SecurityManager, *, openai_key: bool, codex_model: str) -> None:
+    thread = threading.Thread(
+        target=_background_startup,
+        kwargs={
+            "orchestrator": orchestrator,
+            "security_manager": security_manager,
+            "openai_key": openai_key,
+            "codex_model": codex_model,
+        },
+        name="orchestrator-background-startup",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _resolve_http_port() -> int:
+    raw = (
+        os.getenv("AI_BRIDGE_API_PORT")
+        or os.getenv("ORCHESTRATOR_PORT")
+        or "8000"
+    ).strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return 8000
+
+
+def _assert_required_http_routes(app) -> None:
+    routes = {getattr(route, "path", "") for route in getattr(app, "routes", [])}
+    missing = [path for path in REQUIRED_HTTP_ENDPOINTS if path not in routes]
+    if missing:
+        raise RuntimeError(
+            "orchestrator http app missing required routes: " + ", ".join(missing)
+        )
+
+
 def _build_http_app(orchestrator: Orchestrator):
     from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
     from fastapi.responses import JSONResponse
 
     app = FastAPI(title="AI Orchestrator Kernel API")
     _orch = orchestrator
+
+    def _response(payload: dict, status_code: int = 200):
+        if status_code == 200:
+            return payload
+        return JSONResponse(payload, status_code=status_code)
+
+    def _usage_snapshot() -> dict:
+        usage_mod = _orch.module_manager.get_module("model_usage") if hasattr(_orch, "module_manager") else None
+        return usage_mod.finalize() if usage_mod and hasattr(usage_mod, "finalize") else {}
+
+    def _suppression_snapshot() -> dict:
+        return _orch.provider_budget_router.suppression_snapshot() if hasattr(_orch, "provider_budget_router") else {}
+
+    def _local_llm_module():
+        if hasattr(_orch, 'module_manager') and hasattr(_orch.module_manager, 'get_module'):
+            return _orch.module_manager.get_module('local_llm')
+        if hasattr(_orch, 'get_module'):
+            return _orch.get_module('local_llm')
+        return None
+
+    def _resident_rows(module) -> list[dict]:
+        runtime = getattr(module, 'runtime', None)
+        if runtime is None or not hasattr(runtime, 'list_resident_models_sync'):
+            return []
+        rows = []
+        for item in runtime.list_resident_models_sync() or []:
+            rows.append({
+                'name': str(getattr(item, 'name', '') or ''),
+                'size': getattr(item, 'size', None),
+                'size_vram': getattr(item, 'size_vram', None),
+                'expires_at': getattr(item, 'expires_at', None),
+                'digest': getattr(item, 'digest', None),
+                'details': getattr(item, 'details', {}) or {},
+            })
+        return rows
 
     def _negotiate_subprotocol(websocket) -> str | None:
         requested = websocket.headers.get("sec-websocket-protocol", "")
@@ -103,11 +316,17 @@ def _build_http_app(orchestrator: Orchestrator):
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "service": "orchestrator", "ts": datetime.now(UTC).isoformat()}
+        payload, status_code = health_payload()
+        return _response(payload, status_code)
 
     @app.get("/health/full")
     def health_full():
         try:
+            if os.getenv("AI_BRIDGE_AI_KERNEL_HEALTH_AUTOSTART", "true").strip().lower() in {"1", "true", "yes", "on"}:
+                try:
+                    _orch.ai_kernel_bridge.ensure_ready(os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"))
+                except Exception as exc:
+                    logger.warning(f"[HEALTH] AI Kernel ensure_ready failed during /health/full: {exc}")
             full = _orch.healthcheck.check_all()
             module_state = _orch.module_state()
             agent_healths = [h.as_dict() for h in full]
@@ -138,7 +357,7 @@ def _build_http_app(orchestrator: Orchestrator):
                 "registry_size": len(_orch.registry.list_agents()),
             }
         except Exception as exc:
-            return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.get("/api/health")
     def api_health():
@@ -172,7 +391,148 @@ def _build_http_app(orchestrator: Orchestrator):
             payload = _orch.provider_inventory.refresh_openai_runtime_inventory(force_refresh=force_refresh, probe_limit=probe_limit)
             return {"status": "ok", "data": payload}
         except Exception as exc:
-            return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/openai/discovery")
+    def openai_discovery():
+        try:
+            from core.core.openai_bazzite_endpoint import load_openai_endpoint_discovery
+            return {"status": "ok", "data": load_openai_endpoint_discovery()}
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/openai/model_templates")
+    def openai_model_templates(force_refresh: bool = False, probe_limit: int | None = None):
+        try:
+            payload = _orch.provider_inventory.refresh_openai_runtime_inventory(force_refresh=force_refresh, probe_limit=probe_limit)
+            return {"status": "ok", "data": payload.get("model_templates", {})}
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/inventory")
+    def provider_inventory(force_refresh: bool = False):
+        try:
+            payload, status_code = provider_inventory_payload(_orch, force_refresh=force_refresh)
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/{provider}/inventory")
+    def provider_inventory_single(provider: str, force_refresh: bool = False):
+        try:
+            payload, status_code = provider_inventory_single_payload(_orch, provider, force_refresh=force_refresh)
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/runtime_inventory")
+    def provider_runtime_inventory_all(force_refresh: bool = False, probe_limit: int | None = None):
+        try:
+            payload, status_code = provider_runtime_inventory_all_payload(
+                _orch,
+                force_refresh=force_refresh,
+                probe_limit=probe_limit,
+            )
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/{provider}/runtime_inventory")
+    def provider_runtime_inventory_single(provider: str, force_refresh: bool = False, probe_limit: int | None = None):
+        try:
+            payload, status_code = provider_runtime_inventory_single_payload(
+                _orch,
+                provider,
+                force_refresh=force_refresh,
+                probe_limit=probe_limit,
+            )
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/models/index")
+    def provider_models_index(force_refresh: bool = False):
+        try:
+            payload, status_code = provider_models_index_payload(_orch, force_refresh=force_refresh)
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/providers/models/index/{model_name:path}")
+    def provider_model_lookup(model_name: str, force_refresh: bool = False):
+        try:
+            payload, status_code = provider_model_lookup_payload(_orch, model_name, force_refresh=force_refresh)
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.get("/socraticode/context_compaction/status")
+    def socraticode_context_compaction_status():
+        try:
+            payload, status_code = socraticode_context_compaction_status_payload(_orch)
+            return _response(payload, status_code)
+        except Exception as exc:
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+    @app.websocket("/ws/providers/inventory")
+    async def provider_inventory_ws(websocket: WebSocket):
+        protocol = _negotiate_subprotocol(websocket)
+        await websocket.accept(subprotocol=protocol)
+        try:
+            async for event in provider_inventory_stream(_orch):
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
+
+    @app.websocket("/ws/providers/runtime_inventory")
+    async def provider_runtime_inventory_ws(websocket: WebSocket):
+        protocol = _negotiate_subprotocol(websocket)
+        await websocket.accept(subprotocol=protocol)
+        try:
+            async for event in provider_runtime_inventory_stream(_orch):
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
+
+    @app.websocket("/ws/providers/models/index")
+    async def provider_models_index_ws(websocket: WebSocket):
+        protocol = _negotiate_subprotocol(websocket)
+        await websocket.accept(subprotocol=protocol)
+        try:
+            async for event in provider_models_index_stream(_orch):
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
+
+    @app.get("/providers/local_llm/residents")
+    def local_llm_residents():
+        payload, status_code = local_llm_residents_payload(_orch)
+        return _response(payload, status_code)
+
+    @app.post("/providers/local_llm/connect")
+    def local_llm_connect(payload: dict):
+        payload, status_code = local_llm_connect_payload(_orch, payload)
+        return _response(payload, status_code)
+
+    @app.post("/providers/local_llm/disconnect")
+    def local_llm_disconnect(payload: dict):
+        payload, status_code = local_llm_disconnect_payload(_orch, payload)
+        return _response(payload, status_code)
+
+    @app.post("/providers/local_llm/warm")
+    def local_llm_warm(payload: dict):
+        payload, status_code = local_llm_warm_payload(_orch, payload)
+        return _response(payload, status_code)
+
+    @app.get("/providers/ai_kernel/gate")
+    def ai_kernel_gate(ensure_ready: bool = False, model_name: str | None = None):
+        payload, status_code = ai_kernel_gate_payload(_orch, ensure_ready=ensure_ready, model_name=model_name)
+        return _response(payload, status_code)
+
+    @app.post("/providers/ai_kernel/ensure")
+    def ai_kernel_ensure(payload: dict | None = None):
+        payload, status_code = ai_kernel_ensure_payload(_orch, payload or {})
+        return _response(payload, status_code)
 
     @app.get("/health/local_models")
     def local_model_health():
@@ -214,7 +574,7 @@ def _build_http_app(orchestrator: Orchestrator):
                 "module": final,
             }
         except Exception as exc:
-            return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.post("/sourcecraft/delegate")
     def sourcecraft_delegate(payload: dict):
@@ -245,43 +605,23 @@ def _build_http_app(orchestrator: Orchestrator):
                 "schedule": schedule,
             }
         except Exception as exc:
-            return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
+                return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
+
+
+
+    @app.get("/transport/audit")
+    def transport_audit():
+        try:
+            payload, status_code = transport_audit_payload(_orch)
+            return _response(payload, status_code)
+        except Exception as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.get("/diagnostics")
     async def diagnostics(layer: list[str] | None = Query(default=None), matrix_only: bool = False):
         try:
-            diag_module = _orch.get_module("self_diagnostic") if hasattr(_orch, "get_module") else None
-            if not diag_module:
-                return JSONResponse(
-                    {
-                        "status": "error",
-                        "error": "self_diagnostic module not found",
-                        "failure_code": "SELF_DIAGNOSTIC_MODULE_UNAVAILABLE",
-                    },
-                    status_code=503,
-                )
-            payload = await diag_module.run_diagnostics(layers=layer or None, matrix_only=matrix_only)
-            if not isinstance(payload, dict):
-                return JSONResponse(
-                    {
-                        "status": "error",
-                        "error": "diagnostics payload is not a JSON object",
-                        "failure_code": "HTTP_DIAGNOSTICS_PAYLOAD_INVALID",
-                    },
-                    status_code=500,
-                )
-            required = {"schema_version", "layers", "matrix"} if matrix_only else {"schema_version"}
-            missing = sorted(field for field in required if field not in payload)
-            if missing:
-                return JSONResponse(
-                    {
-                        "status": "error",
-                        "error": f"diagnostics payload missing required fields: {', '.join(missing)}",
-                        "failure_code": "HTTP_DIAGNOSTICS_PAYLOAD_INVALID",
-                    },
-                    status_code=500,
-                )
-            return JSONResponse(payload)
+            payload, status_code = await diagnostics_payload(_orch, layers=layer or None, matrix_only=matrix_only)
+            return _response(payload, status_code)
         except Exception as exc:
             return JSONResponse(
                 {
@@ -291,6 +631,26 @@ def _build_http_app(orchestrator: Orchestrator):
                 },
                 status_code=500,
             )
+
+    @app.websocket("/ws/runtime/events")
+    async def runtime_events_ws(websocket: WebSocket):
+        protocol = _negotiate_subprotocol(websocket)
+        await websocket.accept(subprotocol=protocol)
+        try:
+            async for event in runtime_events_stream(_orch):
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
+
+    @app.websocket("/ws/socraticode/context_compaction/status")
+    async def socraticode_context_compaction_status_ws(websocket: WebSocket):
+        protocol = _negotiate_subprotocol(websocket)
+        await websocket.accept(subprotocol=protocol)
+        try:
+            async for event in socraticode_context_compaction_status_stream(_orch):
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
 
     @app.websocket("/chat/ws")
     async def chat_ws(websocket: WebSocket):
@@ -358,7 +718,8 @@ def _start_http_server(orchestrator: Orchestrator) -> None:
     import uvicorn
 
     app = _build_http_app(orchestrator)
-    port = int(os.getenv("ORCHESTRATOR_PORT", "8000"))
+    _assert_required_http_routes(app)
+    port = _resolve_http_port()
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -393,70 +754,18 @@ async def main():
         codex_provider = "local"
         codex_model = "local-small"
 
-    try:
-        orchestrator._refresh_provider_inventory_snapshot(force_refresh=True)
-    except Exception as exc:
-        logger.warning(f"[INVENTORY] warm refresh before worker attach failed: {exc}")
-
     if _attach_placeholder_agents():
         orchestrator.attach_local_agent("planner-1", PlannerAgent("planner-1"), agent_type="planner", critical=True, model_name="gpt-planner", provider="openai")
     orchestrator.attach_local_agent("codex-main", CodexAgent("codex-main"), agent_type="codex", critical=True, model_name=codex_model, provider=codex_provider)
-    worker_sync = orchestrator.sync_openai_template_workers(enabled=openai_key, primary_model=codex_model)
-    if worker_sync.get("attached") or worker_sync.get("removed"):
-        logger.info(f"[AGENTS] OpenAI-compatible worker sync: {worker_sync}")
-    _attach_optional_local_agent(
-        orchestrator,
-        "antigravity-1",
-        AntigravityCLIAgent("antigravity-1", security_manager),
-        agent_type="external_ai",
-        critical=False,
-        model_name=os.getenv("ANTIGRAVITY_DEFAULT_MODEL", "antigravity-pro"),
-        provider="antigravity",
-    )
-    _attach_optional_local_agent(
-        orchestrator,
-        "mistral-1",
-        MistralAgent("mistral-1", security_manager),
-        agent_type="external_ai",
-        critical=False,
-        model_name="mistral-large-latest",
-        provider="mistral",
-    )
     if _attach_placeholder_agents():
         orchestrator.attach_local_agent("tester-1", TesterAgent("tester-1"), agent_type="tester", model_name="gpt-test-standard", provider="openai")
         orchestrator.attach_local_agent("reviewer-1", ReviewerAgent("reviewer-1"), agent_type="reviewer", model_name="gpt-review-large", provider="openai")
-    _attach_optional_local_agent(
-        orchestrator,
-        "local-llm-1",
-        LocalLLMAgent("local-llm-1", os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m")),
-        agent_type="custom",
-        critical=False,
-        model_name=os.getenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5:32b-instruct-q4_k_m"),
-        provider="local",
-    )
-    _attach_optional_local_agent(
-        orchestrator,
-        "ai-kernel-qwen36-1",
-        AIKernelAgent("ai-kernel-qwen36-1"),
-        agent_type="custom",
-        critical=False,
-        model_name=os.getenv("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"),
-        provider="ai_kernel",
-    )
-    mimo_agent = MimoAgent("mimo-router-1", default_model=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"))
-    _attach_optional_local_agent(
-        orchestrator,
-        "mimo-router-1",
-        mimo_agent,
-        agent_type="external_ai",
-        critical=False,
-        model_name=os.getenv("AI_BRIDGE_MIMO_DEFAULT_MODEL", "xiaomi/mimo-v2.5-pro"),
-        provider="mimo",
-    )
+    orchestrator.attach_local_agent("distributed-coder-1", DistributedCoderAgent(), agent_type="custom", critical=False, model_name="distributed-coder-core", provider="local")
+    orchestrator.attach_local_agent("result-merger", ResultMergerAgent(), agent_type="custom", critical=False, model_name="result-merger-core", provider="local")
 
     _start_http_server(orchestrator)
-
     logger.info(f"System Ready. Agents bound: {len(orchestrator.registry.list_agents())}")
+    _launch_background_startup(orchestrator, security_manager, openai_key=openai_key, codex_model=codex_model)
     await orchestrator.listen_for_tasks()
 
 

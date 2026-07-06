@@ -1,5 +1,5 @@
 {
-  "generated_at": 1782199527,
+  "generated_at": 1783326030,
   "provider": "openai",
   "base_url": "https://codex.sale/v1",
   "template_count": 48,
@@ -88,25 +88,6 @@
       {
         "role": "code_parallel",
         "provider": "openai",
-        "model_name": "claude-opus-4-5",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.18
-      },
-      {
-        "role": "code_parallel",
-        "provider": "openai",
         "model_name": "claude-opus-4-6",
         "family": "claude",
         "tier": "frontier",
@@ -160,6 +141,24 @@
           "review"
         ],
         "score": 1.18
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.08
       }
     ],
     "review_primary": [
@@ -246,25 +245,6 @@
       {
         "role": "review_primary",
         "provider": "openai",
-        "model_name": "claude-opus-4-5",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.24
-      },
-      {
-        "role": "review_primary",
-        "provider": "openai",
         "model_name": "claude-opus-4-6",
         "family": "claude",
         "tier": "frontier",
@@ -318,6 +298,24 @@
           "review"
         ],
         "score": 1.24
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.06
       }
     ],
     "plan_primary": [
@@ -404,25 +402,6 @@
       {
         "role": "plan_primary",
         "provider": "openai",
-        "model_name": "claude-opus-4-5",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "plan_primary",
-        "provider": "openai",
         "model_name": "claude-opus-4-6",
         "family": "claude",
         "tier": "frontier",
@@ -476,6 +455,24 @@
           "review"
         ],
         "score": 1.22
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.06
       }
     ],
     "test_primary": [
@@ -562,25 +559,6 @@
       {
         "role": "test_primary",
         "provider": "openai",
-        "model_name": "claude-opus-4-5",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.1
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
         "model_name": "claude-opus-4-6",
         "family": "claude",
         "tier": "frontier",
@@ -634,6 +612,24 @@
           "review"
         ],
         "score": 1.1
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.05
       }
     ],
     "docs_primary": [
@@ -717,25 +713,6 @@
       {
         "role": "docs_primary",
         "provider": "openai",
-        "model_name": "claude-opus-4-5",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.16
-      },
-      {
-        "role": "docs_primary",
-        "provider": "openai",
         "model_name": "claude-opus-4-6",
         "family": "claude",
         "tier": "frontier",
@@ -789,6 +766,24 @@
           "review"
         ],
         "score": 1.16
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2.5-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.1
       }
     ],
     "research_primary": [
@@ -875,25 +870,6 @@
       {
         "role": "research_primary",
         "provider": "openai",
-        "model_name": "claude-opus-4-5",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "research_primary",
-        "provider": "openai",
         "model_name": "claude-opus-4-6",
         "family": "claude",
         "tier": "frontier",
@@ -947,6 +923,24 @@
           "review"
         ],
         "score": 1.22
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2-pro",
+        "family": "mimo",
+        "tier": "frontier",
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "drafting"
+        ],
+        "score": 1.06
       }
     ]
   },

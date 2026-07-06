@@ -87,6 +87,27 @@ class PromptOptimizerModule:
         return profile if isinstance(profile, dict) else {}
 
     @staticmethod
+    def _task_hints(task: Task) -> dict[str, Any]:
+        return task.routing_hints if isinstance(task.routing_hints, dict) else {}
+
+    @classmethod
+    def _frame_package(cls, task: Task) -> dict[str, Any]:
+        package = cls._task_hints(task).get("frame_orchestrator")
+        return package if isinstance(package, dict) else {}
+
+    @classmethod
+    def _frame_xml_package(cls, task: Task) -> str:
+        xml = cls._task_hints(task).get("frame_xml_package")
+        return str(xml).strip() if isinstance(xml, str) else ""
+
+    @classmethod
+    def _uses_internal_chat_ingress(cls, task: Task) -> bool:
+        hints = cls._task_hints(task)
+        source = str(hints.get("source") or "").strip().lower()
+        ingress = str(hints.get("ingress_path") or "").strip().lower()
+        return source == "websocket" or ingress == "websocket_internal_chat" or bool(hints.get("external_chat"))
+
+    @staticmethod
     def _task_type_label(task: Task) -> str:
         task_type = getattr(task, "type", None)
         return str(getattr(task_type, "value", task_type) or "unknown")
@@ -430,6 +451,22 @@ class PromptOptimizerModule:
             context_lines.append(f"constraints: {', '.join(task.input.constraints)}")
         if task.input.acceptance_criteria:
             context_lines.append(f"acceptance_criteria: {', '.join(task.input.acceptance_criteria)}")
+        hints = self._task_hints(task)
+        if self._uses_internal_chat_ingress(task):
+            context_lines.append(f"ingress_path: {str(hints.get('ingress_path') or 'websocket_internal_chat')}")
+            context_lines.append(f"text_preparation_mode: {str(hints.get('text_preparation_mode') or 'automatic')}")
+        frame_package = self._frame_package(task)
+        if frame_package:
+            validation = frame_package.get("validation") if isinstance(frame_package.get("validation"), dict) else {}
+            semantic_gap = frame_package.get("semantic_gap") if isinstance(frame_package.get("semantic_gap"), dict) else {}
+            roles = validation.get("worker_roles") if isinstance(validation.get("worker_roles"), list) else []
+            role_names = [str(item.get("role") or "").strip() for item in roles if isinstance(item, dict) and str(item.get("role") or "").strip()]
+            gaps = [str(item).strip() for item in (semantic_gap.get("gap_scanner") or []) if str(item).strip()]
+            if role_names:
+                context_lines.append(f"frame_worker_roles: {', '.join(role_names)}")
+            if gaps:
+                context_lines.append(f"frame_semantic_gaps: {', '.join(gaps[:6])}")
+            context_lines.append(f"frame_contract_status: {str(frame_package.get('status') or 'validated')}")
         profile = self._normalized_text_profile(task)
         if profile:
             context_lines.append(
@@ -505,6 +542,10 @@ class PromptOptimizerModule:
             requirements.append("parallelize only independent branches and keep a final consolidation step.")
         if str(profile.get("decision_trust") or "") == "rough_hint":
             requirements.append("validate intent and scope before acting because intake quantization confidence is limited.")
+        if self._uses_internal_chat_ingress(task):
+            requirements.append("treat websocket/internal chat ingress as the authoritative upstream transport and preserve automatic text preparation.")
+        if self._frame_xml_package(task):
+            requirements.append("use the embedded frame_xml_package as the authoritative orchestration contract before implementation.")
         if not requirements:
             requirements.append("derive explicit requirements from the objective before executing.")
         return requirements
@@ -755,6 +796,60 @@ class PromptOptimizerModule:
         guidance = [str(item).strip() for item in (layered.get("prompt_guidance") or []) if str(item).strip()]
         if guidance:
             refined = "\n".join([refined, "PROMPT GUIDANCE:", *[f"- {item}" for item in guidance[:6]]])
+        frame_package = self._frame_package(task)
+        if frame_package:
+            validation = frame_package.get("validation") if isinstance(frame_package.get("validation"), dict) else {}
+            semantic_gap = frame_package.get("semantic_gap") if isinstance(frame_package.get("semantic_gap"), dict) else {}
+            socraticode = frame_package.get("socraticode") if isinstance(frame_package.get("socraticode"), dict) else {}
+            socraticode_compaction = frame_package.get("socraticode_context_compaction") if isinstance(frame_package.get("socraticode_context_compaction"), dict) else {}
+            frame_lines: list[str] = []
+            best_practices = [str(item).strip() for item in (validation.get("best_practices_generation") or []) if str(item).strip()]
+            architectural_fixes = [str(item).strip() for item in (validation.get("architectural_fixes") or []) if str(item).strip()]
+            gap_scanner = [str(item).strip() for item in (semantic_gap.get("gap_scanner") or []) if str(item).strip()]
+            if gap_scanner:
+                frame_lines.append("frame_gap_scanner: " + ", ".join(gap_scanner[:8]))
+            if best_practices:
+                frame_lines.append("frame_best_practices: " + "; ".join(best_practices[:4]))
+            if architectural_fixes:
+                frame_lines.append("frame_architectural_fixes: " + "; ".join(architectural_fixes[:4]))
+            if socraticode:
+                status = str(socraticode.get("status") or "").strip()
+                score = socraticode.get("coverage_score")
+                coverage_status = str(socraticode.get("coverage_status") or "").strip()
+                provider = str(socraticode.get("preferred_provider") or "").strip()
+                parallel = socraticode.get("recommended_parallel_branches")
+                if status:
+                    frame_lines.append(f"socraticode_status: {status}")
+                if score is not None:
+                    frame_lines.append(f"socraticode_coverage: {score} ({coverage_status or 'n/a'})")
+                if provider:
+                    frame_lines.append(f"socraticode_preferred_provider: {provider}")
+                if parallel not in {None, ''}:
+                    frame_lines.append(f"socraticode_parallel_branches: {parallel}")
+                compact = str(socraticode.get("compact_context_summary") or "").strip()
+                if compact:
+                    refined = "\n".join([refined, "SOCRATICODE CONTEXT SNAPSHOT:", compact[:700]])
+            if socraticode_compaction:
+                mode = str(socraticode_compaction.get("compaction_mode") or "").strip()
+                strategy = str(socraticode_compaction.get("recommended_prompt_strategy") or "").strip()
+                source = str(socraticode_compaction.get("prompt_context_source") or "").strip()
+                reduction = str(socraticode_compaction.get("token_reduction_expected") or "").strip()
+                raw_allowed = socraticode_compaction.get("raw_file_dump_allowed")
+                if mode:
+                    frame_lines.append(f"socraticode_compaction_mode: {mode}")
+                if source:
+                    frame_lines.append(f"socraticode_context_source: {source}")
+                if reduction:
+                    frame_lines.append(f"socraticode_token_reduction_expected: {reduction}")
+                if raw_allowed is not None:
+                    frame_lines.append(f"socraticode_raw_file_dump_allowed: {raw_allowed}")
+                if strategy:
+                    refined = "\n".join([refined, "SOCRATICODE CONTEXT COMPACTION:", strategy])
+            if frame_lines:
+                refined = "\n".join([refined, "FRAME GUIDANCE:", *[f"- {item}" for item in frame_lines]])
+        frame_xml = self._frame_xml_package(task)
+        if frame_xml and self._uses_internal_chat_ingress(task):
+            refined = "\n".join([refined, "FRAME ORCHESTRATION PACKAGE:", frame_xml])
         return refined
 
     def before_task(self, task: Task, context: dict[str, Any]) -> None:

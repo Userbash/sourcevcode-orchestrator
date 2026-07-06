@@ -1,0 +1,1106 @@
+{
+  "generated_at": 1783326030,
+  "provider": "openai",
+  "base_url": "https://codex.sale/v1",
+  "default_model": "gpt-5.4",
+  "summary": {
+    "total_models": 22,
+    "routable_count": 0,
+    "discovered_count": 14,
+    "blocked_count": 0,
+    "partial_count": 1,
+    "non_chat_count": 0,
+    "probe_failed_count": 7
+  },
+  "status_index": {
+    "discovered": [
+      "gpt-5.5",
+      "gpt-5.4-mini",
+      "qwen3.5-plus",
+      "qwen3.6-plus",
+      "qwen3.7-max",
+      "qwen3.7-plus",
+      "kimi-k2.5",
+      "kimi-k2.6",
+      "glm-5",
+      "glm-5.1",
+      "mimo-v2-omni",
+      "mimo-v2-pro",
+      "mimo-v2.5",
+      "mimo-v2.5-pro"
+    ],
+    "responses_only": [
+      "gpt-5.4"
+    ],
+    "probe_failed": [
+      "claude-sonnet-4-6",
+      "claude-opus-4-6",
+      "claude-opus-4-7",
+      "claude-opus-4-8",
+      "claude-haiku-4-5",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro"
+    ]
+  },
+  "models": [
+    {
+      "model_name": "gpt-5.5",
+      "family": "gpt",
+      "tier": "frontier",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "docs",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "code_parallel",
+        "research_primary",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.22,
+        "review_primary": 1.2,
+        "plan_primary": 1.18,
+        "test_primary": 1.14,
+        "docs_primary": 1.18,
+        "research_primary": 1.2
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "gpt-5.4",
+      "family": "gpt",
+      "tier": "standard",
+      "status": "responses_only",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": true,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "docs",
+        "test"
+      ],
+      "strengths": [
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "code_parallel",
+        "research_primary",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.98,
+        "review_primary": 0.96,
+        "plan_primary": 0.94,
+        "test_primary": 0.9,
+        "docs_primary": 0.94,
+        "research_primary": 0.96
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": true
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"error\":{\"code\":\"upstream_unavailable\",\"edge_detail\":null,\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0443\u0442\u044c \u043f\u043e\u0437\u0436\u0435.\",\"param\":null,\"type\":\"server_error\"}}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "gpt-5.4-mini",
+      "family": "gpt",
+      "tier": "mini",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "docs",
+        "test",
+        "fix"
+      ],
+      "strengths": [
+        "fast_turnaround",
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "code_parallel",
+        "docs_primary",
+        "research_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.91,
+        "review_primary": 0.86,
+        "plan_primary": 0.84,
+        "test_primary": 0.8,
+        "docs_primary": 0.87,
+        "research_primary": 0.86
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "claude-sonnet-4-6",
+      "family": "claude",
+      "tier": "frontier",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "review",
+        "plan",
+        "code",
+        "research"
+      ],
+      "strengths": [
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "review_primary",
+        "plan_primary",
+        "research_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.18,
+        "review_primary": 1.24,
+        "plan_primary": 1.22,
+        "test_primary": 1.1,
+        "docs_primary": 1.16,
+        "research_primary": 1.22
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "claude-opus-4-6",
+      "family": "claude",
+      "tier": "frontier",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "review",
+        "plan",
+        "code",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "review_primary",
+        "plan_primary",
+        "research_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.18,
+        "review_primary": 1.24,
+        "plan_primary": 1.22,
+        "test_primary": 1.1,
+        "docs_primary": 1.16,
+        "research_primary": 1.22
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "claude-opus-4-7",
+      "family": "claude",
+      "tier": "frontier",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "review",
+        "plan",
+        "code",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "review_primary",
+        "plan_primary",
+        "research_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.18,
+        "review_primary": 1.24,
+        "plan_primary": 1.22,
+        "test_primary": 1.1,
+        "docs_primary": 1.16,
+        "research_primary": 1.22
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "claude-opus-4-8",
+      "family": "claude",
+      "tier": "frontier",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "review",
+        "plan",
+        "code",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "review_primary",
+        "plan_primary",
+        "research_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.18,
+        "review_primary": 1.24,
+        "plan_primary": 1.22,
+        "test_primary": 1.1,
+        "docs_primary": 1.16,
+        "research_primary": 1.22
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "claude-haiku-4-5",
+      "family": "claude",
+      "tier": "economy",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "review",
+        "plan",
+        "code",
+        "research",
+        "docs",
+        "test",
+        "fix"
+      ],
+      "strengths": [
+        "fast_turnaround",
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "review_primary",
+        "docs_primary",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.74,
+        "review_primary": 0.8,
+        "plan_primary": 0.78,
+        "test_primary": 0.72,
+        "docs_primary": 0.78,
+        "research_primary": 0.78
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "deepseek-v4-flash",
+      "family": "deepseek",
+      "tier": "economy",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "code",
+        "test",
+        "fix",
+        "docs"
+      ],
+      "strengths": [
+        "fast_turnaround",
+        "coding",
+        "test_generation"
+      ],
+      "recommended_roles": [
+        "test_primary",
+        "code_parallel",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.73,
+        "review_primary": 0.68,
+        "plan_primary": 0.62,
+        "test_primary": 0.8,
+        "docs_primary": 0.67,
+        "research_primary": 0.62
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 502,
+          "error": "{\"error\":{\"message\":\"\u0410\u043f\u0441\u0442\u0440\u0438\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441.\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "deepseek-v4-pro",
+      "family": "deepseek",
+      "tier": "frontier",
+      "status": "probe_failed",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": false,
+      "preferred_task_types": [
+        "code",
+        "test",
+        "fix",
+        "review",
+        "plan",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "coding",
+        "test_generation"
+      ],
+      "recommended_roles": [
+        "test_primary",
+        "code_parallel",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.17,
+        "review_primary": 1.12,
+        "plan_primary": 1.06,
+        "test_primary": 1.18,
+        "docs_primary": 1.05,
+        "research_primary": 1.06
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": false,
+          "status_code": 503,
+          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "response_sample": "",
+          "endpoint": "chat_completions"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 502,
+          "error": "{\"error\":{\"message\":\"\u0410\u043f\u0441\u0442\u0440\u0438\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441.\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}",
+          "response_sample": "",
+          "endpoint": "responses"
+        }
+      }
+    },
+    {
+      "model_name": "qwen3.5-plus",
+      "family": "qwen",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "test",
+        "fix",
+        "review",
+        "docs"
+      ],
+      "strengths": [
+        "coding",
+        "test_generation"
+      ],
+      "recommended_roles": [
+        "test_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.91,
+        "review_primary": 0.82,
+        "plan_primary": 0.82,
+        "test_primary": 0.93,
+        "docs_primary": 0.81,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "qwen3.6-plus",
+      "family": "qwen",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "test",
+        "fix",
+        "review",
+        "docs"
+      ],
+      "strengths": [
+        "coding",
+        "test_generation"
+      ],
+      "recommended_roles": [
+        "test_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.91,
+        "review_primary": 0.82,
+        "plan_primary": 0.82,
+        "test_primary": 0.93,
+        "docs_primary": 0.81,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "qwen3.7-max",
+      "family": "qwen",
+      "tier": "frontier",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "test",
+        "fix",
+        "review",
+        "plan",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "coding",
+        "test_generation"
+      ],
+      "recommended_roles": [
+        "test_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.15,
+        "review_primary": 1.06,
+        "plan_primary": 1.06,
+        "test_primary": 1.17,
+        "docs_primary": 1.05,
+        "research_primary": 1.06
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "qwen3.7-plus",
+      "family": "qwen",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "test",
+        "fix",
+        "review",
+        "docs"
+      ],
+      "strengths": [
+        "coding",
+        "test_generation"
+      ],
+      "recommended_roles": [
+        "test_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.91,
+        "review_primary": 0.82,
+        "plan_primary": 0.82,
+        "test_primary": 0.93,
+        "docs_primary": 0.81,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "kimi-k2.5",
+      "family": "kimi",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "test",
+        "docs"
+      ],
+      "strengths": [
+        "general"
+      ],
+      "recommended_roles": [
+        "research_primary",
+        "plan_primary",
+        "code_parallel"
+      ],
+      "role_scores": {
+        "code_parallel": 0.86,
+        "review_primary": 0.82,
+        "plan_primary": 0.88,
+        "test_primary": 0.81,
+        "docs_primary": 0.81,
+        "research_primary": 0.9
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "kimi-k2.6",
+      "family": "kimi",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "test",
+        "docs"
+      ],
+      "strengths": [
+        "general"
+      ],
+      "recommended_roles": [
+        "research_primary",
+        "plan_primary",
+        "code_parallel"
+      ],
+      "role_scores": {
+        "code_parallel": 0.86,
+        "review_primary": 0.82,
+        "plan_primary": 0.88,
+        "test_primary": 0.81,
+        "docs_primary": 0.81,
+        "research_primary": 0.9
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "glm-5",
+      "family": "glm",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "test",
+        "docs"
+      ],
+      "strengths": [
+        "review"
+      ],
+      "recommended_roles": [
+        "docs_primary",
+        "plan_primary",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.84,
+        "review_primary": 0.86,
+        "plan_primary": 0.86,
+        "test_primary": 0.81,
+        "docs_primary": 0.86,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "glm-5.1",
+      "family": "glm",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "test",
+        "docs"
+      ],
+      "strengths": [
+        "review"
+      ],
+      "recommended_roles": [
+        "docs_primary",
+        "plan_primary",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.84,
+        "review_primary": 0.86,
+        "plan_primary": 0.86,
+        "test_primary": 0.81,
+        "docs_primary": 0.86,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "mimo-v2-omni",
+      "family": "mimo",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "test",
+        "docs"
+      ],
+      "strengths": [
+        "drafting"
+      ],
+      "recommended_roles": [
+        "docs_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.84,
+        "review_primary": 0.82,
+        "plan_primary": 0.82,
+        "test_primary": 0.81,
+        "docs_primary": 0.86,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "mimo-v2-pro",
+      "family": "mimo",
+      "tier": "frontier",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "drafting"
+      ],
+      "recommended_roles": [
+        "docs_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.08,
+        "review_primary": 1.06,
+        "plan_primary": 1.06,
+        "test_primary": 1.05,
+        "docs_primary": 1.1,
+        "research_primary": 1.06
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "mimo-v2.5",
+      "family": "mimo",
+      "tier": "standard",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "test",
+        "docs"
+      ],
+      "strengths": [
+        "drafting"
+      ],
+      "recommended_roles": [
+        "docs_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.84,
+        "review_primary": 0.82,
+        "plan_primary": 0.82,
+        "test_primary": 0.81,
+        "docs_primary": 0.86,
+        "research_primary": 0.82
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    },
+    {
+      "model_name": "mimo-v2.5-pro",
+      "family": "mimo",
+      "tier": "frontier",
+      "status": "discovered",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": false,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "research"
+      ],
+      "strengths": [
+        "deep_reasoning",
+        "drafting"
+      ],
+      "recommended_roles": [
+        "docs_primary",
+        "code_parallel",
+        "plan_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 1.08,
+        "review_primary": 1.06,
+        "plan_primary": 1.06,
+        "test_primary": 1.05,
+        "docs_primary": 1.1,
+        "research_primary": 1.06
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": false,
+        "responses": false
+      },
+      "probe": {
+        "chat_completions": {},
+        "responses": {}
+      }
+    }
+  ]
+}

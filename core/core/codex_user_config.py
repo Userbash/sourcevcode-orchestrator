@@ -165,6 +165,7 @@ def _derive_endpoint_values(config_payload: dict[str, object]) -> dict[str, str]
 
     if openai_base_url:
         values['CODEX_SALE_BASE_URL'] = root_url
+        values['CODEX_ROOT_URL'] = root_url
         values['OPENAI_BASE_URL'] = openai_base_url
         values['AI_BRIDGE_OPENAI_BASE_URL'] = openai_base_url
         values['AI_BRIDGE_OPENAI_MODELS_ENDPOINT'] = explicit_models or _join_url(openai_base_url, 'models')

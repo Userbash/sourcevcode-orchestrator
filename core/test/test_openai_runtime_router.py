@@ -2,10 +2,53 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from core.core.model_selector import ModelSelector
 from core.core.models import Complexity, Priority, Task, TaskContext, TaskInput, TaskType
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.openai_runtime_router import OpenAIRuntimeRouter
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_user_config(tmp_path, monkeypatch):
+    codex_dir = tmp_path / 'empty_codex'
+    codex_dir.mkdir()
+    (codex_dir / 'config.toml').write_text('', encoding='utf-8')
+    missing = tmp_path / 'missing_openai_endpoint_discovery.json'
+    missing_inventory = tmp_path / 'missing_openai_runtime_inventory.json'
+    missing_generated = tmp_path / 'missing_generated_openai'
+    monkeypatch.setenv('AI_BRIDGE_CODEX_CONFIG_DIR', str(codex_dir))
+    monkeypatch.delenv('CODEX_HOME', raising=False)
+    monkeypatch.setattr('core.core.codex_user_config.candidate_codex_dirs', lambda: [codex_dir])
+    monkeypatch.setattr('core.core.openai_bazzite_endpoint.candidate_codex_dirs', lambda: [codex_dir])
+    monkeypatch.setattr('core.core.provider_credentials.sync_provider_env_aliases', lambda env=None, override=False: env)
+    monkeypatch.setattr('core.core.openai_provider.sync_provider_env_aliases', lambda env=None, override=False: env)
+    monkeypatch.setenv('OPENAI_ENDPOINT_DISCOVERY_PATH', str(missing))
+    monkeypatch.setenv('OPENAI_RUNTIME_INVENTORY_PATH', str(missing_inventory))
+    monkeypatch.setenv('OPENAI_GENERATED_PROFILE_DIR', str(missing_generated))
+    monkeypatch.setenv('OPENAI_MODEL_TEMPLATE_MANIFEST_PATH', str(tmp_path / 'missing_model_template_manifest.json'))
+    monkeypatch.setenv('OPENAI_ORCHESTRATOR_TEMPLATES_PATH', str(tmp_path / 'missing_orchestrator_templates.json'))
+    monkeypatch.setenv('OPENAI_MODELS_FULL_CACHE_PATH', str(tmp_path / 'missing_openai_models_full.json'))
+    for key in (
+        'OPENAI_API_KEY',
+        'CODEX_SALE_API_KEY',
+        'CODEX_LB_API_KEY',
+        'OPENAI_BASE_URL',
+        'AI_BRIDGE_OPENAI_BASE_URL',
+        'CODEX_SALE_BASE_URL',
+        'AI_BRIDGE_OPENAI_PROVIDER_ID',
+        'CODEX_PROVIDER',
+        'AI_BRIDGE_CODEX_PROVIDER',
+        'CODEX_OPENAI_MODEL',
+        'OPENAI_DEFAULT_MODEL',
+        'OPENAI_LOW_MODELS',
+        'OPENAI_MEDIUM_MODELS',
+        'OPENAI_HIGH_MODELS',
+        'OPENAI_CRITICAL_MODELS',
+        'OPENAI_EXTRA_MODELS',
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 def _task(task_type: TaskType = TaskType.CODE, complexity: Complexity = Complexity.MEDIUM) -> Task:
@@ -16,7 +59,6 @@ def _task(task_type: TaskType = TaskType.CODE, complexity: Complexity = Complexi
     )
     task.complexity = complexity
     return task
-
 
 def test_openai_registry_uses_cached_text_models(tmp_path, monkeypatch):
     cache = tmp_path / "openai_models.json"
@@ -280,3 +322,72 @@ def test_openai_runtime_router_sanitize_model_rejects_runtime_ineligible_model(t
 
     assert OpenAIRuntimeRouter.sanitize_model("claude-haiku-4-5") is None
     assert OpenAIRuntimeRouter.sanitize_model("gpt-5.5") == "gpt-5.5"
+
+
+def test_openai_runtime_router_prefers_runtime_recommended_models(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "fully_routable_models": ["gpt-5.5", "gpt-5.4-mini"],
+            "recommended_models": {
+                "roles": {
+                    "code_parallel": ["gpt-5.5", "gpt-5.4-mini"],
+                    "docs_primary": ["gpt-5.4-mini", "gpt-5.5"]
+                },
+                "defaults": {
+                    "best_overall": ["gpt-5.5"],
+                    "economy": ["gpt-5.4-mini"],
+                    "premium": ["gpt-5.5"]
+                }
+            },
+            "validated_models": [
+                {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+                {"model": "gpt-5.4-mini", "chat_completions": {"ok": True}, "responses": {"ok": True}}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "gpt-5.4-mini,gpt-5.5")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+
+    plan = router.build_plan(_task(complexity=Complexity.HIGH), "prefer recommended code model")
+
+    assert plan.models[0] == "gpt-5.5"
+
+
+def test_openai_runtime_router_prefers_runtime_economy_recommendations(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "fully_routable_models": ["gpt-5.5", "gpt-5.4-mini"],
+            "recommended_models": {
+                "roles": {
+                    "docs_primary": ["gpt-5.5", "gpt-5.4-mini"]
+                },
+                "defaults": {
+                    "best_overall": ["gpt-5.5"],
+                    "economy": ["gpt-5.4-mini"],
+                    "premium": ["gpt-5.5"]
+                }
+            },
+            "validated_models": [
+                {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+                {"model": "gpt-5.4-mini", "chat_completions": {"ok": True}, "responses": {"ok": True}}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("OPENAI_LOW_MODELS", "gpt-5.5,gpt-5.4-mini")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+    task = _task(TaskType.DOCS, Complexity.LOW)
+    task.routing_hints = {"source": "websocket", "cost_tier": "economy"}
+
+    plan = router.build_plan(task, "prefer economy docs model")
+
+    assert plan.models[0] == "gpt-5.4-mini"

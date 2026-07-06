@@ -363,3 +363,69 @@ def test_prompt_optimizer_surfaces_normalized_profile_context():
     assert "normalized_reason: Task references multiple files." in task.input.description
     assert "parallelize only independent branches" in task.input.description
     assert "high-risk; prefer stronger validation" in task.input.description
+
+
+def test_prompt_optimizer_embeds_frame_contract_for_websocket_ingress():
+    from core.core.task_submission_api import create_standard_task
+
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithMemory()
+    module.on_load(api)
+    task = create_standard_task({
+        "message": "Build websocket frame contract and pass it to orchestrator",
+        "source": "websocket",
+        "type": "code",
+        "files": ["core/core/frame_orchestrator.py", "core/core/task_submission_api.py"],
+        "acceptance_criteria": ["strict xml package is produced", "prompt remains actionable"],
+        "session_id": "ws-frame-1",
+    })
+    task.routing_hints["ingress_path"] = "websocket_internal_chat"
+    task.routing_hints["text_preparation_mode"] = "automatic"
+    task.routing_hints["external_chat"] = True
+
+    module.before_task(task, {})
+
+    assert "FRAME ORCHESTRATION PACKAGE:" in task.input.description
+    assert "<orchestrator_package" in task.input.description
+    assert "ingress_path: websocket_internal_chat" in task.input.description
+    assert "use the embedded frame_xml_package as the authoritative orchestration contract before implementation." in task.input.description
+
+
+def test_prompt_optimizer_embeds_socraticode_snapshot_when_frame_package_contains_compact_context():
+    from core.core.frame_orchestrator import build_frame_orchestrator_package
+    from core.core.task_submission_api import create_standard_task
+
+    module = PromptOptimizerModule()
+    api = _FakeAPIWithMemory()
+    module.on_load(api)
+    task = create_standard_task({
+        "message": "Optimize auth task with compact indexed context",
+        "source": "websocket",
+        "type": "code",
+        "files": ["backend/auth.ts", "backend/session.ts"],
+        "session_id": "ws-socraticode-1",
+    })
+    task.routing_hints["socraticode"] = {
+        "status": "applied",
+        "context_coverage": {"score": 0.9, "status": "strong", "summary": "Indexed auth flow is already covered."},
+        "cost_downgrade": {"eligible": True, "preferred_provider": "local"},
+        "parallelism": {"recommended_parallel_branches": 2},
+        "routing_recommendations": {"prefer_low_cost_lanes": True, "shared_index_ready": True},
+        "compact_context": {
+            "text": "Task: auth flow\nSearch: backend/auth.ts and backend/session.ts already indexed\nImpact: token-heavy file dumps can be skipped",
+            "tools_used": ["codebase_search", "codebase_impact"],
+        },
+    }
+    frame = build_frame_orchestrator_package(task, {"description": task.input.description, "source": "websocket"})
+    task.routing_hints["frame_orchestrator"] = frame.as_dict()
+    task.routing_hints["frame_xml_package"] = frame.validation.xml_orchestrator_package_output
+    task.routing_hints["ingress_path"] = "websocket_internal_chat"
+    task.routing_hints["external_chat"] = True
+
+    module.before_task(task, {})
+
+    assert "SOCRATICODE CONTEXT SNAPSHOT:" in task.input.description
+    assert "socraticode_status: applied" in task.input.description
+    assert "socraticode_preferred_provider: local" in task.input.description
+    assert "SOCRATICODE CONTEXT COMPACTION:" in task.input.description
+    assert "socraticode_compaction_mode:" in task.input.description

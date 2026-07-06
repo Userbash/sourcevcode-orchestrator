@@ -38,6 +38,33 @@ def _env_int(name: str, default: int, minimum: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_generation_options() -> dict[str, Any]:
+    options: dict[str, Any] = {"temperature": 0.2, "top_p": 0.9}
+    backend = str(
+        os.getenv("AI_BRIDGE_LOCAL_LLM_GPU_BACKEND")
+        or os.getenv("AI_BRIDGE_LOCAL_LLM_GPU_BACKEND_DETECTED")
+        or ""
+    ).strip().lower()
+    gpu_enabled = _env_bool("OLLAMA_GPU_ENABLED", True)
+    force_gpu = _env_bool("AI_BRIDGE_LOCAL_LLM_FORCE_GPU", True)
+    if force_gpu and gpu_enabled and backend in {"nvidia", "amd", "intel"}:
+        options["num_gpu"] = _env_int("AI_BRIDGE_LOCAL_LLM_NUM_GPU_LAYERS", 999, 1)
+        main_gpu = os.getenv("AI_BRIDGE_LOCAL_LLM_MAIN_GPU")
+        if main_gpu is not None:
+            try:
+                options["main_gpu"] = max(0, int(main_gpu))
+            except ValueError:
+                pass
+    return options
+
+
 def _candidate_endpoints(primary: str, extra: Sequence[str] = ()) -> tuple[str, ...]:
     values = [_normalize_endpoint(primary), *(_normalize_endpoint(item) for item in extra if item)]
     derived: list[str] = []
@@ -78,7 +105,7 @@ class LocalModelRuntimeConfig:
     generation_timeout_sec: float = 60.0
     management_timeout_sec: float = 600.0
     default_system: str = DEFAULT_GENERATION_SYSTEM
-    default_options: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.2, "top_p": 0.9})
+    default_options: dict[str, Any] = field(default_factory=_default_generation_options)
     default_headers: dict[str, str] = field(default_factory=dict)
     retry_policy: LocalModelRetryPolicy = field(default_factory=LocalModelRetryPolicy)
 
@@ -102,6 +129,7 @@ class LocalModelRuntimeConfig:
             health_timeout_sec=health_timeout,
             generation_timeout_sec=generation_timeout,
             management_timeout_sec=management_timeout,
+            default_options=_default_generation_options(),
             retry_policy=LocalModelRetryPolicy(
                 max_attempts=_env_int("AI_BRIDGE_LOCAL_LLM_RETRY_ATTEMPTS", 2, 1),
                 backoff_base_sec=_env_float("AI_BRIDGE_LOCAL_LLM_RETRY_BACKOFF_SEC", 0.2, 0.0),

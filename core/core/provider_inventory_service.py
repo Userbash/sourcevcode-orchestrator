@@ -9,15 +9,30 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from core.core.gemini_model_registry import AntigravityModelRegistry
+from core.core.antigravity_model_registry import AntigravityModelRegistry
 from core.core.mistral_model_registry import MistralModelRegistry
+from core.core.model_inventory_index import ModelInventoryIndex
+from core.core.local_model_runtime import LocalModelRuntime, LocalModelRuntimeConfig
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.openai_compatible_inventory import is_text_compatible_model, sync_openai_compatible_artifacts
-from core.core.openai_provider import resolve_openai_provider_config
+from core.core.openai_bazzite_endpoint import load_openai_endpoint_discovery
+from core.core.openai_provider import openai_endpoint_manifest, resolve_openai_provider_config, resolve_openai_provider_identity
+from core.core.antigravity_provider import fetch_antigravity_model_catalog, resolve_antigravity_provider_config
+from core.core.ai_kernel_bridge import AIKernelBridge
+from core.core.model_usage_module import ModelUsageModule
 from core.core.mimo_provider import configured_native_mimo_models, extract_mimo_response_text, fetch_mimo_model_catalog, invoke_mimo_group_probe, mimo_group_description, mimo_group_use_case, mimo_model_group, mimo_model_subgroup, mimo_probe_mode_for_group, sync_mimo_native_artifacts
 from core.core.mimo_status import mimo_enabled
 import httpx
 import requests
+
+_OPENAI_RUNTIME_BLOCK_MARKERS = (
+    "unsupported model",
+    "model is not supported",
+    "invalid model",
+    "does not exist",
+    "not found",
+    "no eligible resources",
+)
 
 
 @dataclass(slots=True)
@@ -33,6 +48,10 @@ class ProviderInventoryEntry:
 
 
 class ProviderInventoryService:
+    @staticmethod
+    def _testing_mode() -> bool:
+        return os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
+
     @staticmethod
     def _read_int_env(name: str, default: int) -> int:
         raw = str(os.getenv(name, str(default)) or str(default)).strip()
@@ -58,6 +77,18 @@ class ProviderInventoryService:
         except ValueError:
             self.snapshot_refresh_interval_sec = 1800
         self.openai_runtime_inventory_path = Path(os.getenv("OPENAI_RUNTIME_INVENTORY_PATH", "core/.cache/openai_runtime_inventory.json"))
+        self.model_index_path = Path(os.getenv("PROVIDER_MODEL_INDEX_PATH", "core/.cache/provider_model_index.json"))
+        self.model_index = ModelInventoryIndex(self.model_index_path)
+        self.ai_kernel_bridge = AIKernelBridge()
+        self._entry_refresh_intervals_sec = {
+            "openai": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_OPENAI_SEC", 300),
+            "mistral": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_MISTRAL_SEC", 300),
+            "antigravity": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_ANTIGRAVITY_SEC", 120),
+            "mimo": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_MIMO_SEC", 300),
+            "local_llm": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_LOCAL_LLM_SEC", 30),
+            "ai_kernel": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_AI_KERNEL_SEC", 30),
+        }
+        self.model_index.load()
 
     @staticmethod
     def _normalize_provider(provider: str) -> str:
@@ -65,7 +96,7 @@ class ProviderInventoryService:
         if raw in {"google", "antigravity", "gemini"}:
             return "antigravity"
         if raw in {"local_llm", "ollama", "local"}:
-            return "local"
+            return "local_llm"
         if raw in {"ai-kernel", "ai_kernel", "llama_cpp", "llama-cpp"}:
             return "ai_kernel"
         if raw in {"mimo", "mimo-cli", "xiaomi", "github-copilot", "github-models"}:
@@ -152,6 +183,62 @@ class ProviderInventoryService:
             seen.add(normalized)
             generated.append(normalized)
         return generated
+
+    @staticmethod
+    def _openai_artifact_models() -> list[str]:
+        paths = [
+            Path(os.getenv("OPENAI_MODELS_FULL_CACHE_PATH", "core/.cache/openai_models_full.json")),
+            Path(os.getenv("OPENAI_GENERATED_PROFILE_DIR", "core/mimo/profiles/generated/openai_compatible")) / "manifest.json",
+            Path(os.getenv("OPENAI_MODEL_TEMPLATE_MANIFEST_PATH", "core/mimo/profiles/generated/openai_compatible/model_template_manifest.json")),
+            Path(os.getenv("OPENAI_ORCHESTRATOR_TEMPLATES_PATH", "core/mimo/profiles/generated/openai_compatible/orchestrator_templates.json")),
+        ]
+        models: list[str] = []
+        for path in paths:
+            payload = ProviderInventoryService._load_json(path)
+            if not payload:
+                continue
+            rows = payload.get("models")
+            if isinstance(rows, list):
+                for item in rows:
+                    if isinstance(item, dict):
+                        model_name = str(item.get("model_name") or item.get("model") or item.get("id") or "").strip()
+                    else:
+                        model_name = str(item).strip()
+                    if model_name and is_text_compatible_model(model_name):
+                        models.append(model_name)
+            role_map = payload.get("roles")
+            if isinstance(role_map, dict):
+                for entries in role_map.values():
+                    if not isinstance(entries, list):
+                        continue
+                    for row in entries:
+                        if not isinstance(row, dict):
+                            continue
+                        model_name = str(row.get("model_name") or "").strip()
+                        if model_name and is_text_compatible_model(model_name):
+                            models.append(model_name)
+        return ProviderInventoryService._merge_model_names(models)
+
+    @classmethod
+    def _openai_configured_models(cls) -> list[str]:
+        configured: list[str] = []
+        for env_name in (
+            "CODEX_OPENAI_MODEL",
+            "OPENAI_DEFAULT_MODEL",
+            "OPENAI_HIGH_MODELS",
+            "OPENAI_MEDIUM_MODELS",
+            "OPENAI_LOW_MODELS",
+            "OPENAI_EXTRA_MODELS",
+            "OPENAI_CRITICAL_MODELS",
+        ):
+            raw = str(os.getenv(env_name, "") or "").strip()
+            if not raw:
+                continue
+            items = [item.strip() for item in raw.split(",")] if "," in raw else [raw]
+            for item in items:
+                if item and is_text_compatible_model(item):
+                    configured.append(item)
+        return cls._merge_model_names(configured)
 
     @classmethod
     def _inventory_source_paths(cls) -> list[Path]:
@@ -297,16 +384,128 @@ class ProviderInventoryService:
 
             return await asyncio.gather(*(_probe_model(model_name) for model_name in model_names))
 
+    @staticmethod
+    def _openai_probe_availability(row: dict[str, Any]) -> dict[str, Any]:
+        chat = row.get("chat_completions") if isinstance(row.get("chat_completions"), dict) else {}
+        responses = row.get("responses") if isinstance(row.get("responses"), dict) else {}
+        chat_ok = bool(chat.get("ok"))
+        responses_ok = bool(responses.get("ok"))
+        chat_status = int(chat.get("status_code") or 0) if str(chat.get("status_code") or '').strip() else None
+        responses_status = int(responses.get("status_code") or 0) if str(responses.get("status_code") or '').strip() else None
+        errors = ' '.join(filter(None, [str(chat.get("error") or '').strip().lower(), str(responses.get("error") or '').strip().lower()]))
+        text_present = bool(str(chat.get("response_sample") or '').strip() or str(responses.get("response_sample") or '').strip())
+        criteria = {
+            "chat_completions_ok": chat_ok,
+            "responses_ok": responses_ok,
+            "http_chat_success": chat_status is not None and chat_status < 400,
+            "http_responses_success": responses_status is not None and responses_status < 400,
+            "text_response_present": text_present,
+            "blocked_marker_found": any(marker in errors for marker in _OPENAI_RUNTIME_BLOCK_MARKERS),
+            "auth_failed": any(code in {401, 403} for code in (chat_status, responses_status) if code is not None),
+            "rate_limited": any(code == 429 for code in (chat_status, responses_status) if code is not None),
+            "server_error": any(code >= 500 for code in (chat_status, responses_status) if code is not None),
+        }
+        if chat_ok and responses_ok:
+            availability = "available"
+            reason = "chat_and_responses_ready"
+        elif criteria["auth_failed"]:
+            availability = "auth_failed"
+            reason = "auth_status"
+        elif criteria["rate_limited"]:
+            availability = "rate_limited"
+            reason = "quota_or_rate_limit"
+        elif criteria["server_error"]:
+            availability = "upstream_error"
+            reason = "provider_http_5xx"
+        elif criteria["blocked_marker_found"]:
+            availability = "blocked"
+            reason = "runtime_block_marker"
+        elif chat_ok or responses_ok:
+            availability = "partial"
+            reason = "single_endpoint_ready"
+        else:
+            availability = "unavailable"
+            reason = "probe_failed"
+        return {
+            "available": availability == "available",
+            "availability": availability,
+            "reason": reason,
+            "criteria": criteria,
+        }
+
+    @staticmethod
+    def _openai_model_cost_snapshot(model_name: str) -> dict[str, Any]:
+        usage = ModelUsageModule()
+        input_only = usage.estimate_usage_cost(model_name, input_tokens=1000, output_tokens=0, provider="openai")
+        output_only = usage.estimate_usage_cost(model_name, input_tokens=0, output_tokens=1000, provider="openai")
+        balanced = usage.estimate_usage_cost(model_name, input_tokens=1000, output_tokens=1000, provider="openai")
+        return {
+            "currency": "USD",
+            "input_usd_per_1k": round(float(input_only.get("estimated_cost_usd") or 0.0), 6),
+            "output_usd_per_1k": round(float(output_only.get("estimated_cost_usd") or 0.0), 6),
+            "blended_usd_per_2k": round(float(balanced.get("estimated_cost_usd") or 0.0), 6),
+        }
+
+    @classmethod
+    def _build_openai_runtime_recommendations(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        templates = (payload.get("model_templates") or {}).get("models") if isinstance(payload.get("model_templates"), dict) else []
+        rows = templates if isinstance(templates, list) else []
+        enriched: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get("model_name") or '').strip()
+            if not model_name:
+                continue
+            cost = cls._openai_model_cost_snapshot(model_name)
+            role_scores = row.get("role_scores") if isinstance(row.get("role_scores"), dict) else {}
+            enriched.append({
+                "model_name": model_name,
+                "status": str(row.get("status") or "discovered"),
+                "role_scores": role_scores,
+                "preferred_task_types": list(row.get("preferred_task_types") or []),
+                "cost": cost,
+            })
+        routable = [row for row in enriched if row.get("status") == "routable"]
+        candidates = routable or enriched
+        def _sorted_for(role: str) -> list[dict[str, Any]]:
+            return sorted(
+                candidates,
+                key=lambda row: (-float((row.get("role_scores") or {}).get(role, 0.0)), float((row.get("cost") or {}).get("blended_usd_per_2k", 0.0)), row.get("model_name") or ""),
+            )
+        recommendations = {role: [row.get("model_name") for row in _sorted_for(role)[:5]] for role in ("code_parallel", "review_primary", "plan_primary", "test_primary", "docs_primary", "research_primary")}
+        economy = sorted(candidates, key=lambda row: (float((row.get("cost") or {}).get("blended_usd_per_2k", 0.0)), -float((row.get("role_scores") or {}).get("docs_primary", 0.0)), row.get("model_name") or ""))
+        premium = sorted(candidates, key=lambda row: (-max(float(score) for score in (row.get("role_scores") or {"_": 0.0}).values()), float((row.get("cost") or {}).get("blended_usd_per_2k", 0.0)), row.get("model_name") or ""))
+        defaults = {
+            "best_overall": [row.get("model_name") for row in premium[:5]],
+            "economy": [row.get("model_name") for row in economy[:5]],
+            "premium": [row.get("model_name") for row in premium[:5]],
+            "cheapest_routable": economy[0].get("model_name") if economy else None,
+            "strongest_routable": premium[0].get("model_name") if premium else None,
+        }
+        return {
+            "roles": recommendations,
+            "defaults": defaults,
+            "selection_policy": {
+                "availability_required": True,
+                "prefer_routable_models": True,
+                "sort_order": ["role_score_desc", "cost_asc", "model_name_asc"],
+            },
+        }
+
     def refresh_openai_runtime_inventory(self, *, force_refresh: bool = False, probe_limit: int | None = None) -> dict[str, Any]:
-        models = self.openai.get_models(force_refresh=force_refresh)
+        live_models = self.openai.get_models(force_refresh=force_refresh)
         diagnostics = dict(self.openai.diagnostics())
+        discovery = load_openai_endpoint_discovery()
         cfg = resolve_openai_provider_config()
+        diagnostics["discovery"] = discovery
         sync_summary: dict[str, Any] = {}
-        if models:
-            try:
-                sync_summary = sync_openai_compatible_artifacts(models, base_url=str(cfg.base_url or "").strip())
-            except Exception as exc:
-                sync_summary = {"ok": False, "error": str(exc)}
+        artifact_models = self._openai_artifact_models()
+        configured_models = self._openai_configured_models()
+        models = self._merge_model_names(live_models, artifact_models, configured_models)
+        diagnostics["artifact_model_count"] = len(artifact_models)
+        diagnostics["configured_model_count"] = len(configured_models)
+        diagnostics["effective_model_count"] = len(models)
 
         selected = self._select_openai_probe_models(
             models,
@@ -336,32 +535,65 @@ class ProviderInventoryService:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     probe_rows = pool.submit(runner).result()
 
-        fully_routable = [row for row in probe_rows if bool(row.get("fully_routable"))]
-        chat_ready = [row for row in probe_rows if bool(((row.get("chat_completions") or {}).get("ok")))]
-        responses_ready = [row for row in probe_rows if bool(((row.get("responses") or {}).get("ok")))]
+        if models:
+            try:
+                sync_summary = sync_openai_compatible_artifacts(
+                    models,
+                    base_url=str(cfg.base_url or "").strip(),
+                    validated_rows=probe_rows,
+                    default_model=str(getattr(cfg, "default_model", "") or ""),
+                )
+            except Exception as exc:
+                sync_summary = {"ok": False, "error": str(exc)}
+
+        enriched_probe_rows: list[dict[str, Any]] = []
+        for row in probe_rows:
+            availability = self._openai_probe_availability(row)
+            enriched = dict(row)
+            enriched.update(availability)
+            enriched["cost"] = self._openai_model_cost_snapshot(str(row.get("model") or ""))
+            enriched_probe_rows.append(enriched)
+
+        fully_routable = [row for row in enriched_probe_rows if bool(row.get("available"))]
+        chat_ready = [row for row in enriched_probe_rows if bool(((row.get("chat_completions") or {}).get("ok")))]
+        responses_ready = [row for row in enriched_probe_rows if bool(((row.get("responses") or {}).get("ok")))]
+        identity = resolve_openai_provider_identity(cfg)
+        endpoint_manifest = openai_endpoint_manifest(cfg)
         payload = {
             "provider": "openai",
+            "provider_id": identity["provider_id"],
+            "provider_name": identity["provider_name"],
             "fetched_at": int(time.time()),
             "force_refresh": bool(force_refresh),
             "registry_diagnostics": diagnostics,
             "models": models,
             "model_count": len(models),
+            "model_preview": models[:50],
             "selected_models": selected,
             "selected_model_count": len(selected),
-            "validated_models": probe_rows,
-            "validated_model_count": len(probe_rows),
+            "validated_models": enriched_probe_rows,
+            "validated_model_count": len(enriched_probe_rows),
             "fully_routable_models": [str(row.get("model") or "") for row in fully_routable],
             "fully_routable_count": len(fully_routable),
+            "chat_ready_models": [str(row.get("model") or "") for row in chat_ready],
             "chat_ready_count": len(chat_ready),
+            "responses_ready_models": [str(row.get("model") or "") for row in responses_ready],
             "responses_ready_count": len(responses_ready),
             "artifact_sync": sync_summary,
+            "model_templates": (sync_summary or {}).get("model_template_manifest", {}) if isinstance(sync_summary, dict) else {},
             "base_url": str(getattr(cfg, "base_url", "") or ""),
             "models_endpoint": str(getattr(cfg, "models_endpoint", "") or ""),
             "chat_completions_endpoint": str(getattr(cfg, "chat_completions_endpoint", "") or ""),
             "responses_endpoint": str(getattr(cfg, "responses_endpoint", "") or ""),
+            "messages_endpoint": str(getattr(cfg, "messages_endpoint", "") or ""),
+            "messages_count_tokens_endpoint": str(getattr(cfg, "messages_count_tokens_endpoint", "") or ""),
+            "codex_endpoint": str(getattr(cfg, "codex_endpoint", "") or ""),
+            "endpoint_manifest": endpoint_manifest,
             "default_model": str(getattr(cfg, "default_model", "") or ""),
+            "pricing": {model: self._openai_model_cost_snapshot(model) for model in models[:100]},
             "execution_mode": execution_mode,
         }
+        payload["recommended_models"] = self._build_openai_runtime_recommendations(payload)
         self.openai_runtime_inventory_path.parent.mkdir(parents=True, exist_ok=True)
         self.openai_runtime_inventory_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         return payload
@@ -624,6 +856,7 @@ class ProviderInventoryService:
                 sync_summary = {"ok": False, "error": str(exc)}
         diagnostics = dict(diag)
         diagnostics["artifact_sync"] = sync_summary
+        diagnostics["discovery"] = load_openai_endpoint_discovery()
         return ProviderInventoryEntry(
             provider="openai",
             fetched_at=int(time.time()),
@@ -635,15 +868,29 @@ class ProviderInventoryService:
         )
 
     def _antigravity_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
-        models = self.antigravity.get_models(force_refresh=force_refresh)
+        catalog = fetch_antigravity_model_catalog(force_refresh=force_refresh, timeout_sec=float(getattr(self.antigravity, "timeout", 20.0) or 20.0))
+        cfg = resolve_antigravity_provider_config()
+        models = [str(model).strip() for model in list(catalog.get("models") or []) if str(model).strip()]
+        default_model = str(cfg.default_model or "").strip()
+        diagnostics = {
+            "cache_path": str(self.antigravity.cache_path),
+            "ttl_sec": self.antigravity.ttl_sec,
+            "base_url": cfg.base_url,
+            "models_endpoint": cfg.models_endpoint,
+            "default_model": default_model,
+            "model_alias_present": default_model in models if default_model else False,
+            "catalog": catalog,
+        }
+        error = str(catalog.get("error") or "") or (None if models else "inventory_unavailable")
         return ProviderInventoryEntry(
             provider="antigravity",
             fetched_at=int(time.time()),
-            ok=bool(models),
-            source="registry",
+            ok=bool(catalog.get("ok")) and bool(models),
+            source=str(catalog.get("source") or "registry"),
             models=models,
-            error=None if models else "inventory_unavailable",
-            diagnostics={"cache_path": str(self.antigravity.cache_path), "ttl_sec": self.antigravity.ttl_sec},
+            error=error,
+            status_code=int(catalog["status_code"]) if catalog.get("status_code") is not None else None,
+            diagnostics=diagnostics,
         )
 
     def _mistral_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
@@ -660,35 +907,130 @@ class ProviderInventoryService:
             diagnostics=diag,
         )
 
-    def _ai_kernel_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
-        base_url = (os.getenv("AI_KERNEL_BASE_URL") or "http://127.0.0.1:8012/v1").rstrip('/')
-        api_key = os.getenv("AI_KERNEL_API_KEY") or 'local'
-        alias = (os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip()
-        models: list[str] = []
-        error: str | None = None
-        status_code: int | None = None
+    def _local_llm_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
+        config = LocalModelRuntimeConfig.from_env()
+        runtime = LocalModelRuntime(config)
+        runtime_config = getattr(runtime, "config", config)
+        configured_model = str(getattr(runtime_config, "default_model", "") or getattr(runtime_config, "model_name", "") or "").strip()
+        candidate_endpoints = list(getattr(runtime_config, "endpoints", ()) or ())
+        configured_endpoint = str(getattr(runtime_config, "endpoint", "") or getattr(runtime, "current_endpoint", "") or "")
+        gpu_backend = str(os.getenv("AI_BRIDGE_LOCAL_LLM_GPU_BACKEND", "") or os.getenv("AI_BRIDGE_LOCAL_LLM_GPU_BACKEND_DETECTED", "") or "").strip()
+        gpu_enabled = (os.getenv("OLLAMA_GPU_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"})
+        default_options = dict(getattr(runtime_config, "default_options", {}) or {})
+        diagnostics: dict[str, Any] = {
+            "configured_endpoint": configured_endpoint,
+            "candidate_endpoints": candidate_endpoints,
+            "default_model": configured_model,
+            "gpu": {
+                "backend": gpu_backend or "auto",
+                "enabled": gpu_enabled,
+                "forced": bool(default_options.get("num_gpu")),
+                "num_gpu_layers": int(default_options.get("num_gpu") or 0),
+                "main_gpu": default_options.get("main_gpu"),
+            },
+        }
         try:
-            response = requests.get(f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}, timeout=5.0)
-            status_code = response.status_code
-            payload = response.json() if response.content else {}
-            if isinstance(payload, dict):
-                for item in payload.get('data', []) or []:
-                    model_name = str(item.get('id') or '').strip()
-                    if model_name:
-                        models.append(model_name)
+            health = runtime.check_health_sync(configured_model or None)
+            residents = runtime.list_resident_models_sync()
+            resident_models = [str(item.name).strip() for item in residents if str(getattr(item, "name", "") or "").strip()]
+            resident_details = [
+                {
+                    "name": str(getattr(item, "name", "") or "").strip(),
+                    "size": getattr(item, "size", None),
+                    "size_vram": getattr(item, "size_vram", None),
+                    "expires_at": getattr(item, "expires_at", None),
+                    "digest": getattr(item, "digest", None),
+                }
+                for item in residents
+                if str(getattr(item, "name", "") or "").strip()
+            ]
+            gpu_active = any(int(row.get("size_vram") or 0) > 0 for row in resident_details)
+            diagnostics.update({
+                "runtime_status": str(getattr(health, "status", "unknown") or "unknown"),
+                "active_endpoint": str((getattr(health, "endpoint", None) or getattr(runtime, "current_endpoint", configured_endpoint) or configured_endpoint)),
+                "latency_ms": float(getattr(health, "latency_ms", 0.0) or 0.0),
+                "attempts": int(getattr(health, "attempts", 0) or 0),
+                "model_present": bool(getattr(health, "model_present", False)),
+                "resident_models": resident_models,
+                "resident_details": resident_details,
+                "resident_model_count": len(resident_models),
+                "gpu": {
+                    **dict(diagnostics.get("gpu") or {}),
+                    "active": gpu_active,
+                    "resident_vram_bytes": sum(max(0, int(row.get("size_vram") or 0)) for row in resident_details),
+                },
+            })
+            models = [str(item).strip() for item in list(getattr(health, "available_models", []) or []) if str(item).strip()]
+            return ProviderInventoryEntry(
+                provider="local_llm",
+                fetched_at=int(time.time()),
+                ok=bool(getattr(health, "ok", False)),
+                source="ollama_http",
+                models=models,
+                error=str(getattr(health, "error", "") or "") or None,
+                status_code=int(getattr(health, "status_code", 0) or 0) or None,
+                diagnostics=diagnostics,
+            )
         except Exception as exc:
-            error = str(exc)
+            diagnostics.update({
+                "runtime_status": "offline",
+                "active_endpoint": getattr(runtime, "current_endpoint", configured_endpoint),
+                "resident_models": [],
+                "resident_model_count": 0,
+            })
+            return ProviderInventoryEntry(
+                provider="local_llm",
+                fetched_at=int(time.time()),
+                ok=False,
+                source="ollama_http",
+                models=[],
+                error=str(exc),
+                diagnostics=diagnostics,
+            )
+
+    def _ai_kernel_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
+        if os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+            return ProviderInventoryEntry(
+                provider='ai_kernel',
+                fetched_at=int(time.time()),
+                ok=False,
+                source='disabled_by_env',
+                models=[],
+                error='ai_kernel_disabled_by_env',
+                diagnostics={'enabled': False, 'disable_env': 'AI_KERNEL_ENABLED', 'inventory_status': 'offline'},
+            )
+        alias = (os.getenv("AI_KERNEL_MODEL_ALIAS") or "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m").strip()
+        gate = self.ai_kernel_bridge.gate(model_name=alias, ensure_ready=force_refresh)
+        models = [str(item).strip() for item in (gate.get('models') or []) if str(item).strip()]
+        probe = gate.get('probe') if isinstance(gate.get('probe'), dict) else {}
+        status_code = probe.get('status_code') if isinstance(probe, dict) else None
+        error = probe.get('error') if isinstance(probe, dict) else None
         if not models and alias and not error:
             error = 'models_unavailable'
+        alias_present = bool(gate.get('model_alias_present'))
+        inventory_status = 'ready' if alias_present else ('degraded' if models else 'offline')
+        diagnostics = {
+            'base_url': gate.get('base_url'),
+            'model_alias': alias,
+            'model_alias_present': alias_present,
+            'inventory_status': inventory_status,
+            'ready': bool(gate.get('ready')),
+            'reachable': bool(gate.get('reachable')),
+            'attempted_autostart': bool(gate.get('attempted_autostart')),
+            'service_process_active': bool(gate.get('service_process_active')),
+            'autostart_enabled': bool(gate.get('autostart_enabled')),
+            'manage_remote_enabled': bool(gate.get('manage_remote_enabled')),
+            'probe': probe,
+        }
         return ProviderInventoryEntry(
             provider='ai_kernel',
             fetched_at=int(time.time()),
             ok=bool(models),
             source='openai_compatible',
             models=models,
-            error=error,
-            status_code=status_code,
-            diagnostics={'base_url': base_url, 'model_alias': alias},
+            error=str(error) if error else None,
+            status_code=int(status_code) if isinstance(status_code, int) else None,
+            diagnostics=diagnostics,
         )
 
     def _mimo_entry(self, *, force_refresh: bool = False) -> ProviderInventoryEntry:
@@ -735,20 +1077,406 @@ class ProviderInventoryService:
             },
         )
 
-    def collect(self, *, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
-        entries = {
-            "openai": self._openai_entry(force_refresh=force_refresh),
-            "antigravity": self._antigravity_entry(force_refresh=force_refresh),
-            "mistral": self._mistral_entry(force_refresh=force_refresh),
-            "mimo": self._mimo_entry(force_refresh=force_refresh),
-            "ai_kernel": self._ai_kernel_entry(force_refresh=force_refresh),
+
+    @staticmethod
+    def _classify_provider_error(entry: dict[str, Any]) -> str:
+        diagnostics = entry.get("diagnostics") if isinstance(entry, dict) else {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        status_code = entry.get("status_code")
+        error_text = str(entry.get("error") or diagnostics.get("error_message") or diagnostics.get("error_type") or "").strip().lower()
+        if status_code in {401, 403} or "auth" in error_text or "invalid api key" in error_text or "missing_api_key" in error_text:
+            return "auth_failed"
+        if status_code == 429 or "rate limit" in error_text or "quota" in error_text:
+            return "quota_exceeded"
+        if any(marker in error_text for marker in ("connection refused", "timeout", "temporarily unavailable", "endpoint_unavailable", "tcp_timeout")):
+            return "offline"
+        if error_text:
+            return "degraded"
+        return "ready" if bool(entry.get("ok")) else "unknown"
+
+    @staticmethod
+    def _usage_rows(usage_snapshot: dict[str, Any] | None) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, dict[str, Any]]]:
+        snapshot = usage_snapshot if isinstance(usage_snapshot, dict) else {}
+        history = snapshot.get("history") if isinstance(snapshot.get("history"), list) else []
+        stats = (snapshot.get("stats") or {}).get("models") if isinstance(snapshot.get("stats"), dict) else {}
+        by_model: dict[tuple[str, str], dict[str, Any]] = {}
+        by_provider: dict[str, dict[str, Any]] = {}
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            provider = ProviderInventoryService._normalize_provider(str(row.get("provider") or "unknown").strip().lower())
+            model = str(row.get("model") or "unknown").strip()
+            key = (provider, model)
+            item = by_model.setdefault(key, {
+                "provider": provider,
+                "model_name": model,
+                "tokens_used": 0,
+                "estimated_cost_usd": 0.0,
+                "requests_count": 0,
+            })
+            item["tokens_used"] += max(0, int(row.get("tokens_used") or 0))
+            item["estimated_cost_usd"] = round(float(item["estimated_cost_usd"]) + float(row.get("estimated_cost_usd") or 0.0), 6)
+            item["requests_count"] += 1
+        for (provider, model), item in by_model.items():
+            stat_row = stats.get(model) if isinstance(stats, dict) else None
+            if isinstance(stat_row, dict):
+                item.update({
+                    "limit_tokens": int(stat_row.get("limit_tokens") or 0),
+                    "remaining_tokens": int(stat_row.get("remaining_tokens") or 0),
+                    "remaining_percentage": float(stat_row.get("remaining_percentage") or 0.0),
+                    "used_percentage": float(stat_row.get("used_percentage") or 0.0),
+                    "budget_action": str(stat_row.get("status") or "ok"),
+                })
+            prov = by_provider.setdefault(provider, {
+                "provider": provider,
+                "tokens_used": 0,
+                "estimated_cost_usd": 0.0,
+                "requests_count": 0,
+                "models_tracked": 0,
+            })
+            prov["tokens_used"] += int(item.get("tokens_used") or 0)
+            prov["estimated_cost_usd"] = round(float(prov["estimated_cost_usd"]) + float(item.get("estimated_cost_usd") or 0.0), 6)
+            prov["requests_count"] += int(item.get("requests_count") or 0)
+            prov["models_tracked"] += 1
+        return by_model, by_provider
+
+    def build_provider_endpoint_inventory(
+        self,
+        provider: str,
+        *,
+        force_refresh: bool = False,
+        usage_snapshot: dict[str, Any] | None = None,
+        suppression_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_provider(provider)
+        entry = self.refresh_provider_entry(normalized, force_refresh=True) if force_refresh else self.provider_snapshot(normalized)
+        if not isinstance(entry, dict) or not entry:
+            return {"provider": normalized, "status": "missing", "models": [], "summary": {"total_models": 0}}
+
+        usage_by_model, usage_by_provider = self._usage_rows(usage_snapshot)
+        suppression = suppression_snapshot.get(normalized) if isinstance(suppression_snapshot, dict) else None
+        provider_status = self._classify_provider_error(entry)
+        diagnostics = entry.get("diagnostics") or {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        runtime_inventory = (diagnostics.get("runtime_inventory") or {}) if isinstance(diagnostics, dict) else {}
+        model_templates = runtime_inventory.get("model_templates") if isinstance(runtime_inventory, dict) else None
+        model_templates = model_templates if isinstance(model_templates, dict) else ((entry.get("diagnostics") or {}).get("model_templates") if isinstance(entry.get("diagnostics"), dict) else None)
+        rows: list[dict[str, Any]] = []
+        resident_details = diagnostics.get("resident_details") if isinstance(diagnostics.get("resident_details"), list) else []
+        resident_lookup = {
+            str(item.get("name") or "").strip(): item
+            for item in resident_details
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
         }
-        return {provider: asdict(entry) for provider, entry in entries.items()}
+        if normalized == "openai" and isinstance(model_templates, dict) and isinstance(model_templates.get("models"), list):
+            for row in model_templates.get("models") or []:
+                if not isinstance(row, dict):
+                    continue
+                model_name = str(row.get("model_name") or "").strip()
+                usage = usage_by_model.get((normalized, model_name), {})
+                merged = dict(row)
+                merged["usage"] = usage
+                rows.append(merged)
+        else:
+            for model_name in entry.get("models") or []:
+                usage = usage_by_model.get((normalized, str(model_name)), {})
+                rows.append({
+                    "model_name": str(model_name),
+                    "status": "discovered" if bool(entry.get("ok")) else "provider_unavailable",
+                    "kernel_eligible": bool(entry.get("ok")),
+                    "fallback_candidate": bool(entry.get("ok")),
+                    "usage": usage,
+                })
+        if normalized == "local_llm":
+            for row in rows:
+                model_name = str(row.get("model_name") or "").strip()
+                resident_row = resident_lookup.get(model_name, {})
+                size_vram = int(resident_row.get("size_vram") or 0) if isinstance(resident_row, dict) else 0
+                row["resident"] = model_name in resident_lookup
+                row["connected"] = model_name in resident_lookup
+                row["gpu_resident"] = size_vram > 0
+                row["size_vram"] = size_vram or None
+                row["expires_at"] = resident_row.get("expires_at") if isinstance(resident_row, dict) else None
+        status_index: dict[str, list[str]] = {}
+        for row in rows:
+            status_index.setdefault(str(row.get("status") or "unknown"), []).append(str(row.get("model_name") or ""))
+        summary = {
+            "total_models": len(rows),
+            "eligible_models": sum(1 for row in rows if bool(row.get("kernel_eligible"))),
+            "fallback_models": sum(1 for row in rows if bool(row.get("fallback_candidate"))),
+            "blocked_models": sum(1 for row in rows if str(row.get("status") or "") in {"blocked", "provider_unavailable", "non_chat_incompatible", "probe_failed"}),
+            "provider_status": provider_status,
+        }
+        if normalized == "local_llm":
+            summary["resident_models"] = sum(1 for row in rows if bool(row.get("resident")))
+            summary["connected_models"] = sum(1 for row in rows if bool(row.get("connected")))
+            summary["gpu_resident_models"] = sum(1 for row in rows if bool(row.get("gpu_resident")))
+        return {
+            "provider": normalized,
+            "status": provider_status,
+            "suppressed": suppression is not None,
+            "suppression": suppression,
+            "source": entry.get("source"),
+            "error": entry.get("error"),
+            "status_code": entry.get("status_code"),
+            "diagnostics": entry.get("diagnostics") or {},
+            "summary": summary,
+            "status_index": status_index,
+            "usage": usage_by_provider.get(normalized, {"provider": normalized, "tokens_used": 0, "estimated_cost_usd": 0.0, "requests_count": 0, "models_tracked": 0}),
+            "models": rows,
+        }
+
+    def build_all_provider_endpoint_inventories(
+        self,
+        *,
+        force_refresh: bool = False,
+        usage_snapshot: dict[str, Any] | None = None,
+        suppression_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        providers = ["openai", "mistral", "antigravity", "mimo", "local_llm", "ai_kernel"]
+        inventories = {
+            provider: self.build_provider_endpoint_inventory(
+                provider,
+                force_refresh=force_refresh,
+                usage_snapshot=usage_snapshot,
+                suppression_snapshot=suppression_snapshot,
+            )
+            for provider in providers
+        }
+        return {
+            "generated_at": int(time.time()),
+            "providers": inventories,
+            "summary": {
+                "provider_count": len(inventories),
+                "healthy_or_discovered": sum(1 for item in inventories.values() if str(item.get("status") or "") in {"ready", "degraded", "unknown"}),
+                "suppressed_count": sum(1 for item in inventories.values() if bool(item.get("suppressed"))),
+            },
+        }
+
+    def build_provider_runtime_inventory(
+        self,
+        provider: str,
+        *,
+        force_refresh: bool = False,
+        probe_limit: int | None = None,
+        usage_snapshot: dict[str, Any] | None = None,
+        suppression_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_provider(provider)
+        if normalized == "openai":
+            runtime = self.refresh_openai_runtime_inventory(force_refresh=force_refresh, probe_limit=probe_limit)
+            endpoint_inventory = self.build_provider_endpoint_inventory(
+                normalized,
+                force_refresh=True,
+                usage_snapshot=usage_snapshot,
+                suppression_snapshot=suppression_snapshot,
+            )
+            return {
+                "provider": normalized,
+                "provider_id": runtime.get("provider_id") or normalized,
+                "provider_name": runtime.get("provider_name") or "OpenAI",
+                "fetched_at": int(runtime.get("fetched_at") or time.time()),
+                "status": endpoint_inventory.get("status"),
+                "source": endpoint_inventory.get("source"),
+                "suppressed": endpoint_inventory.get("suppressed", False),
+                "suppression": endpoint_inventory.get("suppression"),
+                "usage": endpoint_inventory.get("usage"),
+                "summary": {
+                    **dict(endpoint_inventory.get("summary") or {}),
+                    "validated_models": int(runtime.get("validated_model_count") or 0),
+                    "fully_routable_models": int(runtime.get("fully_routable_count") or 0),
+                },
+                "endpoints": {
+                    "base_url": runtime.get("base_url"),
+                    "models_endpoint": runtime.get("models_endpoint"),
+                    "chat_completions_endpoint": runtime.get("chat_completions_endpoint"),
+                    "responses_endpoint": runtime.get("responses_endpoint"),
+                    "messages_endpoint": runtime.get("messages_endpoint"),
+                    "messages_count_tokens_endpoint": runtime.get("messages_count_tokens_endpoint"),
+                    "codex_endpoint": runtime.get("codex_endpoint"),
+                },
+                "endpoint_manifest": runtime.get("endpoint_manifest") or {},
+                "recommended_models": runtime.get("recommended_models") or {},
+                "pricing": runtime.get("pricing") or {},
+                "models": endpoint_inventory.get("models") or [],
+                "diagnostics": endpoint_inventory.get("diagnostics") or {},
+                "runtime": {
+                    "selected_models": runtime.get("selected_models") or [],
+                    "fully_routable_models": runtime.get("fully_routable_models") or [],
+                    "validated_models": runtime.get("validated_models") or [],
+                    "model_templates": runtime.get("model_templates") or {},
+                },
+            }
+
+        endpoint_inventory = self.build_provider_endpoint_inventory(
+            normalized,
+            force_refresh=force_refresh,
+            usage_snapshot=usage_snapshot,
+            suppression_snapshot=suppression_snapshot,
+        )
+        diagnostics = dict(endpoint_inventory.get("diagnostics") or {})
+        models = []
+        resident_details = diagnostics.get("resident_details") if isinstance(diagnostics.get("resident_details"), list) else []
+        resident_lookup = {
+            str(item.get("name") or "").strip(): item
+            for item in resident_details
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        }
+        for row in endpoint_inventory.get("models") or []:
+            model_name = str(row.get("model_name") or "").strip()
+            enriched = dict(row)
+            if normalized == "local_llm":
+                resident_row = resident_lookup.get(model_name, {})
+                size_vram = int(resident_row.get("size_vram") or 0) if isinstance(resident_row, dict) else 0
+                enriched["resident"] = bool(row.get("resident"))
+                enriched["connected"] = bool(row.get("connected"))
+                enriched["gpu_resident"] = bool(row.get("gpu_resident")) or size_vram > 0
+                enriched["size_vram"] = row.get("size_vram") or (size_vram or None)
+                enriched["available"] = True
+                enriched["service_reachable"] = endpoint_inventory.get("status") in {"ready", "degraded"}
+            if normalized == "ai_kernel":
+                alias = str(diagnostics.get("model_alias") or "").strip()
+                connected = model_name == alias if alias else endpoint_inventory.get("status") == "ready"
+                enriched["resident"] = connected
+                enriched["connected"] = connected
+                enriched["kernel_eligible"] = connected
+                enriched["available"] = True
+                enriched["service_reachable"] = endpoint_inventory.get("status") in {"ready", "degraded"}
+            models.append(enriched)
+        summary = dict(endpoint_inventory.get("summary") or {})
+        if normalized == "local_llm":
+            summary["resident_models"] = sum(1 for row in models if bool(row.get("resident")))
+            summary["connected_models"] = sum(1 for row in models if bool(row.get("connected")))
+            summary["gpu_resident_models"] = sum(1 for row in models if bool(row.get("gpu_resident")))
+            summary["available_models"] = len(models)
+        if normalized == "ai_kernel":
+            summary["resident_models"] = sum(1 for row in models if bool(row.get("resident")))
+            summary["connected_models"] = sum(1 for row in models if bool(row.get("connected")))
+            summary["kernel_usable_models"] = sum(1 for row in models if bool(row.get("kernel_eligible")))
+            summary["available_models"] = len(models)
+        return {
+            "provider": normalized,
+            "fetched_at": int(time.time()),
+            "status": endpoint_inventory.get("status"),
+            "source": endpoint_inventory.get("source"),
+            "suppressed": endpoint_inventory.get("suppressed", False),
+            "suppression": endpoint_inventory.get("suppression"),
+            "usage": endpoint_inventory.get("usage"),
+            "summary": summary,
+            "models": models,
+            "diagnostics": diagnostics,
+            "status_index": endpoint_inventory.get("status_index") or {},
+            "error": endpoint_inventory.get("error"),
+            "status_code": endpoint_inventory.get("status_code"),
+            "endpoints": {
+                "base_url": diagnostics.get("base_url") or diagnostics.get("configured_endpoint") or diagnostics.get("active_endpoint"),
+                "active_endpoint": diagnostics.get("active_endpoint"),
+                "candidate_endpoints": diagnostics.get("candidate_endpoints") or [],
+            },
+        }
+
+    def build_all_provider_runtime_inventories(
+        self,
+        *,
+        force_refresh: bool = False,
+        probe_limit: int | None = None,
+        usage_snapshot: dict[str, Any] | None = None,
+        suppression_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        providers = ["openai", "mistral", "antigravity", "mimo", "local_llm", "ai_kernel"]
+        inventories = {
+            provider: self.build_provider_runtime_inventory(
+                provider,
+                force_refresh=force_refresh,
+                probe_limit=probe_limit,
+                usage_snapshot=usage_snapshot,
+                suppression_snapshot=suppression_snapshot,
+            )
+            for provider in providers
+        }
+        return {
+            "generated_at": int(time.time()),
+            "providers": inventories,
+            "summary": {
+                "provider_count": len(inventories),
+                "ready_count": sum(1 for item in inventories.values() if str(item.get("status") or "") == "ready"),
+                "degraded_count": sum(1 for item in inventories.values() if str(item.get("status") or "") == "degraded"),
+                "suppressed_count": sum(1 for item in inventories.values() if bool(item.get("suppressed"))),
+            },
+        }
+
+    def _entry_builders(self) -> dict[str, Any]:
+        return {
+            "openai": self._openai_entry,
+            "antigravity": self._antigravity_entry,
+            "mistral": self._mistral_entry,
+            "mimo": self._mimo_entry,
+            "local_llm": self._local_llm_entry,
+            "ai_kernel": self._ai_kernel_entry,
+        }
+
+    @staticmethod
+    def _entry_to_dict(entry: Any) -> dict[str, Any]:
+        if isinstance(entry, dict):
+            return dict(entry)
+        try:
+            return asdict(entry)
+        except TypeError:
+            return {
+                "provider": getattr(entry, "provider", None),
+                "fetched_at": getattr(entry, "fetched_at", None),
+                "ok": getattr(entry, "ok", None),
+                "source": getattr(entry, "source", None),
+                "models": list(getattr(entry, "models", []) or []),
+                "error": getattr(entry, "error", None),
+                "status_code": getattr(entry, "status_code", None),
+                "diagnostics": dict(getattr(entry, "diagnostics", {}) or {}),
+            }
+
+    def _index_payload(self, payload: dict[str, Any]) -> None:
+        providers = {name: value for name, value in payload.items() if isinstance(value, dict) and str(value.get("provider") or "").strip()}
+        self.model_index.rebuild(providers)
+        self.model_index.persist()
+
+    def collect(self, *, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+        entries = {provider: builder(force_refresh=force_refresh) for provider, builder in self._entry_builders().items()}
+        return {provider: self._entry_to_dict(entry) for provider, entry in entries.items()}
+
+    def _entry_is_fresh(self, provider: str, entry: dict[str, Any]) -> bool:
+        normalized = self._normalize_provider(provider)
+        fetched_at = int(entry.get("fetched_at") or 0) if isinstance(entry, dict) else 0
+        interval = int(self._entry_refresh_intervals_sec.get(normalized, self.snapshot_refresh_interval_sec) or self.snapshot_refresh_interval_sec)
+        return bool(fetched_at) and (time.time() - fetched_at) < max(5, interval)
+
+    def refresh_provider_entry(self, provider: str, *, force_refresh: bool = False) -> dict[str, Any]:
+        normalized = self._normalize_provider(provider)
+        builder = self._entry_builders().get(normalized)
+        if builder is None:
+            return {}
+        snapshot = self._read_snapshot_file()
+        providers = snapshot.get("providers") if isinstance(snapshot.get("providers"), dict) else {}
+        cached = providers.get(normalized) if isinstance(providers, dict) else None
+        if not force_refresh and isinstance(cached, dict) and self._entry_is_fresh(normalized, cached):
+            return cached
+        entry = self._entry_to_dict(builder(force_refresh=force_refresh))
+        providers[normalized] = entry
+        self.write_snapshot(providers)
+        return entry
+
+    def model_index_summary(self) -> dict[str, Any]:
+        return self.model_index.snapshot()
+
+    def find_model(self, model_name: str) -> dict[str, Any] | None:
+        return self.model_index.find_model(model_name)
+
+    def provider_models(self, provider: str) -> list[str]:
+        return self.model_index.provider_models(provider)
 
     def write_snapshot(self, payload: dict[str, Any]) -> None:
         self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         body = {"updated_at": int(time.time()), "providers": payload}
         self.snapshot_path.write_text(json.dumps(body, ensure_ascii=True, indent=2), encoding="utf-8")
+        self._index_payload(payload)
 
     def refresh(self, *, force_refresh: bool = False) -> dict[str, Any]:
         payload = self.collect(force_refresh=force_refresh)
@@ -762,11 +1490,17 @@ class ProviderInventoryService:
 
     def read_snapshot(self) -> dict[str, Any]:
         payload = self._read_snapshot_file()
-        if self._snapshot_is_stale(payload):
+        if self._snapshot_is_stale(payload) and not self._testing_mode():
             try:
                 return {"updated_at": int(time.time()), "providers": self.refresh(force_refresh=True)}
             except Exception:
+                providers = payload.get("providers", {}) if isinstance(payload, dict) else {}
+                if isinstance(providers, dict):
+                    self._index_payload(providers)
                 return payload
+        providers = payload.get("providers", {}) if isinstance(payload, dict) else {}
+        if isinstance(providers, dict):
+            self._index_payload(providers)
         return payload
 
     def provider_snapshot(self, provider: str) -> dict[str, Any]:

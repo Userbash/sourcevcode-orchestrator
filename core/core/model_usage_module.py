@@ -12,11 +12,27 @@ from .models import AgentResult, Task
 logger = logging.getLogger("model_usage_module")
 
 RATE_CARD_USD_PER_1K: dict[str, tuple[float, float]] = {
+    "gpt-5.4-nano": (0.00005, 0.0002),
+    "gpt-5.4-mini": (0.00025, 0.0010),
+    "gpt-5.4": (0.0015, 0.0060),
+    "gpt-5.5": (0.0025, 0.0100),
     "codestral-latest": (0.0003, 0.0009),
     "mistral-medium-latest": (0.0004, 0.0012),
     "mistral-large-latest": (0.0020, 0.0060),
     "devstral-latest": (0.0012, 0.0035),
 }
+
+RATE_CARD_PREFIX_USD_PER_1K: tuple[tuple[str, tuple[float, float]], ...] = (
+    ("gpt-5.5", (0.0025, 0.0100)),
+    ("gpt-5.4-nano", (0.00005, 0.0002)),
+    ("gpt-5.4-mini", (0.00025, 0.0010)),
+    ("gpt-5.4", (0.0015, 0.0060)),
+    ("codestral", (0.0003, 0.0009)),
+    ("mistral-large", (0.0020, 0.0060)),
+    ("mistral-medium", (0.0004, 0.0012)),
+    ("mistral-small", (0.0002, 0.0007)),
+    ("devstral", (0.0012, 0.0035)),
+)
 
 @dataclass
 class ModelStats:
@@ -191,6 +207,17 @@ class ModelUsageModule:
         }
 
     @staticmethod
+    def _lookup_rate_card(model: str) -> tuple[float, float]:
+        normalized = str(model or '').strip()
+        if normalized in RATE_CARD_USD_PER_1K:
+            return RATE_CARD_USD_PER_1K[normalized]
+        lowered = normalized.lower()
+        for prefix, rates in RATE_CARD_PREFIX_USD_PER_1K:
+            if lowered.startswith(prefix):
+                return rates
+        return (0.0, 0.0)
+
+    @staticmethod
     def _normalize_provider(provider: str, model: str) -> str:
         raw_provider = str(provider or "").strip().lower()
         raw_model = str(model or "").strip().lower()
@@ -211,7 +238,7 @@ class ModelUsageModule:
         normalized_provider = self._normalize_provider(provider, normalized_model)
         if normalized_provider == "local":
             return self._estimate_local_usage_cost(model=normalized_model, input_tokens=input_tokens, output_tokens=output_tokens, runtime=runtime)
-        input_rate, output_rate = RATE_CARD_USD_PER_1K.get(normalized_model, (0.0, 0.0))
+        input_rate, output_rate = self._lookup_rate_card(normalized_model)
         estimated_cost = round(((max(0, int(input_tokens)) / 1000.0) * input_rate) + ((max(0, int(output_tokens)) / 1000.0) * output_rate), 6)
         return {
             "provider": normalized_provider,

@@ -31,10 +31,17 @@ class MistralRegistryDiagnostics:
 
 
 class MistralModelRegistry:
+    @staticmethod
+    def _resolve_base_url() -> str:
+        configured = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
+        if "host.containers.internal:8012" in configured or "127.0.0.1:8012" in configured or "localhost:8012" in configured:
+            return "https://api.mistral.ai/v1"
+        return configured or "https://api.mistral.ai/v1"
+
     def __init__(self) -> None:
         self.cache_path = Path(os.getenv("MISTRAL_MODELS_CACHE_PATH", "core/.cache/mistral_models.json"))
         self.ttl_sec = int(os.getenv("MISTRAL_MODELS_CACHE_TTL_SEC", "21600"))
-        self.base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1").rstrip("/")
+        self.base_url = self._resolve_base_url()
         self.timeout = self._read_timeout()
         self._last_diagnostics = MistralRegistryDiagnostics(ok=True, source="cache")
 

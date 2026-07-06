@@ -34,9 +34,13 @@ class TaskRouter:
         self.load_balancer = load_balancer
         self.codex_economy_mode = os.getenv("AI_BRIDGE_CODEX_ECONOMY_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._api: Any | None = None
+        self._workflow_runtime_source = None
 
     def set_api(self, api: Any) -> None:
         self._api = api
+
+    def set_runtime_event_source(self, *, workflow_runtime_source=None) -> None:
+        self._workflow_runtime_source = workflow_runtime_source
 
     @staticmethod
     def _is_sourcecraft_work(task: Task) -> bool:
@@ -100,7 +104,7 @@ class TaskRouter:
         if tdd_override is not None:
             return tdd_override
 
-        capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
+        capability = self._resolved_capability(task)
         preferred_agent_id = self._preferred_agent_id(task)
         if preferred_agent_id:
             preferred_agent = self.registry.get(preferred_agent_id)
@@ -184,9 +188,61 @@ class TaskRouter:
         return trust == "trusted" or confidence >= 0.72
 
     @staticmethod
-    def _preferred_agent_id(task: Task) -> str | None:
-        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+    def _task_hints(task: Task) -> dict[str, Any]:
+        return task.routing_hints if isinstance(task.routing_hints, dict) else {}
+
+    def _workflow_runtime_entry(self, task: Task) -> dict[str, Any]:
+        workflow_id = str(self._task_hints(task).get("workflow_id") or "").strip()
+        if not workflow_id or not callable(self._workflow_runtime_source):
+            return {}
+        try:
+            runtime_data = self._workflow_runtime_source(workflow_id)
+        except TypeError:
+            try:
+                runtime_data = self._workflow_runtime_source()
+            except Exception:
+                return {}
+        except Exception:
+            return {}
+        if not isinstance(runtime_data, dict):
+            return {}
+        if isinstance(runtime_data.get("workflows"), dict):
+            row = runtime_data["workflows"].get(workflow_id)
+            return dict(row) if isinstance(row, dict) else {}
+        return dict(runtime_data)
+
+    def _workflow_runtime_hints(self, task: Task) -> dict[str, Any]:
+        entry = self._workflow_runtime_entry(task)
+        hints = dict(entry.get("routing_hints") or {}) if isinstance(entry.get("routing_hints"), dict) else {}
+        for key in (
+            "preferred_agent_id",
+            "batch_forced_agent_id",
+            "forced_agent_id",
+            "required_capability",
+            "target_capability",
+        ):
+            value = entry.get(key)
+            if value is not None and key not in hints:
+                hints[key] = value
+        return hints
+
+    def _resolved_capability(self, task: Task) -> str:
+        runtime_hints = self._workflow_runtime_hints(task)
+        for key in ("required_capability", "target_capability"):
+            value = runtime_hints.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if isinstance(task.required_capability, str) and task.required_capability.strip():
+            return task.required_capability
+        return CAPABILITY_BY_TASK_TYPE[task.type]
+
+    def _preferred_agent_id(self, task: Task) -> str | None:
+        runtime_hints = self._workflow_runtime_hints(task)
+        hints = self._task_hints(task)
         for key in ("preferred_agent_id", "batch_forced_agent_id", "forced_agent_id"):
+            value = runtime_hints.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
             value = hints.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()

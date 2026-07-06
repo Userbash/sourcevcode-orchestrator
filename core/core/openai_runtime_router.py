@@ -107,6 +107,52 @@ class OpenAIRuntimeRouter:
         return Path(os.getenv("OPENAI_RUNTIME_INVENTORY_PATH", "core/.cache/openai_runtime_inventory.json"))
 
     @classmethod
+    def _load_runtime_inventory_payload(cls) -> dict[str, Any]:
+        path = cls._runtime_inventory_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _role_for_task(task: Task, complexity: Complexity) -> str:
+        if task.type in {TaskType.CODE, TaskType.FIX}:
+            return "code_parallel"
+        if task.type == TaskType.REVIEW:
+            return "review_primary"
+        if task.type == TaskType.PLAN:
+            return "plan_primary"
+        if task.type == TaskType.TEST:
+            return "test_primary"
+        if task.type == TaskType.DOCS:
+            return "docs_primary"
+        if task.type == TaskType.RESEARCH:
+            return "research_primary"
+        return "plan_primary" if complexity in {Complexity.HIGH, Complexity.CRITICAL} else "docs_primary"
+
+    @classmethod
+    def _recommended_models_for_task(cls, task: Task, complexity: Complexity) -> list[str]:
+        payload = cls._load_runtime_inventory_payload()
+        recommendations = payload.get("recommended_models") if isinstance(payload.get("recommended_models"), dict) else {}
+        roles = recommendations.get("roles") if isinstance(recommendations.get("roles"), dict) else {}
+        defaults = recommendations.get("defaults") if isinstance(recommendations.get("defaults"), dict) else {}
+        role = cls._role_for_task(task, complexity)
+        role_models = roles.get(role) if isinstance(roles.get(role), list) else []
+        hints = getattr(task, "routing_hints", {}) or {}
+        cost_tier = str(hints.get("cost_tier") or "").strip().lower()
+        preferred: list[str] = []
+        if cost_tier == "economy":
+            preferred.extend(str(item).strip() for item in (defaults.get("economy") or []) if str(item).strip())
+            preferred.extend(str(item).strip() for item in role_models if str(item).strip())
+        else:
+            preferred.extend(str(item).strip() for item in role_models if str(item).strip())
+            if cost_tier == "premium" or complexity in {Complexity.HIGH, Complexity.CRITICAL}:
+                preferred.extend(str(item).strip() for item in (defaults.get("premium") or []) if str(item).strip())
+        preferred.extend(str(item).strip() for item in (defaults.get("best_overall") or []) if str(item).strip())
+        return cls._dedupe(preferred)
+
+    @classmethod
     def _load_routable_allowlist(cls) -> set[str] | None:
         path = cls._runtime_inventory_path()
         try:
@@ -237,14 +283,15 @@ class OpenAIRuntimeRouter:
         cost_tier = str(hints.get("cost_tier") or "").strip().lower()
         if source != "websocket":
             return models, None
+        recommended = OpenAIRuntimeRouter._recommended_models_for_task(task, complexity)
         if cost_tier == "economy":
             preferred = ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "gpt-5.5"]
-            return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_economy"
+            return OpenAIRuntimeRouter._dedupe(recommended + preferred + models), "ws_economy"
         if cost_tier == "premium" or complexity == Complexity.CRITICAL:
             preferred = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"]
-            return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_premium"
+            return OpenAIRuntimeRouter._dedupe(recommended + preferred + models), "ws_premium"
         preferred = ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.4-nano"]
-        return OpenAIRuntimeRouter._dedupe(preferred + models), "ws_interactive"
+        return OpenAIRuntimeRouter._dedupe(recommended + preferred + models), "ws_interactive"
 
     def _complexity_ordered_models(self, task: Task, complexity: Complexity, *, force_refresh: bool = False) -> tuple[list[str], str, list[str]]:
         catalog = self.registry.get_catalog(force_refresh=force_refresh)
@@ -267,7 +314,8 @@ class OpenAIRuntimeRouter:
             reason = "critical_quality"
 
         env_models = self._env_models(env_key)
-        models = [*env_models, *live, *self._fallbacks(complexity, task), *self._env_models("OPENAI_EXTRA_MODELS")]
+        recommended = self._recommended_models_for_task(task, complexity)
+        models = [*recommended, *env_models, *live, *self._fallbacks(complexity, task), *self._env_models("OPENAI_EXTRA_MODELS")]
         ordered = self._dedupe(models)
         return self._filter_models_by_runtime_inventory(ordered), reason, env_models
 
@@ -309,8 +357,12 @@ class OpenAIRuntimeRouter:
 
         blocked = self._session_blocked_models.get(session_id, set())
         models = [model for model in models if model not in blocked and ModelRoutingPolicy.is_model_available(model)]
+        recommended = self._recommended_models_for_task(task, complexity)
         if not any(model in models for model in env_models):
             models = ModelRoutingPolicy.sort_for_task(task, models, estimated_tokens=estimated, budget_pressure="high" if estimated > remaining else "normal")
+            if recommended:
+                pinned = [model for model in recommended if model in models]
+                models = self._dedupe(pinned + models)
         if not models:
             raise OpenAIModelUnavailableError("no OpenAI models available for runtime routing")
         base_cost = float(os.getenv("AI_BRIDGE_OPENAI_COST_PER_1M_TOKENS_USD", "1.0"))

@@ -1,6 +1,6 @@
 from core.core.orchestration_config import OrchestrationConfig
 from core.core.security import SecurityManager
-from core.scripts.run_orchestrator import build_parser
+from core.scripts.run_orchestrator import _http_api_enabled, _start_http_api, build_parser
 
 
 def test_safe_standard_tasks_do_not_need_confirmation_by_default():
@@ -60,3 +60,28 @@ def test_security_manager_inherits_full_auto_confirmation_policy():
 
     assert security.should_ask_confirmation({"type": "metrics", "risk_level": "low"}) is False
     assert security.should_ask_confirmation({"action": "secret_change"}) is False
+
+
+def test_http_api_is_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("AI_BRIDGE_API_ENABLED", raising=False)
+
+    assert _http_api_enabled() is True
+
+
+def test_start_http_api_uses_full_daemon_starter_when_enabled(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("AI_BRIDGE_API_ENABLED", "true")
+
+    started = _start_http_api(object(), starter=lambda orchestrator: calls.append(orchestrator))
+
+    assert started is True
+    assert calls and calls[0] is not None
+
+
+def test_start_http_api_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_API_ENABLED", "false")
+
+    started = _start_http_api(object(), starter=lambda orchestrator: (_ for _ in ()).throw(AssertionError("starter should not run")))
+
+    assert started is False

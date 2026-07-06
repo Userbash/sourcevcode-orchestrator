@@ -49,6 +49,8 @@ def test_create_standard_task_materializes_websocket_routing_hints():
     assert task.routing_hints["requested_model"] == "gpt-5-mini"
     assert task.assigned_model == "gpt-5-mini"
     assert task.complexity.value == "high"
+    assert task.routing_hints["frame_orchestrator"]["status"] == "validated"
+    assert task.routing_hints["frame_xml_package"].startswith("<orchestrator_package")
 
 
 
@@ -83,6 +85,22 @@ def test_create_standard_task_attaches_normalized_text_profile_and_parallel_hint
     assert profile["confidence_score"] >= 0.72
     assert any(item.startswith("files:") for item in profile["matched_rules"])
     assert task.routing_hints["parallelize_code"] is True
+    roles = task.routing_hints["frame_orchestrator"]["validation"]["worker_roles"]
+    assert any(item["role"] == "core_logic" for item in roles)
+
+
+def test_create_standard_task_frame_package_marks_missing_test_lane_when_not_explicit():
+    task = create_standard_task(
+        {
+            "message": "Implement repository and validation flow for websocket command handling",
+            "files": "core/repos/task_repo.py\ncore/security/validator.py",
+            "type": "code",
+            "source": "websocket",
+        }
+    )
+
+    gaps = task.routing_hints["frame_orchestrator"]["semantic_gap"]["gap_scanner"]
+    assert "missing_explicit_test_lane" in gaps
 
 
 def test_create_standard_task_rejects_runtime_ineligible_openai_model(tmp_path, monkeypatch):
@@ -99,3 +117,97 @@ def test_create_standard_task_rejects_runtime_ineligible_openai_model(tmp_path, 
     assert task.assigned_model is None
     assert task.routing_hints.get("requested_model") is None
     assert task.routing_hints["requested_model_rejected"] == "claude-opus-4-8"
+
+
+class _FakeSocratiCodeBridge:
+    def __init__(self, *, repo_path=None, **kwargs):
+        self.repo_path = repo_path
+        self.command = ["fake-socraticode"]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def analyze_task(self, *, task, context, description, task_type, routing_hints):
+        return {
+            "repo_path": self.repo_path or ".",
+            "context_coverage": {
+                "score": 0.88,
+                "coverage_ratio": 0.88,
+                "status": "strong",
+                "covered_files": list(task.input.files or []),
+                "missing_files": [],
+                "summary": "Compact indexed context is ready for this task.",
+                "indexed": True,
+            },
+            "cost_downgrade": {
+                "eligible": True,
+                "target_cost_tier": "economy",
+                "preferred_provider": "local",
+            },
+            "parallelism": {
+                "recommended_parallel_branches": 2,
+            },
+            "routing_recommendations": {
+                "prefer_low_cost_lanes": True,
+                "target_parallel_branches": 2,
+                "prefer_provider": "local",
+                "shared_index_ready": True,
+            },
+            "compact_context": {
+                "text": "Task: auth flow\nSearch: indexed hits already cover auth.ts and session.ts",
+                "tools_used": ["codebase_search", "codebase_context_search"],
+            },
+        }
+
+
+def test_create_standard_task_applies_socraticode_annotation_before_frame_package(monkeypatch):
+    import core.core.task_submission_api as task_submission_api
+
+    monkeypatch.setenv("SOCRATICODE_ENABLED", "true")
+    monkeypatch.setattr(task_submission_api, "SocratiCodeBridge", _FakeSocratiCodeBridge)
+
+    task = create_standard_task(
+        {
+            "message": "Repair auth flow with cheaper context path",
+            "files": "backend/auth.ts\nbackend/session.ts",
+            "type": "code",
+        }
+    )
+
+    assert task.routing_hints["socraticode"]["status"] == "applied"
+    assert task.routing_hints["socraticode_context_coverage"]["score"] == 0.88
+    assert task.routing_hints["socraticode_cost_downgrade"]["preferred_provider"] == "local"
+    assert task.routing_hints["frame_orchestrator"]["socraticode"]["status"] == "applied"
+    assert task.routing_hints["frame_orchestrator"]["socraticode"]["preferred_provider"] == "local"
+    assert task.routing_hints["frame_orchestrator"]["socraticode_context_compaction"]["status"] == "active"
+    assert task.routing_hints["frame_orchestrator"]["socraticode_context_compaction"]["raw_file_dump_allowed"] is False
+    assert '<socraticode status="applied"' in task.routing_hints["frame_xml_package"]
+    assert '<socraticode_context_compaction status="active"' in task.routing_hints["frame_xml_package"]
+
+
+def test_create_standard_task_applies_strong_coverage_cost_and_parallel_downgrade_before_prompt(monkeypatch):
+    import core.core.task_submission_api as task_submission_api
+
+    monkeypatch.setenv("SOCRATICODE_ENABLED", "true")
+    monkeypatch.setattr(task_submission_api, "SocratiCodeBridge", _FakeSocratiCodeBridge)
+
+    task = create_standard_task(
+        {
+            "message": "Implement backend and frontend changes for auth flow with tests and review",
+            "files": "backend/auth.ts\nfrontend/login.ts",
+            "acceptance_criteria": "tests pass\nreview completed",
+            "type": "code",
+            "source": "websocket",
+            "cost_tier": "interactive",
+        }
+    )
+
+    assert task.routing_hints["original_cost_tier"] == "interactive"
+    assert task.routing_hints["cost_tier"] == "economy"
+    assert task.routing_hints["socraticode_cost_tier_applied"] is True
+    assert task.routing_hints["original_parallel_branches"] == 3
+    assert task.routing_hints["parallel_branches"] == 2
+    assert task.routing_hints["socraticode_parallel_branches_applied"] is True
