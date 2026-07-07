@@ -113,7 +113,7 @@ echo "Starting Postgres..."
 $BRIDGE_CMD podman run -d --pull=never \
   --name hebrew_ai_postgres \
   --network hebrew-net \
-  -e POSTGRES_USER=postgres \
+  -e POSTGRES_USER="${DB_USER:?set DB_USER in .env or shell}" \
   -e POSTGRES_PASSWORD="$DB_PASSWORD" \
   -e POSTGRES_DB=hebrew_ai_db \
   -v "$PG_VOLUME_NAME":/var/lib/postgresql/data:Z \
@@ -143,7 +143,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   -e AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION="${AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION:-true}" \
   -e AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS="${AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS:-false}" \
   -e AI_BRIDGE_MEMORY_ENABLED="${AI_BRIDGE_MEMORY_ENABLED:-true}" \
-  -e AI_BRIDGE_MEMORY_DATABASE_URL="${AI_BRIDGE_MEMORY_DATABASE_URL:-postgresql+asyncpg://postgres:${DB_PASSWORD}@hebrew_ai_postgres:5432/hebrew_ai_db}" \
+  -e AI_BRIDGE_MEMORY_DATABASE_URL="${AI_BRIDGE_MEMORY_DATABASE_URL:-postgresql+asyncpg://${DB_USER:?set DB_USER in .env or shell}:${DB_PASSWORD}@hebrew_ai_postgres:5432/hebrew_ai_db}" \
   "$ORCHESTRATOR_IMAGE"
 
 echo "Starting Backend..."
@@ -157,7 +157,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   -e JWT_SECRET="$JWT_SECRET" \
   -e DB_HOST=hebrew_ai_postgres \
   -e DB_PORT=5432 \
-  -e DB_USER=postgres \
+  -e DB_USER="${DB_USER:?set DB_USER in .env or shell}" \
   -e DB_PASSWORD="$DB_PASSWORD" \
   -e DB_NAME=hebrew_ai_db \
   -e REDIS_HOST=hebrew_ai_redis \

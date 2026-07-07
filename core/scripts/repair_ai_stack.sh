@@ -72,17 +72,35 @@ else
     echo "Note: Ensure Ollama is running on 127.0.0.1:11434 if local models are used."
 fi
 
+check_control_ws() {
+    local base_url="$1"
+    python3 - "$PROJECT_ROOT" "$base_url" <<'PY' >/dev/null 2>&1
+import sys
+from pathlib import Path
+
+project_root = Path(sys.argv[1])
+base_url = sys.argv[2]
+sys.path.insert(0, str(project_root))
+
+from core.core.control_ws_client import run_control_ws_action_sync
+
+result = run_control_ws_action_sync(base_url, "stats.get", timeout_sec=5.0)
+result.require_success()
+raise SystemExit(0)
+PY
+}
+
 # 5. Core Connection
 echo -n "[Check] Orchestrator Core... "
 CORE_URL=""
-if curl -s http://localhost:8000/stats &>/dev/null; then
+if check_control_ws http://localhost:8000; then
     CORE_URL="http://localhost:8000"
-elif curl -s http://localhost:8001/stats &>/dev/null; then
+elif check_control_ws http://localhost:8001; then
     CORE_URL="http://localhost:8001"
 fi
 
 if [[ -n "$CORE_URL" ]]; then
-    echo -e "${GREEN}CONNECTED ($CORE_URL)${NC}"
+    echo -e "${GREEN}CONNECTED ($CORE_URL via /control/ws)${NC}"
 else
     echo -e "${YELLOW}OFFLINE${NC}"
     echo "Starting Orchestrator..."

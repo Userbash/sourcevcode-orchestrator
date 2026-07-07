@@ -1,7 +1,17 @@
 from core.agents.ai_kernel_agent import AIKernelAgent
 from core.core.availability import ModelAvailability, ProviderStatus
+from core.core.models import Task, TaskContext, TaskInput, TaskType
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR
 from core.core.provider_inventory_service import ProviderInventoryService
 from core.scripts import verify_provider_stack
+
+
+def _task(description: str) -> Task:
+    return Task(
+        TaskType.CODE,
+        TaskInput(description, files=[]),
+        TaskContext("repo", ".", "main"),
+    )
 
 
 def test_ai_kernel_summary_ready(monkeypatch):
@@ -88,3 +98,34 @@ def test_ai_kernel_agent_health_falls_back_to_host_internal(monkeypatch):
 
     assert health.status.value == 'ready'
     assert any('host.containers.internal:8012' in url for url in urls)
+
+
+def test_ai_kernel_agent_rejects_empty_request_before_client_init(monkeypatch):
+    class _UnexpectedOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            raise AssertionError("client should not be created")
+
+    monkeypatch.setattr('core.agents.ai_kernel_agent.OpenAI', _UnexpectedOpenAI)
+
+    result = AIKernelAgent().run(_task(""))
+
+    assert result.status.value == 'failed'
+    assert result.errors == [EMPTY_PROVIDER_REQUEST_ERROR]
+
+
+def test_ai_kernel_agent_rejects_empty_assistant_response(monkeypatch):
+    class _ChatCompletions:
+        @staticmethod
+        def create(*args, **kwargs):
+            return {'choices': [{'message': {'content': ''}}]}
+
+    class _Client:
+        def __init__(self, *args, **kwargs) -> None:
+            self.chat = type('ChatNamespace', (), {'completions': _ChatCompletions()})()
+
+    monkeypatch.setattr('core.agents.ai_kernel_agent.OpenAI', _Client)
+
+    result = AIKernelAgent().run(_task('Write a patch'))
+
+    assert result.status.value == 'failed'
+    assert result.errors == [EMPTY_ASSISTANT_RESPONSE_ERROR]

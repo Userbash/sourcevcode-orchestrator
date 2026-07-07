@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from core.core.external_ai_bridge import BridgeExecResult, ExternalAIBridge
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR
 from core.core.models import Complexity, Task, TaskContext, TaskInput, TaskType
 
 
@@ -138,3 +139,45 @@ def test_bridge_falls_back_to_mimo_when_antigravity_upstream_is_unavailable(monk
     assert result.ok is True
     assert result.provider == "mimo"
     assert result.output == "mimo ok"
+
+def test_bridge_rejects_empty_outbound_prompt_without_network(monkeypatch):
+    bridge = ExternalAIBridge()
+    bridge.proxy_url = "http://proxy.test"
+    bridge.api_key = "token"
+
+    def fail_request(*args, **kwargs):
+        raise AssertionError("network should not be called for empty prompts")
+
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.request", fail_request)
+
+    result = bridge.run_antigravity_cli(_task(), "   ", timeout_sec=30)
+
+    assert result.ok is False
+    assert result.error == EMPTY_PROVIDER_REQUEST_ERROR
+    assert result.error_type == "empty_request"
+
+
+def test_bridge_treats_empty_200_response_as_protocol_failure(monkeypatch):
+    bridge = ExternalAIBridge()
+    bridge.proxy_url = ""
+    bridge.api_base_url = "https://example.test/v1beta/openai"
+    bridge.chat_completions_endpoint = "https://example.test/v1beta/openai/chat/completions"
+    bridge.api_key = "token"
+    bridge.router = SimpleNamespace(build_plan=lambda task, prompt: SimpleNamespace(models=["antigravity-flash-lite"]))
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _Response(200, {"choices": [{"message": {"content": ""}}]})
+
+    monkeypatch.setattr("core.core.external_ai_bridge.httpx.post", fake_post)
+
+    result = bridge.run_antigravity_cli(_task(), "prompt", timeout_sec=30)
+
+    assert result.ok is False
+    assert result.error == EMPTY_ASSISTANT_RESPONSE_ERROR
+    assert result.error_type == "empty_response"
+
+
+def test_classify_error_recognizes_empty_request_and_response_markers():
+    assert ExternalAIBridge.classify_error(EMPTY_PROVIDER_REQUEST_ERROR) == "empty_request"
+    assert ExternalAIBridge.classify_error(EMPTY_ASSISTANT_RESPONSE_ERROR) == "empty_response"
+

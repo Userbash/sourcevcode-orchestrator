@@ -33,10 +33,23 @@ def test_ensure_authenticated_fails_without_token(monkeypatch):
 
 def test_read_token_accepts_github_api_alias(monkeypatch):
     auth = GhAuthBridge()
+    monkeypatch.delenv("GIT_API_KEY", raising=False)
     monkeypatch.delenv("HOST_BRIDGE_GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_API_KEY", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setenv("GITHUB_API", "github_nonsecret_token_value_1234567890")
+
+    assert auth._read_token() == "github_nonsecret_token_value_1234567890"
+
+
+def test_read_token_accepts_git_api_key_alias(monkeypatch):
+    auth = GhAuthBridge()
+    monkeypatch.delenv("HOST_BRIDGE_GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_API", raising=False)
+    monkeypatch.delenv("GITHUB_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GIT_API_KEY", "github_nonsecret_token_value_1234567890")
 
     assert auth._read_token() == "github_nonsecret_token_value_1234567890"

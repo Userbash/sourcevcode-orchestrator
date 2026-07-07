@@ -35,6 +35,19 @@ def test_router_honors_preferred_agent_id_for_parallel_batch():
     assert accepted.assigned_agent == "code-alt"
 
 
+def test_router_honors_explicit_orchestrator_route_mode():
+    registry = AgentRegistry()
+    registry.register("code-main", "codex", "local://code-main", ["code", "fix"])
+    router = TaskRouter(registry, LoadBalancer())
+    task = Task(TaskType.CODE, TaskInput("inspect ingress route"), TaskContext("p", ".", "main"))
+    task.routing_hints = {"route_mode": "orchestrator"}
+
+    accepted = router.route(task)
+
+    assert accepted.status.value == "accepted"
+    assert accepted.assigned_agent == "orchestrator"
+
+
 def test_sourcecraft_task_routes_to_orchestrator_when_no_dedicated_agent():
     registry = AgentRegistry()
     registry.register("codex-main", "codex", "local://codex", ["code", "fix"])

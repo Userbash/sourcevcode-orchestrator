@@ -49,17 +49,45 @@ def test_sourcecraft_module_reports_ready_and_exposes_context(tmp_path, monkeypa
     assert any("SOURCECRAFT" in message for _, message in api.messages)
 
 
-def test_sourcecraft_module_gracefully_degrades_when_binary_missing(monkeypatch):
+def test_sourcecraft_module_stays_ready_for_git_only_repo_workflows_when_binary_missing(monkeypatch):
     monkeypatch.setenv("SOURCECRAFT_CLI_BIN", "/nonexistent/sourcecraft-src")
 
     module = SourceCraftModule()
     module.on_load(_FakeAPI())
 
+    def fake_run(command, *, repo_path=".", timeout_sec=None):
+        joined = " ".join(command)
+        if joined == "git remote get-url origin":
+            return {"ok": True, "stdout": "https://github.com/Userbash/sourcevcode-orchestrator.git", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        if joined == "dh sh -lc command -v gh >/dev/null 2>&1":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "sh -lc command -v gh >/dev/null 2>&1":
+            return {"ok": False, "stdout": "", "stderr": "gh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "dh gh auth status":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "gh auth status":
+            return {"ok": False, "stdout": "", "stderr": "gh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.name":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "git config --global user.name":
+            return {"ok": False, "stdout": "", "stderr": "unset", "returncode": 1, "command": command, "repo_path": repo_path}
+        if joined == "dh git config --global user.email":
+            return {"ok": False, "stdout": "", "stderr": "dh missing", "returncode": 127, "command": command, "repo_path": repo_path}
+        if joined == "git config --global user.email":
+            return {"ok": False, "stdout": "", "stderr": "unset", "returncode": 1, "command": command, "repo_path": repo_path}
+        if joined == "git symbolic-ref --short HEAD":
+            return {"ok": True, "stdout": "main", "stderr": "", "returncode": 0, "command": command, "repo_path": repo_path}
+        raise AssertionError(joined)
+
+    monkeypatch.setattr(module, "_run_command", fake_run)
     final = module.finalize()
 
-    assert final["status"] == "error"
+    assert final["status"] == "ready"
     assert final["binary"] is None
-    assert "not found" in str(final["last_error"])
+    assert final["runtime"]["status"] == "ready"
+    assert final["runtime"]["capabilities"]["read_only_repo"] is True
+    assert final["runtime"]["capabilities"]["github_api"] is False
+    assert "src binary not available" in final["runtime"]["warnings"]
 
 
 def test_sourcecraft_module_builds_delegation_profile():
@@ -75,6 +103,31 @@ def test_sourcecraft_module_builds_delegation_profile():
     assert profile["recommended_owner"] == "sourcecraft"
     assert profile["task_family"] == "repo_ops"
     assert "summarize repository state" in profile["sourcecraft_actions"]
+
+
+def test_sourcecraft_module_builds_parallel_coding_brief():
+    from core.core.models import Task, TaskContext, TaskInput, TaskType
+
+    module = SourceCraftModule()
+    module._status = "ready"
+    task = Task(
+        TaskType.CODE,
+        TaskInput(
+            "Implement websocket migration for SourceCraft task streaming",
+            files=["core/scripts/orchestrator_daemon.py", "core/core/orchestrator_ws_dispatcher.py", "core/test/test_control_ws_protocol.py"],
+            constraints=["keep health endpoints on http"],
+            acceptance_criteria=["code path updated", "tests updated"],
+        ),
+        TaskContext("demo", ".", "main"),
+    )
+
+    brief = module.build_parallel_coding_brief(task, {"description": task.input.description})
+
+    assert brief["should_parallelize"] is True
+    assert brief["recommended_parallel_branches"] >= 2
+    assert len(brief["agent_lanes"]) >= 2
+    assert brief["orchestrator_payload"]["sourcecraft_parallel_delegate"] is True
+    assert "health and provider endpoints on HTTP" in brief["orchestrator_instruction"]
 
 
 def test_orchestrator_registers_sourcecraft_module(monkeypatch):

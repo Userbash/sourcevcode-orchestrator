@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import sys
 from dataclasses import dataclass
 from typing import Any
-from urllib import error, request
+
+from core.core.control_ws_client import run_control_ws_action_sync
 
 
 @dataclass(slots=True)
 class SmokeResult:
     ok: bool
-    url: str
-    status_code: int | None
+    label: str
+    transport: str
     payload: dict[str, Any]
     error_message: str | None = None
 
@@ -22,72 +21,71 @@ def _base_url() -> str:
     return os.getenv("AI_BRIDGE_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
-def _http_json(method: str, url: str, payload: dict[str, Any] | None = None, timeout_sec: float = 10.0) -> SmokeResult:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method=method)
+def _ws_json(base_url: str, action: str, payload: dict[str, Any] | None = None, *, frame_type: str = "command", timeout_sec: float = 10.0) -> SmokeResult:
     try:
-        with request.urlopen(req, timeout=timeout_sec) as resp:
-            raw = resp.read().decode("utf-8")
-            parsed: dict[str, Any]
-            if raw.strip():
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    parsed = {"raw": raw}
-            else:
-                parsed = {}
-            return SmokeResult(True, url, getattr(resp, "status", None), parsed)
-    except error.HTTPError as exc:
-        raw = exc.read().decode("utf-8") if hasattr(exc, "read") else ""
-        parsed = {"raw": raw} if raw else {}
-        return SmokeResult(False, url, exc.code, parsed, f"HTTP {exc.code}: {exc.reason}")
+        result = run_control_ws_action_sync(base_url, action, payload, frame_type=frame_type, timeout_sec=timeout_sec)
+        terminal_payload = result.terminal_data()
+        ok = result.terminal.get("type") != "error" and str(terminal_payload.get("status") or "ok") != "error"
+        return SmokeResult(
+            ok=ok,
+            label=action,
+            transport="ws",
+            payload=terminal_payload,
+            error_message=None if ok else str(result.terminal.get("error") or terminal_payload.get("error") or "ws request failed"),
+        )
     except Exception as exc:
-        return SmokeResult(False, url, None, {}, str(exc))
+        return SmokeResult(False, action, "ws", {}, str(exc))
 
 
 def run_smoke_check(base_url: str, timeout_sec: float = 10.0) -> int:
-    endpoints = [
-        ("GET", f"{base_url}/sourcecraft", None),
-        ("POST", f"{base_url}/sourcecraft/delegate", {
-            "description": "Prepare SourceCraft release notes and repo status",
-            "task_type": "plan",
-            "priority": "normal",
-            "repo_path": ".",
-            "branch": "main",
-            "files": [],
-            "constraints": ["smoke-check"],
-            "acceptance_criteria": ["SourceCraft delegation succeeds"],
-            "required_capability": "sourcecraft",
-        }),
+    requests = [
+        ("sourcecraft.status.get", None, "command"),
+        (
+            "sourcecraft.delegate",
+            {
+                "description": "Prepare SourceCraft release notes and repo status",
+                "task_type": "plan",
+                "priority": "normal",
+                "repo_path": ".",
+                "branch": "main",
+                "files": [],
+                "constraints": ["smoke-check"],
+                "acceptance_criteria": ["SourceCraft delegation succeeds"],
+                "required_capability": "sourcecraft",
+            },
+            "command",
+        ),
     ]
 
     results: list[SmokeResult] = []
-    for method, url, payload in endpoints:
-        results.append(_http_json(method, url, payload, timeout_sec=timeout_sec))
+    for action, payload, frame_type in requests:
+        results.append(_ws_json(base_url, action, payload, frame_type=frame_type, timeout_sec=timeout_sec))
 
     ok = True
     print("SourceCraft Smoke Check")
     print(f"Base URL: {base_url}")
     for result in results:
-        label = result.url.rsplit("/", 1)[-1]
         if result.ok:
-            print(f"[{label}] OK status={result.status_code}")
+            print(f"[{result.label}] OK transport={result.transport}")
         else:
-            print(f"[{label}] FAIL status={result.status_code} error={result.error_message}")
+            print(f"[{result.label}] FAIL transport={result.transport} error={result.error_message}")
             ok = False
             continue
 
-        if result.url.endswith("/sourcecraft"):
+        if result.label == "sourcecraft.status.get":
             status = str(result.payload.get("status", "unknown"))
             role = result.payload.get("role", {}) if isinstance(result.payload.get("role"), dict) else {}
-            print(f"  sourcecraft_status={status} role={role.get("name", "unknown")}")
+            print(f"  sourcecraft_status={status} role={role.get('name', 'unknown')}")
             if status == "error":
                 ok = False
-        elif result.url.endswith("/sourcecraft/delegate"):
+        elif result.label == "sourcecraft.delegate":
             route = result.payload.get("route", {}) if isinstance(result.payload.get("route"), dict) else {}
             schedule = result.payload.get("schedule", {}) if isinstance(result.payload.get("schedule"), dict) else {}
-            print(f"  assigned_agent={route.get("assigned_agent", "unknown")} route_mode={schedule.get("route_mode", "unknown")}")
-            if result.payload.get("status") != "ok" or route.get("assigned_agent") not in {"orchestrator", None} and schedule.get("route_mode") != "orchestrator":
+            delegation = result.payload.get("delegation", {}) if isinstance(result.payload.get("delegation"), dict) else {}
+            print(
+                f"  assigned_agent={route.get('assigned_agent', 'unknown')} route_mode={schedule.get('route_mode', 'unknown')} owner={delegation.get('recommended_owner', 'unknown')}"
+            )
+            if schedule.get("route_mode") == "unknown":
                 ok = False
 
     print("RESULT: OK" if ok else "RESULT: FAIL")
@@ -95,9 +93,9 @@ def run_smoke_check(base_url: str, timeout_sec: float = 10.0) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Smoke-test the SourceCraft API endpoints on the orchestrator.")
+    parser = argparse.ArgumentParser(description="Smoke-test SourceCraft over the orchestrator control websocket.")
     parser.add_argument("--base-url", default=_base_url(), help="Orchestrator base URL, default: %(default)s")
-    parser.add_argument("--timeout-sec", type=float, default=10.0, help="HTTP timeout in seconds")
+    parser.add_argument("--timeout-sec", type=float, default=10.0, help="Request timeout in seconds")
     args = parser.parse_args(argv)
     return run_smoke_check(args.base_url, timeout_sec=args.timeout_sec)
 

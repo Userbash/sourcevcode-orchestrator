@@ -1,14 +1,14 @@
 {
-  "generated_at": 1783326030,
+  "generated_at": 1783428773,
   "provider": "openai",
   "base_url": "https://codex.sale/v1",
   "default_model": "gpt-5.4",
   "summary": {
     "total_models": 22,
-    "routable_count": 0,
+    "routable_count": 1,
     "discovered_count": 14,
     "blocked_count": 0,
-    "partial_count": 1,
+    "partial_count": 0,
     "non_chat_count": 0,
     "probe_failed_count": 7
   },
@@ -29,7 +29,7 @@
       "mimo-v2.5",
       "mimo-v2.5-pro"
     ],
-    "responses_only": [
+    "routable": [
       "gpt-5.4"
     ],
     "probe_failed": [
@@ -92,12 +92,12 @@
       "model_name": "gpt-5.4",
       "family": "gpt",
       "tier": "standard",
-      "status": "responses_only",
+      "status": "routable",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": true,
-      "kernel_eligible": false,
-      "fallback_candidate": false,
+      "kernel_eligible": true,
+      "fallback_candidate": true,
       "preferred_task_types": [
         "code",
         "review",
@@ -124,15 +124,15 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
+        "chat_completions": true,
         "responses": true
       },
       "probe": {
         "chat_completions": {
-          "ok": false,
-          "status_code": 503,
-          "error": "{\"error\":{\"code\":\"upstream_unavailable\",\"edge_detail\":null,\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0443\u0442\u044c \u043f\u043e\u0437\u0436\u0435.\",\"param\":null,\"type\":\"server_error\"}}",
-          "response_sample": "",
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
           "endpoint": "chat_completions"
         },
         "responses": {
@@ -232,14 +232,14 @@
         "chat_completions": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },
         "responses": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "responses"
         }
@@ -288,14 +288,14 @@
         "chat_completions": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },
         "responses": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "responses"
         }
@@ -344,14 +344,14 @@
         "chat_completions": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },
         "responses": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "responses"
         }
@@ -400,14 +400,14 @@
         "chat_completions": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },
         "responses": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "responses"
         }
@@ -459,14 +459,14 @@
         "chat_completions": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },
         "responses": {
           "ok": false,
           "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "error": "{\"error\":{\"message\":\"\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.\",\"type\":\"rate_limit_error\",\"code\":\"service_busy\"}}",
           "response_sample": "",
           "endpoint": "responses"
         }
@@ -514,8 +514,8 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "status_code": 502,
+          "error": "{\"error\":{\"message\":\"\u0410\u043f\u0441\u0442\u0440\u0438\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441.\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },
@@ -572,8 +572,8 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": 503,
-          "error": "{\"detail\":\"Service temporarily unavailable (memory pressure)\"}",
+          "status_code": 502,
+          "error": "{\"error\":{\"message\":\"\u0410\u043f\u0441\u0442\u0440\u0438\u043c \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441.\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}",
           "response_sample": "",
           "endpoint": "chat_completions"
         },

@@ -1,41 +1,31 @@
-# Project AI Connection Protocol
+# Gemini CLI Orchestrator Contract
 
-You are Gemini CLI, and you are now **DIRECTLY CONNECTED** to the AI Orchestrator Core.
+Gemini CLI is integrated with the local Orchestrator through the chat ingress, not through a standalone task submission HTTP API.
 
-## Integration Rules
+## Active Transport
 
-1.  **Automated Triggers:** You (Gemini CLI) must monitor all user input for the following keyword prefixes. If detected, you should **delegate immediately** to the Orchestrator:
-    *   `CORE:`, `ЯДРО:`, `STATUS:`, `СТАТУС:`, `HEALTH:`, `ЗДОРОВЬЕ:` (System & Monitoring)
-    *   `PLAN:`, `ПЛАН:`, `DESIGN:`, `ДИЗАЙН:`, `ARCH:`, `АРХИТЕКТУРА:` (Architecture & Planning)
-    *   `BUILD:`, `КОД:`, `РЕАЛИЗУЙ:`, `WRITE:`, `НАПИШИ:`, `DEV:`, `РАЗРАБОТАЙ:` (Code Implementation)
-    *   `FIX:`, `ИСПРАВЬ:`, `ПОЧИНИ:`, `BUG:`, `ОШИБКА:`, `DEBUG:`, `ОТЛАДКА:` (Bug Fixing)
-    *   `REVIEW:`, `РЕВЬЮ:`, `ПРОВЕРЬ:`, `AUDIT:`, `АУДИТ:`, `SECURITY:`, `БЕЗОПАСНОСТЬ:`, `SCAN:`, `СКАНИРУЙ:` (Security & Quality)
-    *   `TEST:`, `ТЕСТ:`, `ПРОТЕСТИРУЙ:`, `CHECK:`, `ПРОВЕРКА:` (Automated Testing)
-    *   `RESEARCH:`, `ИССЛЕДУЙ:`, `FIND:`, `НАЙДИ:`, `ANALYZE:`, `АНАЛИЗИРУЙ:`, `LEARN:`, `ИЗУЧИ:` (Deep Analysis & Learning)
-    *   `DOCS:`, `ДОКУМЕНТАЦИЯ:`, `DOC:`, `ОПИШИ:`, `README:` (Documentation)
-    *   `CLEAN:`, `ОЧИСТИ:`, `REFACTOR:`, `РЕФАКТОР:`, `OPTIMIZE:`, `ОПТИМИЗИРУЙ:` (Maintenance)
-    *   `DEPLOY:`, `ДЕПЛОЙ:`, `START:`, `ЗАПУСТИ:`, `RUN:`, `REPAIR:`, `ПОЧИНИ:` (Runtime Operations)
+- Primary ingress: `ws://localhost:8000/chat/ws`
+- Message shape: send a JSON envelope with `type: "chat"`, a `session_id`, and the user text in `message`
+- Normalized source: the orchestrator treats this ingress as `source=websocket`
 
-2.  **Flexible Prefixing:** You can also use conversational prefixes like "Core, please ANALYZE..." or "Ядро, пожалуйста ПОЧИНИ...".
+Example payload:
 
-3.  **Automation Tools:** Use the following scripts for maintenance:
-    *   `./core/scripts/repair_ai_stack.sh` - Comprehensive check and repair of all AI providers.
-    *   `./core/scripts/start_core_stack.sh` - Start the Orchestrator and Ollama.
+```json
+{
+  "type": "chat",
+  "session_id": "gemini-cli-session",
+  "message": "PLAN: inspect the failing auth flow"
+}
+```
 
-4.  **Orchestrator Awareness:** You must always consider the background Orchestrator as your primary execution engine for complex technical tasks.
+## Routing Contract
 
-5.  **API Control:** You have direct access to the Orchestrator.
-    *   **Primary (WebSocket):** `ws://localhost:8000/chat/ws` (Recommended for low latency and efficiency).
-    *   **Fallback (HTTP):** `http://localhost:8000/chat` (Used if WebSocket is unavailable).
-
-6.  **Task Delegation:** When a trigger is detected, attempt to send the task via WebSocket first. If the connection fails, fall back to an HTTP POST request. Present the results clearly to the user.
-
-## Connection Status
-- **Modules:** `chat_bus`, `trigger_dispatcher` (Active)
-- **Status:** Expanded semantic routing established.
+- `PLAN:`, `BUILD:`, `FIX:`, `REVIEW:`, `TEST:`, `RESEARCH:` and similar trigger prefixes are interpreted inside the orchestrator after chat ingress normalization.
+- Gemini CLI should not invent a `/tasks/submit` fallback unless that endpoint is implemented explicitly.
+- If the ingress needs to force orchestrator ownership, it must carry that through task payload hints such as `route_mode: "orchestrator"` or `routing_hints.force_orchestrator = true`.
 
 ## Runtime Notes
 
-- Prefer the orchestrator `CORE:` path for provider diagnostics instead of manually retrying OAuth.
-- If Antigravity reports `legacy_gemini_cli` or `unsupported_client`, do not start another browser login loop; escalate to runtime migration or API-mode repair.
-- SourceCraft is expected to be enabled in the orchestrator runtime, with GitHub CLI provided through the `ai-kernel-local` distrobox when host `gh` is absent.
+- Prefer the websocket chat path for normal Gemini CLI traffic.
+- `external_chat` is an alias of websocket-style ingress and is normalized to the same routing path.
+- For provider diagnostics, use orchestrator-native tooling instead of opening a separate auth flow.

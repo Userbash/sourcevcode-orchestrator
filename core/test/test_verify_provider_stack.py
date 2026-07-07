@@ -66,7 +66,7 @@ def test_verify_provider_stack_uses_mimo_credential_snapshot(monkeypatch, capsys
         env_names = tuple(envs)
         if env_names == ("MIMO_API_KEY", "AI_BRIDGE_MIMO_API_KEY"):
             return {"configured": True, "usable": True, "placeholder": False, "env_var": "MIMO_API_KEY"}
-        if env_names == ("GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN"):
+        if env_names == ("GIT_API_KEY", "GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN"):
             return {"configured": False, "usable": False, "placeholder": False, "env_var": None}
         return {"configured": True, "usable": True, "placeholder": False, "env_var": env_names[0]}
     monkeypatch.setattr(verify_provider_stack, "ProviderInventoryService", _Inventory)

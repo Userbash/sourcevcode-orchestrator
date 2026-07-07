@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - optional dependency
 from .base_agent import BaseAgent
 from core.core.env_loader import load_env_file
 from core.core.models import AgentHealth, AgentResult, AgentStatus, Task, TaskStatus
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR, extract_chat_completion_text, has_meaningful_request_payload
 
 
 class AIKernelAgent(BaseAgent):
@@ -94,6 +95,9 @@ class AIKernelAgent(BaseAgent):
         self._record_execution_prompt(task, prompt, memory_context, provider=self.provider, model_name=model_name)
         if OpenAI is None:
             return self.result(task, "OpenAI SDK is not installed", TaskStatus.FAILED, 0.0, ["openai_sdk_missing"], provider=self.provider, model_name=model_name)
+        if not has_meaningful_request_payload(prompt):
+            self.last_error = EMPTY_PROVIDER_REQUEST_ERROR
+            return self.result(task, 'AI kernel execution error', TaskStatus.FAILED, 0.0, [EMPTY_PROVIDER_REQUEST_ERROR], provider=self.provider, model_name=model_name)
         client = OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=1)
         try:
             response = client.chat.completions.create(
@@ -104,7 +108,8 @@ class AIKernelAgent(BaseAgent):
         except Exception as exc:
             self.last_error = str(exc)
             return self.result(task, 'AI kernel execution error', TaskStatus.FAILED, 0.0, [str(exc)], provider=self.provider, model_name=model_name)
-        content = response.choices[0].message.content or ''
-        if not content.strip():
-            return self.result(task, 'Empty AI kernel response', TaskStatus.FAILED, 0.0, ['empty_ai_kernel_response'], provider=self.provider, model_name=model_name)
+        content = extract_chat_completion_text(response)
+        if not content:
+            self.last_error = EMPTY_ASSISTANT_RESPONSE_ERROR
+            return self.result(task, 'Empty AI kernel response', TaskStatus.FAILED, 0.0, [EMPTY_ASSISTANT_RESPONSE_ERROR], provider=self.provider, model_name=model_name)
         return self.result(task, content, TaskStatus.DONE, 0.9, provider=self.provider, model_name=model_name)

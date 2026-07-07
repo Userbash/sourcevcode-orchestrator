@@ -64,6 +64,12 @@ class _FakeFallbackResponsesOpenAIClient(_FakeResponsesOpenAIClient):
         raise Exception("Responses endpoint unsupported: 404 not found")
 
 
+class _FakeEmptyResponsesOpenAIClient(_FakeResponsesOpenAIClient):
+    def _responses_create(self, *, model: str, input, temperature: float, **kwargs):
+        self.responses_calls.append(model)
+        return {"id": "resp_empty", "output": []}
+
+
 def test_codex_agent_skips_blocked_claude_pool_model(monkeypatch, tmp_path):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "")
     monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
@@ -173,3 +179,23 @@ def test_codex_agent_falls_back_to_chat_when_responses_endpoint_is_unavailable(m
     assert result.output.summary == "chat from gpt-5.5"
     assert _FakeFallbackResponsesOpenAIClient.responses_calls == ["gpt-5.5"]
     assert _FakeFallbackResponsesOpenAIClient.chat_calls == ["gpt-5.5"]
+
+def test_codex_agent_falls_back_to_chat_when_responses_returns_empty_payload(monkeypatch):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai_usable_key_value_1234567890")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_USE_RESPONSES", "true")
+    monkeypatch.setattr(codex_agent_module, "OpenAI", _FakeEmptyResponsesOpenAIClient)
+
+    agent = CodexAgent("codex-main")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_AUTO_MODEL", "false")
+    agent.set_identity(provider="openai", model_name="gpt-5.5")
+
+    _FakeEmptyResponsesOpenAIClient.chat_calls = []
+    _FakeEmptyResponsesOpenAIClient.responses_calls = []
+    result = agent.run(_task())
+
+    assert result.status.value == "done"
+    assert result.output.summary == "chat from gpt-5.5"
+    assert _FakeEmptyResponsesOpenAIClient.responses_calls == ["gpt-5.5"]
+    assert _FakeEmptyResponsesOpenAIClient.chat_calls == ["gpt-5.5"]
+

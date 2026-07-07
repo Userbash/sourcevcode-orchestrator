@@ -2,11 +2,13 @@
 # Replicated Database Startup Script
 BRIDGE_CMD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bridge/exec.sh"
 DB_DIR="/var/home/sanya/Hebrew-web/backend/database"
+MASTER_DB_USER="${MASTER_DB_USER:-}"
 MASTER_DB_PASSWORD="${MASTER_DB_PASSWORD:-}"
+REPLICATION_DB_USER="${REPLICATION_DB_USER:-}"
 REPLICATION_DB_PASSWORD="${REPLICATION_DB_PASSWORD:-}"
 
-if [ -z "$MASTER_DB_PASSWORD" ] || [ -z "$REPLICATION_DB_PASSWORD" ]; then
-  echo "[ERROR] MASTER_DB_PASSWORD and REPLICATION_DB_PASSWORD must be set before running this script."
+if [ -z "$MASTER_DB_USER" ] || [ -z "$MASTER_DB_PASSWORD" ] || [ -z "$REPLICATION_DB_USER" ] || [ -z "$REPLICATION_DB_PASSWORD" ]; then
+  echo "[ERROR] MASTER_DB_USER, MASTER_DB_PASSWORD, REPLICATION_DB_USER, and REPLICATION_DB_PASSWORD must be set before running this script."
   exit 1
 fi
 
@@ -19,18 +21,18 @@ $BRIDGE_CMD podman rm hebrew_ai_postgres pg_master pg_replica hebrew_ai_redis ||
 
 # 2. Start Master
 echo "Launching PG Master..."
-$BRIDGE_CMD podman run -d   --name pg_master   --network hebrew-net   -e POSTGRES_USER=admin   -e POSTGRES_PASSWORD="$MASTER_DB_PASSWORD"   -e POSTGRES_DB=hebrew_db   -p 5432:5432   postgres:16-alpine -c wal_level=replica -c max_wal_senders=10
+$BRIDGE_CMD podman run -d   --name pg_master   --network hebrew-net   -e POSTGRES_USER="$MASTER_DB_USER"   -e POSTGRES_PASSWORD="$MASTER_DB_PASSWORD"   -e POSTGRES_DB=hebrew_db   -p 5432:5432   postgres:16-alpine -c wal_level=replica -c max_wal_senders=10
 
 echo "Waiting for Master to initialize..."
 sleep 10
 
 # 3. Create replication user on Master
 echo "Creating replication user..."
-$BRIDGE_CMD podman exec pg_master psql -U admin -d hebrew_db -c "CREATE USER replicator WITH REPLICATION ENCRYPTED PASSWORD '$REPLICATION_DB_PASSWORD';"
+$BRIDGE_CMD podman exec pg_master psql -U "$MASTER_DB_USER" -d hebrew_db -c "CREATE USER \"$REPLICATION_DB_USER\" WITH REPLICATION ENCRYPTED PASSWORD '$REPLICATION_DB_PASSWORD';"
 
 # 4. Initialize Schema on Master
 echo "Applying optimized schema to Master..."
-$BRIDGE_CMD podman exec -i pg_master psql -U admin -d hebrew_db < "$DB_DIR/migrations/001_init.sql"
+$BRIDGE_CMD podman exec -i pg_master psql -U "$MASTER_DB_USER" -d hebrew_db < "$DB_DIR/migrations/001_init.sql"
 
 # 5. Start Redis for Fast Caching
 echo "Launching Redis Cache..."
@@ -40,7 +42,7 @@ $BRIDGE_CMD podman run -d   --name hebrew_ai_redis   --network hebrew-net   -p 6
 # In a real production, we'd use pg_basebackup. For this automated task,
 # we'll start it as a hot standby.
 echo "Launching PG Replica (Read-Only)..."
-$BRIDGE_CMD podman run -d   --name pg_replica   --network hebrew-net   -e POSTGRES_USER=admin   -e POSTGRES_PASSWORD="$MASTER_DB_PASSWORD"   -e POSTGRES_DB=hebrew_db   -p 5433:5432   postgres:16-alpine
+$BRIDGE_CMD podman run -d   --name pg_replica   --network hebrew-net   -e POSTGRES_USER="$MASTER_DB_USER"   -e POSTGRES_PASSWORD="$MASTER_DB_PASSWORD"   -e POSTGRES_DB=hebrew_db   -p 5433:5432   postgres:16-alpine
 
 echo "Database Infrastructure Ready."
 echo "Master: localhost:5432"

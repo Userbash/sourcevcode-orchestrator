@@ -210,7 +210,7 @@ def _parse_rabbitmq_host_port(url: str) -> tuple[str | None, int | None]:
 
 
 def check_rabbitmq_connectivity(rabbitmq_url: str | None = None, *, timeout: float = 3.0) -> dict[str, Any]:
-    url = (rabbitmq_url or os.getenv("AI_BRIDGE_RABBITMQ_URL", "amqp://guest:guest@localhost/")).strip()
+    url = (rabbitmq_url or os.getenv("AI_BRIDGE_RABBITMQ_URL", "amqp://localhost/")).strip()
     host, port = _parse_rabbitmq_host_port(url)
     if not host or not port:
         return {

@@ -226,12 +226,14 @@ class _FakeProviderOrchestrator(_FakeOrchestrator):
         self.runtime_event_stream_hub = RuntimeEventStreamHub()
         self.runtime_event_stream_hub.publish_agent_event("coder-1", {"status": "ready", "source": "boot"})
         self.hot_refresh_calls = []
+        self.stream_calls = []
 
     def _refresh_hot_provider_inventory_snapshot(self, force_refresh=False):
         self.hot_refresh_calls.append(force_refresh)
         return {"ok": True}
 
     async def stream_user_task(self, task_payload, source=None):
+        self.stream_calls.append({"task_payload": dict(task_payload), "source": source})
         yield {
             "type": "final_result",
             "result": {
@@ -416,7 +418,8 @@ def test_runtime_events_websocket_streams_agent_event_snapshot():
 
 
 def test_chat_websocket_route_accepts_compact_frame_and_returns_final_result():
-    app = _build_http_app(_FakeProviderOrchestrator())
+    orch = _FakeProviderOrchestrator()
+    app = _build_http_app(orch)
 
     with TestClient(app) as client:
         with client.websocket_connect("/chat/ws", subprotocols=["chat.v1", "chat.json"]) as websocket:
@@ -434,6 +437,68 @@ def test_chat_websocket_route_accepts_compact_frame_and_returns_final_result():
     assert message["result"]["status"] == "ok"
     assert message["result"]["summary"] == "handled:ping ws"
     assert message["result"]["provider"] == "ai_kernel"
+    assert orch.stream_calls == [{
+        "source": "websocket",
+        "task_payload": {
+            "message": "ping ws",
+            "description": "ping ws",
+            "session_id": "session-1",
+            "user_id": "ws-user",
+            "source": "websocket",
+            "provider": "ai_kernel",
+        },
+    }]
+
+
+def test_chat_websocket_route_maps_codex_cli_aliases_into_task_payload():
+    orch = _FakeProviderOrchestrator()
+    app = _build_http_app(orch)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/chat/ws", subprotocols=["chat.v1", "chat.json"]) as websocket:
+            websocket.send_json({
+                "text": "audit websocket ingress",
+                "session_id": "codex-session-7",
+                "user_id": "codex-cli",
+                "source": "external_chat",
+                "provider": "openai",
+                "tier": "economy",
+                "requested_model": "gpt-5.5",
+                "complexity": "medium",
+            })
+            message = websocket.receive_json()
+
+    assert message["type"] == "final_result"
+    assert message["result"]["status"] == "ok"
+    assert orch.stream_calls == [{
+        "source": "external_chat",
+        "task_payload": {
+            "message": "audit websocket ingress",
+            "description": "audit websocket ingress",
+            "session_id": "codex-session-7",
+            "user_id": "codex-cli",
+            "source": "external_chat",
+            "provider": "openai",
+            "cost_tier": "economy",
+            "model": "gpt-5.5",
+            "complexity": "medium",
+        },
+    }]
+
+
+def test_chat_websocket_route_rejects_empty_codex_cli_message():
+    app = _build_http_app(_FakeProviderOrchestrator())
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/chat/ws", subprotocols=["chat.v1", "chat.json"]) as websocket:
+            websocket.send_json({
+                "text": "",
+                "session_id": "codex-session-empty",
+                "source": "external_chat",
+            })
+            message = websocket.receive_json()
+
+    assert message == {"type": "error", "error": "empty_message"}
 
 
 def test_ai_kernel_gate_routes_return_runtime_gate_and_usable_models():
@@ -461,3 +526,44 @@ def test_http_app_registers_required_inventory_routes():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     for expected in REQUIRED_HTTP_ENDPOINTS:
         assert expected in paths
+
+
+def test_chat_websocket_route_reads_canonical_command_data_payload():
+    orch = _FakeProviderOrchestrator()
+    app = _build_http_app(orch)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/chat/ws", subprotocols=["chat.v1", "chat.json"]) as websocket:
+            websocket.send_json({
+                "type": "command",
+                "action": "chat.submit",
+                "request_id": "req-canonical-1",
+                "data": {
+                    "message": "audit canonical websocket payload",
+                    "session_id": "canon-session-1",
+                    "user_id": "canon-user",
+                    "source": "external_chat",
+                    "provider": "openai",
+                    "cost_tier": "economy",
+                    "model": "gpt-5.5",
+                    "complexity": "medium",
+                },
+            })
+            message = websocket.receive_json()
+
+    assert message["type"] == "final_result"
+    assert message["result"]["status"] == "ok"
+    assert orch.stream_calls == [{
+        "source": "external_chat",
+        "task_payload": {
+            "message": "audit canonical websocket payload",
+            "description": "audit canonical websocket payload",
+            "session_id": "canon-session-1",
+            "user_id": "canon-user",
+            "source": "external_chat",
+            "provider": "openai",
+            "cost_tier": "economy",
+            "model": "gpt-5.5",
+            "complexity": "medium",
+        },
+    }]

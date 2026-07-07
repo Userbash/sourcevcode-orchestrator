@@ -5,7 +5,7 @@ from core.agents.base_agent import BaseAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.core.models import AgentResult, Complexity, Priority, ResultOutput, Task, TaskContext, TaskInput, TaskStatus, TaskType
+from core.core.models import AgentResult, Complexity, Priority, ResultOutput, SchedulerDecision, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
 from core.core.model_selector import ModelChoice
 from core.core.orchestrator import Orchestrator
 from core.core.availability import ProviderStatus
@@ -275,6 +275,37 @@ def test_feedback_loop_does_not_recurse_fix_tasks():
     assert not ok
     assert nested_fix is None
 
+
+
+def test_acceptance_for_scheduled_task_bypasses_router_when_scheduler_requires_orchestrator():
+    orchestrator = object.__new__(Orchestrator)
+    route_calls: list[str] = []
+
+    class _Router:
+        @staticmethod
+        def estimate_complexity(task):
+            return "medium"
+
+        @staticmethod
+        def route(task):
+            route_calls.append(task.task_id)
+            return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "planner-1", "medium", "router fallback")
+
+    orchestrator.router = _Router()
+    orchestrator.registry = {}
+    orchestrator.local_agents = {"orchestrator": object()}
+    orchestrator.provider_budget_router = type("_BudgetRouter", (), {"preferred_providers": staticmethod(lambda task, choice: ["local"])})()
+    orchestrator._select_agent_by_provider_preference = lambda capability, providers, priority=None: None
+
+    task = Task(TaskType.CODE, TaskInput("Inspect scheduler route enforcement"), TaskContext("demo", ".", "main"))
+    task.required_capability = "code"
+    choice = ModelChoice("orchestrator-core", "local", Complexity.MEDIUM, reason="test_route")
+    decision = SchedulerDecision(task.task_id, "orchestrator", "planner-1", True, "forced by scheduler", 9.0)
+
+    acceptance = orchestrator._acceptance_for_scheduled_task(task, "code", choice, decision)
+
+    assert acceptance.assigned_agent == "orchestrator"
+    assert route_calls == []
 
 
 def test_code_task_decomposition_uses_normalized_profile_for_parallel_fanout():

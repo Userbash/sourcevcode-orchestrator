@@ -5,7 +5,7 @@ import os
 
 class TestRabbitMQConnectivity(unittest.TestCase):
     def setUp(self):
-        self.url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+        self.url = os.getenv("RABBITMQ_URL", "amqp://localhost:5672/")
         
     def test_connection_and_queue(self):
         """Проверка соединения и возможности создания очереди."""

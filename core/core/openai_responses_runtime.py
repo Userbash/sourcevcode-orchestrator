@@ -5,6 +5,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .openai_payload_guard import (
+    EMPTY_ASSISTANT_RESPONSE_ERROR,
+    EMPTY_PROVIDER_REQUEST_ERROR,
+    extract_responses_output_text,
+    has_meaningful_request_payload,
+    responses_has_assistant_content_or_tool_calls,
+)
+
 
 class ResponsesClient(Protocol):
     class _Responses(Protocol):
@@ -82,26 +90,7 @@ def _response_id(response: Any) -> str | None:
 
 
 def _response_output_text(response: Any) -> str:
-    if isinstance(response, dict):
-        text = response.get("output_text")
-        if isinstance(text, str):
-            return text
-    text = getattr(response, "output_text", None)
-    if isinstance(text, str):
-        return text
-
-    chunks: list[str] = []
-    for item in _response_output_items(response):
-        item_type = str(item.get("type") or "").strip().lower()
-        if item_type in {"message", "output_text"}:
-            content = item.get("content")
-            if isinstance(content, list):
-                for row in content:
-                    if isinstance(row, dict) and isinstance(row.get("text"), str):
-                        chunks.append(str(row.get("text") or ""))
-            elif isinstance(item.get("text"), str):
-                chunks.append(str(item.get("text") or ""))
-    return "\n".join(chunk for chunk in chunks if chunk).strip()
+    return extract_responses_output_text(response)
 
 
 def _parse_tool_call(item: dict[str, Any]) -> ToolCall | None:
@@ -146,6 +135,8 @@ class OpenAIResponsesRuntime:
         **kwargs: Any,
     ) -> ResponsesRunResult:
         handlers = dict(tool_handlers or {})
+        if not has_meaningful_request_payload(input):
+            raise OpenAIResponsesRuntimeError(EMPTY_PROVIDER_REQUEST_ERROR)
         request: dict[str, Any] = {"model": model, "input": input, **kwargs}
         if tools:
             request["tools"] = tools
@@ -157,6 +148,8 @@ class OpenAIResponsesRuntime:
 
         while True:
             calls = [call for item in _response_output_items(response) if (call := _parse_tool_call(item)) is not None]
+            if not calls and not responses_has_assistant_content_or_tool_calls(response):
+                raise ResponsesRuntimeProtocolError(EMPTY_ASSISTANT_RESPONSE_ERROR)
             if not calls:
                 return ResponsesRunResult(
                     response=response,

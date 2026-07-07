@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from core.core.integrations.antigravity_manager import AntigravityManager
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR
 
 
 def test_antigravity_manager_status_is_ready_from_api_probes(monkeypatch):
@@ -75,3 +76,23 @@ def test_antigravity_manager_verify_auth_marks_failure_kind(monkeypatch):
     assert verify["ok"] is False
     assert verify["failure_kind"] == "auth_required"
     assert verify["action"] == "verify"
+
+
+def test_antigravity_manager_generation_probe_rejects_empty_assistant_response(monkeypatch):
+    manager = AntigravityManager(host_bridge=MagicMock())
+    manager.api_key = "token"
+
+    class _Response:
+        status_code = 200
+        content = b'{"choices":[{"message":{"content":""}}]}'
+        text = '{"choices":[{"message":{"content":""}}]}'
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": ""}}]}
+
+    monkeypatch.setattr("core.core.integrations.antigravity_manager.httpx.post", lambda *args, **kwargs: _Response())
+
+    probe = manager._probe_generation("gemini-2.5-flash-lite")
+
+    assert probe["ok"] is False
+    assert probe["stderr"] == EMPTY_ASSISTANT_RESPONSE_ERROR

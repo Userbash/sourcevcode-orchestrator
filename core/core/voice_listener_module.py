@@ -15,6 +15,7 @@ from typing import Any, Dict
 
 from .env_loader import load_env_file
 from .kernel_protocol import KernelAPI, KernelModule
+from .openai_payload_guard import extract_chat_completion_text, has_meaningful_request_payload
 from .openai_provider import build_openai_client_kwargs
 
 logger = logging.getLogger("voice_listener")
@@ -318,7 +319,7 @@ class VoiceListenerModule(KernelModule):
 
     def _refine_command_text(self, text: str) -> str:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not api_key or self._openai_refine_disabled:
+        if not api_key or self._openai_refine_disabled or not has_meaningful_request_payload(text):
             return text
         try:
             from openai import OpenAI
@@ -343,8 +344,8 @@ class VoiceListenerModule(KernelModule):
             if self._should_disable_openai(exc):
                 self._openai_refine_disabled = True
             raise
-        message = response.choices[0].message.content if response.choices else ""
-        return (message or "").strip() or text
+        message = extract_chat_completion_text(response)
+        return message or text
 
     def _should_disable_openai(self, exc: Exception) -> bool:
         message = str(exc).lower()

@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from core.core.control_ws_client import run_control_ws_action
 from core.scripts.ping_all_models import PROMPT, resolve_output_dir, run_all_models, write_json
 
 
@@ -15,6 +16,13 @@ async def _fetch_json(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
     response = await client.get(url)
     response.raise_for_status()
     payload = response.json()
+    return payload if isinstance(payload, dict) else {'status': 'error', 'error': 'non_object_payload'}
+
+
+async def _fetch_control_ws_json(base_url: str, action: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = await run_control_ws_action(base_url, action, data, frame_type="command", timeout_sec=180.0)
+    result.require_success()
+    payload = result.terminal_data()
     return payload if isinstance(payload, dict) else {'status': 'error', 'error': 'non_object_payload'}
 
 
@@ -126,7 +134,13 @@ async def main_async(args: argparse.Namespace) -> int:
     base_url = args.base_url.rstrip('/')
     async with httpx.AsyncClient(timeout=httpx.Timeout(180.0)) as client:
         health_task = asyncio.create_task(_fetch_json(client, f'{base_url}/health/full'))
-        inventory_task = asyncio.create_task(_fetch_json(client, f'{base_url}/providers/openai/runtime_inventory?force_refresh=true&probe_limit=0'))
+        inventory_task = asyncio.create_task(
+            _fetch_control_ws_json(
+                base_url,
+                'providers.openai.runtime_inventory.get',
+                {'force_refresh': True, 'probe_limit': 0},
+            )
+        )
         ping_task = asyncio.create_task(
             run_all_models(
                 args.prompt,

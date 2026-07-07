@@ -12,6 +12,8 @@ from typing import Any
 
 import httpx
 
+from .openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR, extract_provider_response_text, has_meaningful_request_payload, provider_response_has_assistant_content_or_tool_calls
+
 
 @dataclass(slots=True)
 class MimoProviderConfig:
@@ -720,24 +722,7 @@ def preflight_mimo_native_request(model_name: str, config: MimoProviderConfig | 
 
 
 def extract_mimo_response_text(payload: Any) -> str:
-    if not isinstance(payload, dict):
-        return ''
-    choices = payload.get('choices') or []
-    if isinstance(choices, list) and choices:
-        message = (choices[0] or {}).get('message') or {}
-        content = message.get('content')
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get('text')
-                    if isinstance(text, str) and text.strip():
-                        parts.append(text.strip())
-            if parts:
-                return ' '.join(parts).strip()
-    return ''
+    return extract_provider_response_text(payload)
 
 
 def invoke_mimo_native(model_name: str, prompt: str, *, timeout_sec: float = 45.0, max_completion_tokens: int = 1200, temperature: float = 0.2) -> tuple[dict[str, Any] | None, str | None, int | None]:
@@ -745,6 +730,8 @@ def invoke_mimo_native(model_name: str, prompt: str, *, timeout_sec: float = 45.
     preflight_error = preflight_mimo_native_request(model_name, cfg)
     if preflight_error:
         return None, preflight_error, None
+    if not has_meaningful_request_payload(prompt):
+        return None, EMPTY_PROVIDER_REQUEST_ERROR, None
     normalized_model = normalize_mimo_model_name(model_name)
     try:
         response = httpx.post(
@@ -774,6 +761,8 @@ def invoke_mimo_native(model_name: str, prompt: str, *, timeout_sec: float = 45.
                 message = f'{message}: {param}'
             return payload, message, response.status_code
         return None, (response.text or f'http_{response.status_code}').strip(), response.status_code
+    if isinstance(payload, dict) and not provider_response_has_assistant_content_or_tool_calls(payload):
+        return payload, EMPTY_ASSISTANT_RESPONSE_ERROR, response.status_code
     return payload if isinstance(payload, dict) else None, None, response.status_code
 
 
@@ -883,6 +872,8 @@ def invoke_mimo_group_probe(model_name: str, prompt: str, *, group: str | None =
     probe_group = str(group or mimo_model_group(model_name)).strip().lower()
     if preflight_error:
         return None, preflight_error, None, probe_group
+    if not has_meaningful_request_payload(prompt):
+        return None, EMPTY_PROVIDER_REQUEST_ERROR, None, probe_group
     try:
         response = httpx.post(
             cfg.chat_completions_endpoint,
@@ -905,4 +896,6 @@ def invoke_mimo_group_probe(model_name: str, prompt: str, *, group: str | None =
                 message = f'{message}: {param}'
             return payload, message, response.status_code, probe_group
         return None, (response.text or f'http_{response.status_code}').strip(), response.status_code, probe_group
+    if isinstance(payload, dict) and not provider_response_has_assistant_content_or_tool_calls(payload):
+        return payload, EMPTY_ASSISTANT_RESPONSE_ERROR, response.status_code, probe_group
     return payload if isinstance(payload, dict) else None, None, response.status_code, probe_group

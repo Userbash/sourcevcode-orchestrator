@@ -247,11 +247,18 @@ def build_orchestrator_ws_dispatcher(orchestrator: Any) -> OrchestratorWsDispatc
     from .orchestrator_transport import (
         ai_kernel_ensure_payload,
         ai_kernel_gate_payload,
+        antigravity_status_payload,
         diagnostics_payload,
+        diagnostics_stream,
+        dump_memory_payload,
         local_llm_connect_payload,
         local_llm_disconnect_payload,
         local_llm_residents_payload,
         local_llm_warm_payload,
+        local_model_health_payload,
+        openai_discovery_payload,
+        openai_model_templates_payload,
+        openai_runtime_inventory_payload,
         provider_inventory_payload,
         provider_inventory_single_payload,
         provider_inventory_stream,
@@ -260,10 +267,17 @@ def build_orchestrator_ws_dispatcher(orchestrator: Any) -> OrchestratorWsDispatc
         provider_models_index_stream,
         provider_runtime_inventory_all_payload,
         provider_runtime_inventory_single_payload,
+        provider_runtime_inventory_single_stream,
         provider_runtime_inventory_stream,
         runtime_events_stream,
         socraticode_context_compaction_status_payload,
         socraticode_context_compaction_status_stream,
+        sourcecraft_delegate_payload,
+        sourcecraft_delegate_stream,
+        sourcecraft_parallel_delegate_payload,
+        sourcecraft_parallel_delegate_stream,
+        sourcecraft_status_payload,
+        stats_payload,
         transport_audit_payload,
     )
 
@@ -312,6 +326,24 @@ def build_orchestrator_ws_dispatcher(orchestrator: Any) -> OrchestratorWsDispatc
     )
     dispatcher.register_stream("providers.inventory.subscribe", lambda request: provider_inventory_stream(orchestrator))
     dispatcher.register_stream("providers.runtime_inventory.subscribe", lambda request: provider_runtime_inventory_stream(orchestrator))
+    dispatcher.register_stream(
+        "providers.runtime_inventory.provider.subscribe",
+        lambda request: provider_runtime_inventory_single_stream(
+            orchestrator,
+            str(request.data.get("provider") or ""),
+            force_refresh=_bool_field(request, "force_refresh"),
+            probe_limit=_int_field(request, "probe_limit"),
+        ),
+    )
+    dispatcher.register_stream(
+        "providers.openai.runtime_inventory.subscribe",
+        lambda request: provider_runtime_inventory_single_stream(
+            orchestrator,
+            "openai",
+            force_refresh=_bool_field(request, "force_refresh"),
+            probe_limit=_int_field(request, "probe_limit"),
+        ),
+    )
     dispatcher.register_stream("providers.models.index.subscribe", lambda request: provider_models_index_stream(orchestrator))
     dispatcher.register_single("providers.local_llm.residents.get", lambda request: local_llm_residents_payload(orchestrator))
     dispatcher.register_single("providers.local_llm.connect", lambda request: local_llm_connect_payload(orchestrator, dict(request.data)), send_ack=True)
@@ -326,7 +358,35 @@ def build_orchestrator_ws_dispatcher(orchestrator: Any) -> OrchestratorWsDispatc
         ),
     )
     dispatcher.register_single("providers.ai_kernel.ensure", lambda request: ai_kernel_ensure_payload(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_single("stats.get", lambda request: stats_payload(orchestrator))
+    dispatcher.register_single("health.local_models.get", lambda request: local_model_health_payload(orchestrator))
+    dispatcher.register_single(
+        "providers.openai.runtime_inventory.get",
+        lambda request: openai_runtime_inventory_payload(
+            orchestrator,
+            force_refresh=_bool_field(request, "force_refresh"),
+            probe_limit=_int_field(request, "probe_limit"),
+        ),
+    )
+    dispatcher.register_single("providers.openai.discovery.get", lambda request: openai_discovery_payload(orchestrator))
+    dispatcher.register_single(
+        "providers.openai.model_templates.get",
+        lambda request: openai_model_templates_payload(
+            orchestrator,
+            force_refresh=_bool_field(request, "force_refresh"),
+            probe_limit=_int_field(request, "probe_limit"),
+        ),
+    )
+    dispatcher.register_single("antigravity.status.get", lambda request: antigravity_status_payload(orchestrator))
+    dispatcher.register_single("memory.dump.get", lambda request: dump_memory_payload(orchestrator))
     dispatcher.register_single("transport.audit.get", lambda request: transport_audit_payload(orchestrator))
+    dispatcher.register_single("sourcecraft.status.get", lambda request: sourcecraft_status_payload(orchestrator))
+    dispatcher.register_single("sourcecraft.delegate.get", lambda request: sourcecraft_delegate_payload(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_single(
+        "sourcecraft.parallel_delegate.get",
+        lambda request: sourcecraft_parallel_delegate_payload(orchestrator, dict(request.data)),
+        send_ack=True,
+    )
     dispatcher.register_single("socraticode.context_compaction.status.get", lambda request: socraticode_context_compaction_status_payload(orchestrator))
     dispatcher.register_single(
         "diagnostics.get",
@@ -336,8 +396,36 @@ def build_orchestrator_ws_dispatcher(orchestrator: Any) -> OrchestratorWsDispatc
             matrix_only=_bool_field(request, "matrix_only"),
         ),
     )
+    dispatcher.register_stream(
+        "sourcecraft.delegate",
+        lambda request: sourcecraft_delegate_stream(orchestrator, dict(request.data)),
+        send_ack=True,
+    )
+    dispatcher.register_stream(
+        "sourcecraft.parallel_delegate",
+        lambda request: sourcecraft_parallel_delegate_stream(orchestrator, dict(request.data)),
+        send_ack=True,
+    )
+    dispatcher.register_stream(
+        "diagnostics.subscribe",
+        lambda request: diagnostics_stream(
+            orchestrator,
+            layers=_layers_field(request, "layers"),
+            matrix_only=_bool_field(request, "matrix_only"),
+        ),
+    )
     dispatcher.register_stream("runtime.events.subscribe", lambda request: runtime_events_stream(orchestrator))
     dispatcher.register_stream("socraticode.context_compaction.status.subscribe", lambda request: socraticode_context_compaction_status_stream(orchestrator))
+    dispatcher.register_single("local_llm/connect", lambda request: local_llm_connect_payload(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_single("local_llm/disconnect", lambda request: local_llm_disconnect_payload(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_single("local_llm/warm", lambda request: local_llm_warm_payload(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_single("ai_kernel/ensure", lambda request: ai_kernel_ensure_payload(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_stream("sourcecraft/delegate", lambda request: sourcecraft_delegate_stream(orchestrator, dict(request.data)), send_ack=True)
+    dispatcher.register_stream(
+        "sourcecraft/parallel_delegate",
+        lambda request: sourcecraft_parallel_delegate_stream(orchestrator, dict(request.data)),
+        send_ack=True,
+    )
     return dispatcher
 
 

@@ -1660,20 +1660,42 @@ class Orchestrator:
         if not isinstance(task.routing_hints, dict):
             task.routing_hints = {}
         if self._is_websocket_source(source) or self._is_websocket_source(str(prepared_payload.get("source") or "")):
-            task.routing_hints.setdefault("source", "websocket")
-            task.routing_hints.setdefault("channel", "ws")
-            task.routing_hints.setdefault("interactive", True)
+            task.routing_hints["source"] = "websocket"
+            task.routing_hints["channel"] = "ws"
+            task.routing_hints["interactive"] = True
             task.routing_hints["ingress_path"] = str(prepared_payload.get("ingress_path") or "websocket_internal_chat")
             task.routing_hints["text_preparation_mode"] = str(prepared_payload.get("text_preparation_mode") or "automatic")
             task.routing_hints["frame_contract_mode"] = str(prepared_payload.get("frame_contract_mode") or "required")
             task.routing_hints["auto_prepare_text"] = True
             task.routing_hints["external_chat"] = True
 
+    def _merge_triggered_payload(self, normalized: dict[str, Any], triggered: dict[str, Any], *, source: str) -> dict[str, Any]:
+        merged = dict(normalized or {})
+        if not isinstance(triggered, dict):
+            return merged
+        websocket_ingress = self._is_websocket_source(source) or self._is_websocket_source(str(merged.get("source") or ""))
+        for key, value in triggered.items():
+            if key == "source" and websocket_ingress:
+                continue
+            merged[key] = value
+        if websocket_ingress:
+            merged["source"] = "websocket"
+        return merged
+
     async def submit_user_task_async(self, payload: object, source: str = "user_input") -> dict[str, object]:
         from .task_submission_api import create_standard_task, normalize_user_payload, validate_normalized_payload
 
         normalized = normalize_user_payload(payload)
         normalized = self._prepare_ingress_payload(normalized, source=source)
+
+        message = normalized.get("message") or normalized.get("description")
+        if isinstance(message, str) and message.strip():
+            trigger_mod = self.module_manager.get_module("trigger_dispatcher")
+            if isinstance(trigger_mod, TriggerDispatcherModule):
+                triggered = trigger_mod.process_chat_input(message)
+                if triggered:
+                    normalized = self._merge_triggered_payload(normalized, triggered, source=source)
+
         ok, issues = validate_normalized_payload(normalized)
         if not ok:
             message = "; ".join(issues) or "invalid_input"
@@ -1684,7 +1706,6 @@ class Orchestrator:
                 "issues": issues,
                 "source": source,
             }
-
         session_id = str(normalized.get("session_id") or "default")
         idem_raw = json.dumps(normalized, sort_keys=True, ensure_ascii=True)
         idempotency_key = hashlib.sha256(idem_raw.encode("utf-8")).hexdigest()
@@ -1693,14 +1714,6 @@ class Orchestrator:
         if isinstance(cached, dict) and cached.get("status") in {"done", "failed"}:
             self.console.emit("IDEMPOTENCY", f"cache hit for session={session_id} key={idempotency_key[:12]}")
             return cached
-
-        message = normalized.get("message") or normalized.get("description")
-        if isinstance(message, str) and message.strip():
-            trigger_mod = self.module_manager.get_module("trigger_dispatcher")
-            if isinstance(trigger_mod, TriggerDispatcherModule):
-                triggered = trigger_mod.process_chat_input(message)
-                if triggered:
-                    normalized.update(triggered)
 
         task = create_standard_task(normalized)
         self._apply_ingress_contract(task, normalized, source=source)
@@ -1724,6 +1737,15 @@ class Orchestrator:
 
         normalized = normalize_user_payload(payload)
         normalized = self._prepare_ingress_payload(normalized, source=source)
+
+        message = normalized.get("message") or normalized.get("description")
+        if isinstance(message, str) and message.strip():
+            trigger_mod = self.module_manager.get_module("trigger_dispatcher")
+            if isinstance(trigger_mod, TriggerDispatcherModule):
+                triggered = trigger_mod.process_chat_input(message)
+                if triggered:
+                    normalized = self._merge_triggered_payload(normalized, triggered, source=source)
+
         ok, issues = validate_normalized_payload(normalized)
         if not ok:
             message = "; ".join(issues) or "invalid_input"
@@ -1734,7 +1756,6 @@ class Orchestrator:
                 "issues": issues,
                 "source": source,
             }
-
         session_id = str(normalized.get("session_id") or "default")
         idem_raw = json.dumps(normalized, sort_keys=True, ensure_ascii=True)
         idempotency_key = hashlib.sha256(idem_raw.encode("utf-8")).hexdigest()
@@ -1743,14 +1764,6 @@ class Orchestrator:
         if isinstance(cached, dict) and cached.get("status") in {"done", "failed"}:
             self.console.emit("IDEMPOTENCY", f"cache hit for session={session_id} key={idempotency_key[:12]}")
             return cached
-
-        message = normalized.get("message") or normalized.get("description")
-        if isinstance(message, str) and message.strip():
-            trigger_mod = self.module_manager.get_module("trigger_dispatcher")
-            if isinstance(trigger_mod, TriggerDispatcherModule):
-                triggered = trigger_mod.process_chat_input(message)
-                if triggered:
-                    normalized.update(triggered)
 
         task = create_standard_task(normalized)
         self._apply_ingress_contract(task, normalized, source=source)
@@ -1874,6 +1887,59 @@ class Orchestrator:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return None
+
+    def _acceptance_for_scheduled_task(
+        self,
+        task: Task,
+        capability: str,
+        choice: ModelChoice,
+        decision: SchedulerDecision,
+    ) -> TaskAcceptance:
+        forced_agent_id = self._task_preferred_agent_id(task)
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        explicit_route_mode = str(hints.get("route_mode") or "").strip().lower()
+        force_orchestrator = explicit_route_mode == "orchestrator" or bool(hints.get("force_orchestrator"))
+        if decision.requires_orchestrator or force_orchestrator:
+            return TaskAcceptance(
+                task.task_id,
+                TaskStatus.ACCEPTED,
+                "orchestrator",
+                self.router.estimate_complexity(task),
+                f"Task accepted ({decision.reason})",
+            )
+
+        if forced_agent_id:
+            forced_record = self.registry.get(forced_agent_id)
+            if (
+                forced_record
+                and capability in forced_record.capabilities
+                and is_agent_routable(forced_record, task.priority)
+                and forced_agent_id in self.local_agents
+            ):
+                return TaskAcceptance(
+                    task.task_id,
+                    TaskStatus.ACCEPTED,
+                    forced_agent_id,
+                    self.router.estimate_complexity(task),
+                    "Task accepted (parallel batch routing)",
+                )
+            return self.router.route(task)
+
+        preferred_providers = self.provider_budget_router.preferred_providers(task, choice)
+        preferred_agent_id = self._select_agent_by_provider_preference(
+            capability,
+            preferred_providers,
+            priority=task.priority,
+        )
+        if preferred_agent_id:
+            return TaskAcceptance(
+                task.task_id,
+                TaskStatus.ACCEPTED,
+                preferred_agent_id,
+                self.router.estimate_complexity(task),
+                "Task accepted (provider budget routing)",
+            )
+        return self.router.route(task)
 
     @staticmethod
     def _agent_hint_matches(record: Any, hint: str | None) -> bool:
@@ -2717,20 +2783,7 @@ class Orchestrator:
         else:
             self.console.emit("SCHEDULER", f"P2P route allowed: {decision.reason}")
 
-        forced_agent_id = self._task_preferred_agent_id(task)
-        if forced_agent_id:
-            forced_record = self.registry.get(forced_agent_id)
-            if forced_record and capability in forced_record.capabilities and is_agent_routable(forced_record, task.priority) and forced_agent_id in self.local_agents:
-                acceptance = TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, forced_agent_id, self.router.estimate_complexity(task), "Task accepted (parallel batch routing)")
-            else:
-                acceptance = self.router.route(task)
-        else:
-            preferred_providers = self.provider_budget_router.preferred_providers(task, choice)
-            preferred_agent_id = self._select_agent_by_provider_preference(capability, preferred_providers, priority=task.priority)
-            if preferred_agent_id:
-                acceptance = TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, preferred_agent_id, self.router.estimate_complexity(task), "Task accepted (provider budget routing)")
-            else:
-                acceptance = self.router.route(task)
+        acceptance = self._acceptance_for_scheduled_task(task, capability, choice, decision)
         if acceptance.status == TaskStatus.REJECTED or not acceptance.assigned_agent:
             self.console.emit("ROUTING", acceptance.message)
             self.live_trace_rows.append(

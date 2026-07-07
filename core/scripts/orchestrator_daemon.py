@@ -3,6 +3,7 @@ import json
 import logging
 import sys
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -41,12 +42,18 @@ from core.core.orchestration_config import OrchestrationConfig
 from core.core.orchestrator_transport import (
     ai_kernel_ensure_payload,
     ai_kernel_gate_payload,
+    antigravity_status_payload,
     diagnostics_payload,
+    dump_memory_payload,
     health_payload,
     local_llm_connect_payload,
     local_llm_disconnect_payload,
     local_llm_residents_payload,
     local_llm_warm_payload,
+    local_model_health_payload,
+    openai_discovery_payload,
+    openai_model_templates_payload,
+    openai_runtime_inventory_payload,
     provider_inventory_payload,
     provider_inventory_single_payload,
     provider_inventory_stream,
@@ -59,8 +66,15 @@ from core.core.orchestrator_transport import (
     runtime_events_stream,
     socraticode_context_compaction_status_payload,
     socraticode_context_compaction_status_stream,
+    sourcecraft_delegate_payload,
+    sourcecraft_parallel_delegate_payload,
+    sourcecraft_status_payload,
+    stats_payload,
     transport_audit_payload,
 )
+from core.core.orchestrator_ws_dispatcher import build_orchestrator_ws_dispatcher
+from core.core.orchestrator_ws_session import OrchestratorWebSocketSession, negotiate_subprotocol
+from core.core.ws_protocol import WsEnvelope, WsProtocolValidationError, build_error, parse_envelope
 from core.core.security import SecurityManager, SecurityPolicy
 from core.core.provider_credentials import has_usable_credential
 
@@ -275,6 +289,75 @@ def _build_http_app(orchestrator: Orchestrator):
             return payload
         return JSONResponse(payload, status_code=status_code)
 
+    def _legacy_control_ws_metadata(path: str) -> dict[str, str] | None:
+        if path == "/stats":
+            return {"action": "stats.get"}
+        if path == "/antigravity/status":
+            return {"action": "antigravity.status.get"}
+        if path == "/providers/openai/runtime_inventory":
+            return {"action": "providers.openai.runtime_inventory.get", "subscribe": "providers.openai.runtime_inventory.subscribe"}
+        if path == "/providers/openai/discovery":
+            return {"action": "providers.openai.discovery.get"}
+        if path == "/providers/openai/model_templates":
+            return {"action": "providers.openai.model_templates.get"}
+        if path == "/providers/inventory":
+            return {"action": "providers.inventory.get", "subscribe": "providers.inventory.subscribe"}
+        if re.fullmatch(r"/providers/[^/]+/inventory", path):
+            return {"action": "providers.inventory.provider.get"}
+        if path == "/providers/runtime_inventory":
+            return {"action": "providers.runtime_inventory.get", "subscribe": "providers.runtime_inventory.subscribe"}
+        if re.fullmatch(r"/providers/[^/]+/runtime_inventory", path):
+            return {"action": "providers.runtime_inventory.provider.get", "subscribe": "providers.runtime_inventory.provider.subscribe"}
+        if path == "/providers/models/index":
+            return {"action": "providers.models.index.get", "subscribe": "providers.models.index.subscribe"}
+        if path.startswith("/providers/models/index/"):
+            return {"action": "providers.models.lookup.get"}
+        if path == "/socraticode/context_compaction/status":
+            return {"action": "socraticode.context_compaction.status.get", "subscribe": "socraticode.context_compaction.status.subscribe"}
+        if path == "/providers/local_llm/residents":
+            return {"action": "providers.local_llm.residents.get"}
+        if path == "/providers/local_llm/connect":
+            return {"action": "providers.local_llm.connect"}
+        if path == "/providers/local_llm/disconnect":
+            return {"action": "providers.local_llm.disconnect"}
+        if path == "/providers/local_llm/warm":
+            return {"action": "providers.local_llm.warm"}
+        if path == "/providers/ai_kernel/gate":
+            return {"action": "providers.ai_kernel.gate.get"}
+        if path == "/providers/ai_kernel/ensure":
+            return {"action": "providers.ai_kernel.ensure"}
+        if path == "/health/local_models":
+            return {"action": "health.local_models.get"}
+        if path == "/dump_memory":
+            return {"action": "memory.dump.get"}
+        if path == "/sourcecraft":
+            return {"action": "sourcecraft.status.get"}
+        if path == "/sourcecraft/delegate":
+            return {"action": "sourcecraft.delegate.get", "subscribe": "sourcecraft.delegate"}
+        if path == "/sourcecraft/parallel_delegate":
+            return {"action": "sourcecraft.parallel_delegate.get", "subscribe": "sourcecraft.parallel_delegate"}
+        if path == "/transport/audit":
+            return {"action": "transport.audit.get"}
+        if path == "/diagnostics":
+            return {"action": "diagnostics.get", "subscribe": "diagnostics.subscribe"}
+        return None
+
+    @app.middleware("http")
+    async def _legacy_control_plane_http_middleware(request, call_next):
+        response = await call_next(request)
+        metadata = _legacy_control_ws_metadata(request.url.path)
+        if metadata is None:
+            return response
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = "</control/ws>; rel=alternate"
+        response.headers["X-Control-Transport"] = "websocket-primary; compatibility=http"
+        response.headers["X-Control-WS-Endpoint"] = "/control/ws"
+        response.headers["X-Control-WS-Action"] = metadata["action"]
+        subscribe_action = metadata.get("subscribe")
+        if subscribe_action:
+            response.headers["X-Control-WS-Subscribe"] = subscribe_action
+        return response
+
     def _usage_snapshot() -> dict:
         usage_mod = _orch.module_manager.get_module("model_usage") if hasattr(_orch, "module_manager") else None
         return usage_mod.finalize() if usage_mod and hasattr(usage_mod, "finalize") else {}
@@ -306,13 +389,7 @@ def _build_http_app(orchestrator: Orchestrator):
         return rows
 
     def _negotiate_subprotocol(websocket) -> str | None:
-        requested = websocket.headers.get("sec-websocket-protocol", "")
-        supported = ("chat.v1", "chat.json")
-        for item in requested.split(","):
-            candidate = item.strip()
-            if candidate in supported:
-                return candidate
-        return None
+        return negotiate_subprotocol(websocket, supported_subprotocols=("chat.v1", "chat.json"))
 
     @app.get("/health")
     def health():
@@ -366,46 +443,37 @@ def _build_http_app(orchestrator: Orchestrator):
     @app.get("/antigravity/status")
     def antigravity_status():
         try:
-            from core.core.antigravity_status_module import shared_antigravity_snapshot
-            return shared_antigravity_snapshot(force=False)
+            payload, status_code = antigravity_status_payload(_orch)
+            return _response(payload, status_code)
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
     @app.get("/stats")
     def stats():
-        usage_mod = _orch.module_manager.get_module("model_usage")
-        local_model_manager = _orch.module_manager.get_module("local_model_manager")
-        module_state = _orch.module_state()
-        return {
-            "status": "success",
-            "data": {
-                "model_usage": usage_mod.finalize() if usage_mod and hasattr(usage_mod, "finalize") else {},
-                "local_model_manager": local_model_manager.finalize() if local_model_manager and hasattr(local_model_manager, "finalize") else {},
-                "provider_inventory": module_state.get("provider_inventory", {}),
-            },
-        }
+        payload, status_code = stats_payload(_orch)
+        return _response(payload, status_code)
 
     @app.get("/providers/openai/runtime_inventory")
     def openai_runtime_inventory(force_refresh: bool = False, probe_limit: int | None = None):
         try:
-            payload = _orch.provider_inventory.refresh_openai_runtime_inventory(force_refresh=force_refresh, probe_limit=probe_limit)
-            return {"status": "ok", "data": payload}
+            payload, status_code = openai_runtime_inventory_payload(_orch, force_refresh=force_refresh, probe_limit=probe_limit)
+            return _response(payload, status_code)
         except Exception as exc:
                 return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.get("/providers/openai/discovery")
     def openai_discovery():
         try:
-            from core.core.openai_bazzite_endpoint import load_openai_endpoint_discovery
-            return {"status": "ok", "data": load_openai_endpoint_discovery()}
+            payload, status_code = openai_discovery_payload(_orch)
+            return _response(payload, status_code)
         except Exception as exc:
                 return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.get("/providers/openai/model_templates")
     def openai_model_templates(force_refresh: bool = False, probe_limit: int | None = None):
         try:
-            payload = _orch.provider_inventory.refresh_openai_runtime_inventory(force_refresh=force_refresh, probe_limit=probe_limit)
-            return {"status": "ok", "data": payload.get("model_templates", {})}
+            payload, status_code = openai_model_templates_payload(_orch, force_refresh=force_refresh, probe_limit=probe_limit)
+            return _response(payload, status_code)
         except Exception as exc:
                 return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
@@ -536,77 +604,40 @@ def _build_http_app(orchestrator: Orchestrator):
 
     @app.get("/health/local_models")
     def local_model_health():
-        local_model_manager = _orch.module_manager.get_module("local_model_manager")
-        if local_model_manager and hasattr(local_model_manager, "finalize"):
-            state = local_model_manager.finalize()
-            return {
-                "status": "ok",
-                "resident_models": state.get("resident_models", []),
-                "blocked_models": state.get("blocked_models", []),
-                "memory_pressure": state.get("memory_pressure", {}),
-                "evictions": state.get("evictions", 0),
-                "warmups": state.get("warmups", 0),
-            }
-        return JSONResponse({"status": "error", "error": "local_model_manager not loaded"}, status_code=503)
+        payload, status_code = local_model_health_payload(_orch)
+        return _response(payload, status_code)
 
     @app.get("/dump_memory")
     def dump_memory():
         try:
-            return {"status": "ok", "modules": _orch.module_manager.loaded_modules()}
+            payload, status_code = dump_memory_payload(_orch)
+            return _response(payload, status_code)
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
     @app.get("/sourcecraft")
     def sourcecraft_status():
         try:
-            module = _orch.get_module("sourcecraft")
-            if not module:
-                return JSONResponse({"status": "error", "error": "sourcecraft module not loaded"}, status_code=503)
-
-            runtime_repo_path = module._default_repo_path() if hasattr(module, "_default_repo_path") else "."
-            runtime = module.ensure_ready(repo_path=runtime_repo_path) if hasattr(module, "ensure_ready") else {"status": "unknown"}
-            profile = module._role_profile().as_dict() if hasattr(module, "_role_profile") else {}
-            final = module.finalize() if hasattr(module, "finalize") else {}
-            return {
-                "status": final.get("status", runtime.get("status", "unknown")),
-                "runtime": runtime,
-                "role": profile,
-                "module": final,
-            }
+            payload, status_code = sourcecraft_status_payload(_orch)
+            return _response(payload, status_code)
         except Exception as exc:
                 return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
     @app.post("/sourcecraft/delegate")
     def sourcecraft_delegate(payload: dict):
-        from core.core.task_submission_api import create_standard_task
-
         try:
-            task = create_standard_task(payload)
-            module = _orch.get_module("sourcecraft")
-            if not module:
-                return JSONResponse({"status": "error", "error": "sourcecraft module not loaded"}, status_code=503)
-
-            delegation = module.build_delegation_profile(task, payload) if hasattr(module, "build_delegation_profile") else {}
-            acceptance = _orch.router.route(task)
-            route = acceptance.as_dict() if hasattr(acceptance, "as_dict") else acceptance
-            assigned_agent = route.get("assigned_agent") if isinstance(route, dict) else None
-            route_mode = "orchestrator" if assigned_agent == "orchestrator" else "p2p"
-            schedule = {
-                "task_id": task.task_id,
-                "route_mode": route_mode,
-                "assigned_agent": assigned_agent,
-                "requires_orchestrator": route_mode == "orchestrator",
-                "reason": route.get("message") if isinstance(route, dict) else None,
-            }
-            return {
-                "status": "ok",
-                "delegation": delegation,
-                "route": route,
-                "schedule": schedule,
-            }
+            body, status_code = sourcecraft_delegate_payload(_orch, payload)
+            return _response(body, status_code)
         except Exception as exc:
                 return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
 
+    @app.post("/sourcecraft/parallel_delegate")
+    def sourcecraft_parallel_delegate(payload: dict):
+        try:
+            body, status_code = sourcecraft_parallel_delegate_payload(_orch, payload)
+            return _response(body, status_code)
+        except Exception as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
 
 
     @app.get("/transport/audit")
@@ -631,6 +662,60 @@ def _build_http_app(orchestrator: Orchestrator):
                 },
                 status_code=500,
             )
+
+    @app.websocket("/control/ws")
+    async def control_ws(websocket: WebSocket):
+        dispatcher = build_orchestrator_ws_dispatcher(_orch)
+        session = OrchestratorWebSocketSession(websocket, supported_subprotocols=("chat.v1", "chat.json"))
+        await session.accept()
+        session.start_heartbeat()
+
+        async def _run_request(envelope: WsEnvelope) -> None:
+            async for frame in dispatcher.dispatch(envelope):
+                await session.send_frame(frame)
+
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    frame = json.loads(raw)
+                except json.JSONDecodeError:
+                    await session.send_frame(build_error(uuid4().hex, "INVALID_JSON", message="frame payload is not valid json"))
+                    continue
+                if not isinstance(frame, dict):
+                    await session.send_frame(build_error(uuid4().hex, "INVALID_FRAME", message="frame payload must be a JSON object"))
+                    continue
+                frame.setdefault("ack", True)
+                if await session.handle_control_frame(frame):
+                    continue
+                try:
+                    envelope = WsEnvelope.from_dict(frame)
+                except WsProtocolValidationError as exc:
+                    request_id = str(frame.get("request_id") or uuid4().hex)
+                    await session.send_frame(
+                        build_error(
+                            request_id,
+                            exc.code,
+                            action=str(frame.get("action") or "").strip() or None,
+                            correlation_id=str(frame.get("correlation_id") or "").strip() or None,
+                            message=str(exc),
+                            details=exc.details,
+                        )
+                    )
+                    continue
+                task = asyncio.create_task(_run_request(envelope))
+                session.track_request(envelope.request_id, task)
+                if envelope.type == "subscribe":
+                    await session.register_subscription(
+                        envelope.request_id,
+                        topic=envelope.action or "subscription",
+                        metadata={"action": envelope.action},
+                        unsubscribe=lambda request_id=envelope.request_id: session.cancel_request(request_id),
+                    )
+        except WebSocketDisconnect:
+            return
+        finally:
+            await session.close()
 
     @app.websocket("/ws/runtime/events")
     async def runtime_events_ws(websocket: WebSocket):
@@ -666,37 +751,39 @@ def _build_http_app(orchestrator: Orchestrator):
                     await websocket.send_text(json.dumps({"type": "error", "error": "invalid_json"}))
                     continue
 
-                command = frame.get("u") or frame.get("message") or frame.get("text") or ""
-                session_id = frame.get("m") or frame.get("session_id") or connection_session_id
-                user_id = frame.get("v") or frame.get("user_id") or "ws-user"
-                source = frame.get("s") or frame.get("source") or "websocket"
-                provider = frame.get("o") or frame.get("provider") or ""
-                priority = frame.get("priority")
-                cost_tier = frame.get("cost_tier") or frame.get("tier")
-                model = frame.get("model") or frame.get("requested_model")
-                complexity = frame.get("complexity")
+                try:
+                    envelope = parse_envelope(frame, normalize_chat=True)
+                except WsProtocolValidationError as exc:
+                    await websocket.send_text(json.dumps({"type": "error", "error": exc.code.lower()}))
+                    continue
+
+                normalized_data = dict(envelope.data or {})
+                command = (
+                    normalized_data.get("message")
+                    or normalized_data.get("description")
+                    or normalized_data.get("text")
+                    or normalized_data.get("prompt")
+                    or normalized_data.get("objective")
+                    or ""
+                )
+                session_id = normalized_data.get("session_id") or connection_session_id
+                user_id = normalized_data.get("user_id") or "ws-user"
+                source = normalized_data.get("source") or "websocket"
 
                 if not command:
                     await websocket.send_text(json.dumps({"type": "error", "error": "empty_message"}))
                     continue
 
-                task_payload = {
-                    "message": command,
-                    "description": command,
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "source": source,
-                }
-                if provider:
-                    task_payload["provider"] = provider
-                if priority:
-                    task_payload["priority"] = priority
-                if cost_tier:
-                    task_payload["cost_tier"] = cost_tier
-                if model:
-                    task_payload["model"] = model
-                if complexity:
-                    task_payload["complexity"] = complexity
+                task_payload = dict(normalized_data)
+                task_payload["message"] = str(command)
+                task_payload.setdefault("description", str(command))
+                task_payload["session_id"] = str(session_id)
+                task_payload["user_id"] = str(user_id)
+                task_payload["source"] = str(source)
+                if task_payload.get("tier") and not task_payload.get("cost_tier"):
+                    task_payload["cost_tier"] = task_payload.get("tier")
+                if task_payload.get("requested_model") and not task_payload.get("model"):
+                    task_payload["model"] = task_payload.get("requested_model")
 
                 try:
                     async for event in _orch.stream_user_task(task_payload, source=source):

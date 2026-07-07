@@ -10,6 +10,7 @@ import httpx
 from .external_ai_agent import ExternalAIAgent
 from core.core.env_loader import load_env_file
 from core.core.models import AgentHealth, AgentResult, AgentStatus, Task, TaskStatus, TaskType
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR, extract_chat_completion_text, has_meaningful_request_payload
 
 logger = logging.getLogger("mistral_agent")
 
@@ -116,6 +117,10 @@ class MistralAgent(ExternalAIAgent):
         max_retries = 3
         last_exc = None
         candidate_models = self._candidate_models_for_task(task)
+        if not has_meaningful_request_payload(prompt_content):
+            self.last_error = EMPTY_PROVIDER_REQUEST_ERROR
+            failed_model = candidate_models[0] if candidate_models else self._select_model_for_task(task)
+            return self.result(task, "Mistral API error", TaskStatus.FAILED, 0.0, [EMPTY_PROVIDER_REQUEST_ERROR], provider=self.provider, model_name=failed_model)
         self._record_execution_prompt(task, prompt_content, memory_context, provider=self.provider, model_name=candidate_models[0])
 
         for model_name in candidate_models:
@@ -161,10 +166,10 @@ class MistralAgent(ExternalAIAgent):
         )
 
     def normalize_result(self, response: dict, task: Task, *, model_name: str | None = None) -> AgentResult:
-        content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = extract_chat_completion_text(response)
         if not content:
             resolved_model = model_name or str(getattr(task, 'assigned_model', '') or self._select_model_for_task(task)).strip()
-            return self.result(task, "Empty response", TaskStatus.FAILED, 0.0, ["Model returned empty content"], provider=self.provider, model_name=resolved_model)
+            return self.result(task, "Empty response", TaskStatus.FAILED, 0.0, [EMPTY_ASSISTANT_RESPONSE_ERROR], provider=self.provider, model_name=resolved_model)
         result = self.result(task, content, TaskStatus.DONE, 0.85, [])
         result.provider = self.provider
         result.model_name = str(model_name or getattr(task, 'assigned_model', '') or self._select_model_for_task(task)).strip()

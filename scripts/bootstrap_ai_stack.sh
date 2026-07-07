@@ -22,8 +22,6 @@ RUN_LOCAL_LLM=1
 RUN_AI_KERNEL=1
 RUN_AGY_LOGIN=0
 BUILD_IMAGE=1
-AI_BRIDGE_POSTGRES_PASSWORD="${AI_BRIDGE_POSTGRES_PASSWORD:-change_me_local_db_password}"
-AI_BRIDGE_RABBITMQ_PASSWORD="${AI_BRIDGE_RABBITMQ_PASSWORD:-change_me_local_rabbitmq_password}"
 
 host_run() {
   if command -v flatpak-spawn >/dev/null 2>&1; then
@@ -89,6 +87,14 @@ warn() {
   printf '[bootstrap][warn] %s\n' "$*" >&2
 }
 
+require_env_var() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "[ERROR] Required env var $name is not set. Define it in .env or .env.* before running bootstrap." >&2
+    exit 1
+  fi
+}
+
 ensure_file() {
   local target="$1"
   local template="$2"
@@ -127,6 +133,12 @@ load_env_files() {
   ORCHESTRATOR_HEALTH_PATH="${ORCHESTRATOR_HEALTH_PATH:-$ORCHESTRATOR_HEALTH_PATH}"
   ORCHESTRATOR_READY_ATTEMPTS="${ORCHESTRATOR_READY_ATTEMPTS:-$ORCHESTRATOR_READY_ATTEMPTS}"
   ORCHESTRATOR_READY_SLEEP_SEC="${ORCHESTRATOR_READY_SLEEP_SEC:-$ORCHESTRATOR_READY_SLEEP_SEC}"
+
+  require_env_var AI_BRIDGE_POSTGRES_USER
+  require_env_var AI_BRIDGE_POSTGRES_PASSWORD
+  require_env_var AI_BRIDGE_RABBITMQ_USER
+  require_env_var AI_BRIDGE_RABBITMQ_PASSWORD
+  require_env_var AI_KERNEL_API_KEY
 }
 
 ensure_host_requirements() {
@@ -208,7 +220,7 @@ wait_for_ai_kernel() {
 wait_for_pg() {
   local i
   for i in $(seq 1 45); do
-    if host_run podman exec "$POSTGRES_CONTAINER" pg_isready -U ai_bridge -d ai_bridge >/dev/null 2>&1; then
+    if host_run podman exec "$POSTGRES_CONTAINER" pg_isready -U "$AI_BRIDGE_POSTGRES_USER" -d "${AI_BRIDGE_POSTGRES_DB:-ai_bridge}" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -235,9 +247,9 @@ start_postgres() {
     host_run podman run -d \
       --name "$POSTGRES_CONTAINER" \
       -p 5432:5432 \
-      -e POSTGRES_USER=ai_bridge \
+      -e POSTGRES_USER="$AI_BRIDGE_POSTGRES_USER" \
       -e POSTGRES_PASSWORD="$AI_BRIDGE_POSTGRES_PASSWORD" \
-      -e POSTGRES_DB=ai_bridge \
+      -e POSTGRES_DB="${AI_BRIDGE_POSTGRES_DB:-ai_bridge}" \
       -v "${PG_VOLUME_NAME}:/var/lib/postgresql/data" \
       docker.io/library/postgres:16-alpine \
       postgres -c shared_buffers=256MB -c max_connections=200 -c effective_cache_size=768MB -c work_mem=16MB >/dev/null
@@ -333,13 +345,13 @@ start_ai_kernel() {
     host_run bash "$install_script"
   fi
 
-  if [ -f "$pid_path" ]; then
+  if host_run sh -lc "test -f '$pid_path'"; then
     local existing_pid
-    existing_pid="$(cat "$pid_path" 2>/dev/null || true)"
+    existing_pid="$(host_run sh -lc "cat '$pid_path' 2>/dev/null" || true)"
     if [ -n "$existing_pid" ] && host_run sh -lc "kill -0 $existing_pid" >/dev/null 2>&1; then
       log "AI Kernel process already running with pid $existing_pid."
     else
-      rm -f "$pid_path"
+      host_run rm -f "$pid_path"
     fi
   fi
 
@@ -350,8 +362,8 @@ start_ai_kernel() {
   fi
 
   wait_for_ai_kernel || {
-    if [ -f "$log_path" ]; then
-      tail -n 120 "$log_path" >&2 || true
+    if host_run sh -lc "test -f '$log_path'"; then
+      host_run tail -n 120 "$log_path" >&2 || true
     fi
     echo "[ERROR] AI Kernel did not become ready on port ${AI_KERNEL_PORT}." >&2
     exit 1
@@ -380,18 +392,18 @@ start_orchestrator() {
     -e AI_BRIDGE_LOCAL_LLM_PORT="${OLLAMA_PORT}" \
     -e AI_BRIDGE_LOCAL_LLM_MODEL="${LOCAL_MODEL}" \
     -e AI_KERNEL_ENABLED="${AI_KERNEL_ENABLED:-true}" \
-    -e AI_KERNEL_BASE_URL="${AI_KERNEL_BASE_URL:-http://host.containers.internal:8012/v1}" \
-    -e AI_KERNEL_API_KEY="${AI_KERNEL_API_KEY:-local}" \
+    -e AI_KERNEL_BASE_URL="${AI_KERNEL_BASE_URL:-http://host.containers.internal:${AI_KERNEL_PORT}/v1}" \
+    -e AI_KERNEL_API_KEY="${AI_KERNEL_API_KEY}" \
     -e AI_KERNEL_MODEL_ALIAS="${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}" \
-    -e AI_KERNEL_TCP_PROBE_HOSTS="${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}" \
+    -e AI_KERNEL_TCP_PROBE_HOSTS="${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:${AI_KERNEL_PORT}}" \
     -e AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE="${AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE:-false}" \
     -e AI_BRIDGE_HOST_WORKSPACE_ROOT="$PROJECT_ROOT" \
     -e AI_KERNEL_HOST_HOME="$HOME" \
     -e AI_BRIDGE_WORKSPACE_ROOT=/workspace \
     -e AI_BRIDGE_EASY_DIFFUSION_START_ENABLED=false \
     -e AI_BRIDGE_MEMORY_ENABLED=true \
-    -e AI_BRIDGE_MEMORY_DATABASE_URL="postgresql+psycopg2://ai_bridge:ai_bridge_password@host.containers.internal:5432/ai_bridge" \
-    -e AI_BRIDGE_RABBITMQ_URL="amqp://guest:guest@host.containers.internal:5672/" \
+    -e AI_BRIDGE_MEMORY_DATABASE_URL="postgresql+psycopg2://${AI_BRIDGE_POSTGRES_USER}:${AI_BRIDGE_POSTGRES_PASSWORD}@host.containers.internal:5432/${AI_BRIDGE_POSTGRES_DB:-ai_bridge}" \
+    -e AI_BRIDGE_RABBITMQ_URL="amqp://${AI_BRIDGE_RABBITMQ_USER}:${AI_BRIDGE_RABBITMQ_PASSWORD}@host.containers.internal:5672/" \
     -e AI_BRIDGE_MESSAGE_BUS_BACKEND=rabbitmq \
     -e AI_BRIDGE_MEMORY_STORE_DIR=/app/memory_store \
     -e AI_BRIDGE_LIVE_MODEL_PROBE=false \
@@ -466,8 +478,8 @@ verify_agy() {
 print_summary() {
   log "AI stack is ready."
   printf '  Orchestrator: http://127.0.0.1:%s/health\n' "$ORCHESTRATOR_PORT"
-  printf '  RabbitMQ UI:  http://127.0.0.1:15672 (guest / guest)\n'
-  printf '  Postgres:     127.0.0.1:5432 (ai_bridge / ai_bridge_password / ai_bridge)\n'
+  printf '  RabbitMQ UI:  http://127.0.0.1:15672 (%s / [from env])\n' "${AI_BRIDGE_RABBITMQ_USER}"
+  printf '  Postgres:     127.0.0.1:5432 (%s / [from env] / %s)\n' "${AI_BRIDGE_POSTGRES_USER}" "${AI_BRIDGE_POSTGRES_DB:-ai_bridge}"
   if [ "$RUN_LOCAL_LLM" -eq 1 ]; then
     printf '  Local LLM:    http://127.0.0.1:%s (model: %s)\n' "$OLLAMA_PORT" "$LOCAL_MODEL"
   fi

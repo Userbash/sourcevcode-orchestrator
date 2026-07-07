@@ -76,16 +76,18 @@ class TriggerDispatcherModule:
                 description = self._normalize_description(pattern.sub("", normalized, count=1)) or normalized
                 return task_type, description
 
-        return TaskType.PLAN, normalized or "Auto-triggered orchestration task"
+        return TaskType.PLAN, normalized
 
     def _match_legacy_trigger(self, text: str) -> Optional[Dict[str, Any]]:
         clean_text = self._normalize_description(text)
         for pattern, task_type in self.TRIGGERS.items():
             if re.search(pattern, clean_text, re.IGNORECASE):
                 description = self._normalize_description(re.sub(pattern, "", clean_text, count=1, flags=re.IGNORECASE))
+                if not description:
+                    return None
                 return {
                     "type": task_type.value,
-                    "description": description or "Auto-triggered task",
+                    "description": description,
                     "priority": "high" if "!!!" in text else "normal",
                     "source": "auto_trigger",
                 }
@@ -99,12 +101,16 @@ class TriggerDispatcherModule:
         """
         is_core, remainder = self._detect_prefixed_core(text)
         if is_core:
+            if not remainder:
+                return None
             task_type, description = self._infer_core_task_type(remainder)
+            if not description:
+                return None
             if self._api is not None:
                 self._api.log("info", f"[TRIGGER] Detected {task_type.value} trigger in core-prefixed message.")
             return {
                 "type": task_type.value,
-                "description": description or "Auto-triggered orchestration task",
+                "description": description,
                 "priority": "high" if "!!!" in text else "normal",
                 "source": "auto_trigger",
             }

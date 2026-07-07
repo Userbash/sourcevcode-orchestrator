@@ -72,7 +72,7 @@ def test_rabbitmq_connectivity(monkeypatch):
 
     monkeypatch.setattr(dpm.socket, "create_connection", fake_create_connection)
 
-    result = dpm.check_rabbitmq_connectivity("amqp://guest:guest@rabbitmq:5672/")
+    result = dpm.check_rabbitmq_connectivity("amqp://rabbitmq:5672/")
 
     assert result["ok"] is True
     assert result["target"] == "rabbitmq:5672"
@@ -158,7 +158,7 @@ def test_postgres_recover_runs_schema_ensure_and_recheck(monkeypatch):
     monkeypatch.setattr(dpm, "snapshot_postgres_data_plane", lambda database_url: dpm.DataPlaneSnapshot(ok=False, postgres_state="missing", tables=[], details="database url not configured"))
     monkeypatch.setattr(dpm, "build_data_plane_snapshot", lambda **kwargs: dpm.DataPlaneSnapshot(ok=True, postgres_state="healthy", tables=[], rabbitmq_ok=True, probe={"ok": True}, details="postgres data plane reachable; rabbitmq=ok; probe=ok"))
 
-    result = dpm.postgres_recover("postgresql://example", "amqp://guest:guest@rabbitmq:5672/")
+    result = dpm.postgres_recover("postgresql://example", "amqp://rabbitmq:5672/")
 
     assert result["status"] == "ok"
     assert result["recovery_code"] == "OK"

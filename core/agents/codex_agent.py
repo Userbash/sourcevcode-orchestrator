@@ -17,6 +17,13 @@ from core.core.openai_provider import build_openai_client_kwargs
 from core.core.openai_responses_runtime import OpenAIResponsesRuntime
 from core.core.openai_runtime_router import OpenAIRuntimeRouter
 from core.core.models import AgentHealth, AgentResult, AgentStatus, ResultOutput, Task, TaskStatus
+from core.core.openai_payload_guard import (
+    EMPTY_ASSISTANT_RESPONSE_ERROR,
+    EMPTY_PROVIDER_REQUEST_ERROR,
+    chat_completion_has_tool_calls,
+    extract_chat_completion_text,
+    has_meaningful_request_payload,
+)
 
 logger = logging.getLogger("codex_agent")
 VISION_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".svg")
@@ -29,6 +36,7 @@ MODEL_RETRY_ERROR_MARKERS = (
     "invalid model",
     "does not exist",
     "not found",
+    "no assistant content or tool calls",
 )
 
 
@@ -215,9 +223,13 @@ class CodexAgent(BaseAgent):
     @staticmethod
     def _should_fallback_to_chat_completions(raw_error: str) -> bool:
         lowered = str(raw_error or "").strip().lower()
+        if "no assistant content or tool calls" in lowered:
+            return True
         return "responses" in lowered and any(marker in lowered for marker in ("404", "not found", "unsupported", "unknown", "does not exist"))
 
     def _invoke_openai_model(self, client: Any, task: Task, model: str, prompt: str) -> tuple[str, int]:
+        if not has_meaningful_request_payload(prompt):
+            raise ValueError(EMPTY_PROVIDER_REQUEST_ERROR)
         if self._responses_enabled() and hasattr(client, "responses"):
             try:
                 runtime = OpenAIResponsesRuntime(client)
@@ -231,7 +243,12 @@ class CodexAgent(BaseAgent):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
-        return response.choices[0].message.content or "", self._usage_total_tokens(response)
+        content = extract_chat_completion_text(response)
+        if content:
+            return content, self._usage_total_tokens(response)
+        if chat_completion_has_tool_calls(response):
+            raise RuntimeError(EMPTY_ASSISTANT_RESPONSE_ERROR)
+        raise RuntimeError(EMPTY_ASSISTANT_RESPONSE_ERROR)
 
     @staticmethod
     def _is_chat_capable_model(model_name: str) -> bool:
@@ -260,17 +277,18 @@ class CodexAgent(BaseAgent):
             candidates.append(name)
 
         preferred_model = task.assigned_model or self.model_name
-        add(str(preferred_model))
+        add(str(preferred_model), allow_unverified=preferred_model == self.model_name)
 
         if OpenAIRuntimeRouter.enabled():
             plan = self.openai_router.build_plan(task, prompt)
             for model_name in plan.models:
                 add(model_name)
-        else:
-            add(str(self.model_name))
+        add(str(self.model_name), allow_unverified=True)
         return candidates
 
     def _run_mistral(self, task: Task, prompt: str) -> AgentResult:
+        if not has_meaningful_request_payload(prompt):
+            return self.result(task, "Mistral API error", TaskStatus.FAILED, 0.0, [EMPTY_PROVIDER_REQUEST_ERROR], provider="mistral", model_name=self.model_name)
         endpoint = "https://api.mistral.ai/v1/chat/completions"
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
@@ -284,6 +302,7 @@ class CodexAgent(BaseAgent):
             )
             response.raise_for_status()
             data = response.json()
-            content = data["choices"][0]["message"]["content"] or ""
+            content = extract_chat_completion_text(data)
+            if not content:
+                return self.result(task, "Empty response", TaskStatus.FAILED, 0.0, [EMPTY_ASSISTANT_RESPONSE_ERROR], provider="mistral", model_name=self.model_name)
             return self.result(task, content, TaskStatus.DONE, 0.88)
-

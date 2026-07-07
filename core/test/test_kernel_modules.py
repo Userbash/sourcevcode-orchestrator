@@ -90,6 +90,35 @@ def test_submit_user_task_websocket_marks_internal_chat_ingress(monkeypatch):
     assert captured["auto_prepare_text"] is True
 
 
+def test_submit_user_task_external_chat_alias_normalizes_to_websocket_ingress(monkeypatch):
+    orchestrator = Orchestrator()
+    captured = {}
+
+    def _fake_run_sync(task):
+        captured["source"] = task.routing_hints.get("source")
+        captured["channel"] = task.routing_hints.get("channel")
+        captured["ingress_path"] = task.routing_hints.get("ingress_path")
+        captured["external_chat"] = task.routing_hints.get("external_chat")
+        captured["interactive"] = task.routing_hints.get("interactive")
+        captured["description"] = task.input.description
+        return {"status": "done"}
+
+    monkeypatch.setattr(orchestrator, "run_sync", _fake_run_sync)
+
+    orchestrator.submit_user_task({
+        "message": "inspect codex cli payload",
+        "session_id": "ext-chat-1",
+        "source": "external_chat",
+    }, source="external_chat")
+
+    assert captured["source"] == "websocket"
+    assert captured["channel"] == "ws"
+    assert captured["ingress_path"] == "websocket_internal_chat"
+    assert captured["external_chat"] is True
+    assert captured["interactive"] is True
+    assert captured["description"] == "inspect codex cli payload"
+
+
 class _FakeSocratiCodeBridgeForIngress:
     def __init__(self, *, repo_path=None, **kwargs):
         self.repo_path = repo_path
@@ -169,3 +198,65 @@ def test_submit_user_task_websocket_flows_through_socraticode_frame_and_prompt(m
     assert "SOCRATICODE CONTEXT SNAPSHOT:" in captured["description"]
     assert "SOCRATICODE CONTEXT COMPACTION:" in captured["description"]
     assert "FRAME ORCHESTRATION PACKAGE:" in captured["description"]
+
+
+def test_submit_user_task_websocket_trigger_keeps_websocket_ingress(monkeypatch):
+    orchestrator = Orchestrator()
+    captured = {}
+
+    def _fake_run_sync(task):
+        captured["source"] = task.routing_hints.get("source")
+        captured["channel"] = task.routing_hints.get("channel")
+        captured["description"] = task.input.description
+        captured["type"] = task.type.value
+        return {"status": "done"}
+
+    monkeypatch.setattr(orchestrator, "run_sync", _fake_run_sync)
+
+    orchestrator.submit_user_task({"message": "PLAN: inspect websocket auth flow", "session_id": "ws-trigger-1"}, source="websocket")
+
+    assert captured["source"] == "websocket"
+    assert captured["channel"] == "ws"
+    assert captured["type"] == "plan"
+    assert captured["description"] == "inspect websocket auth flow"
+
+
+def test_submit_user_task_websocket_route_mode_orchestrator_survives_to_run_sync(monkeypatch):
+    orchestrator = Orchestrator()
+    captured = {}
+
+    def _fake_run_sync(task):
+        captured["source"] = task.routing_hints.get("source")
+        captured["channel"] = task.routing_hints.get("channel")
+        captured["route_mode"] = task.routing_hints.get("route_mode")
+        captured["force_orchestrator"] = task.routing_hints.get("force_orchestrator")
+        captured["interactive"] = task.routing_hints.get("interactive")
+        captured["description"] = task.input.description
+        captured["type"] = task.type.value
+        return {"status": "done", "task_id": task.task_id}
+
+    monkeypatch.setattr(orchestrator, "run_sync", _fake_run_sync)
+
+    result = orchestrator.submit_user_task({
+        "message": "PLAN: inspect websocket auth flow",
+        "session_id": "ws-orchestrator-route-e2e",
+        "route_mode": "orchestrator",
+    }, source="websocket")
+
+    assert result["status"] == "done"
+    assert captured["source"] == "websocket"
+    assert captured["channel"] == "ws"
+    assert captured["route_mode"] == "orchestrator"
+    assert captured["force_orchestrator"] is True
+    assert captured["interactive"] is True
+    assert captured["type"] == "plan"
+    assert captured["description"] == "inspect websocket auth flow"
+
+
+def test_submit_user_task_rejects_trigger_only_marker_after_dispatch():
+    orchestrator = Orchestrator()
+
+    result = orchestrator.submit_user_task({"message": "PLAN:", "session_id": "ws-trigger-empty"}, source="websocket")
+
+    assert result["status"] == "rejected"
+    assert "empty_or_garbage_description" in result["issues"]

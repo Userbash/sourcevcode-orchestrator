@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover
 class RabbitMQBus(MessageBus):
     def __init__(self, url: str | None = None) -> None:
         super().__init__()
-        self.url = (url or os.getenv("AI_BRIDGE_RABBITMQ_URL", "amqp://guest:guest@localhost/")).strip()
+        self.url = (url or os.getenv("AI_BRIDGE_RABBITMQ_URL", "amqp://localhost/")).strip()
         self._connection: Any = None
         self._channel: Any = None
         self._direct_exchange: Any = None

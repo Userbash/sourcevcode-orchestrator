@@ -86,6 +86,20 @@ SOURCECRAFT_VERIFICATION_KEYWORDS = (
     "quota",
     "workflow",
 )
+SOURCECRAFT_CODE_KEYWORDS = (
+    "implement",
+    "implementation",
+    "build",
+    "add",
+    "create",
+    "refactor",
+    "backend",
+    "frontend",
+    "api",
+    "ui",
+    "service",
+    "migration",
+)
 
 
 @dataclass(slots=True)
@@ -350,6 +364,154 @@ class SourceCraftModule(KernelModule):
         ]
 
     @staticmethod
+    def _file_group_key(file_path: str) -> str:
+        normalized = str(file_path or "").strip().replace("\\", "/")
+        if not normalized:
+            return "misc"
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 2:
+            return "/".join(parts[:2])
+        return parts[0]
+
+    @classmethod
+    def _group_files_by_area(cls, files: list[str], max_groups: int) -> list[list[str]]:
+        if not files:
+            return [[]]
+        grouped: dict[str, list[str]] = {}
+        for file_path in files:
+            key = cls._file_group_key(file_path)
+            grouped.setdefault(key, []).append(file_path)
+        ordered = sorted(grouped.values(), key=lambda row: (-len(row), row[0]))
+        if len(ordered) <= max_groups:
+            return [sorted(row) for row in ordered]
+        merged: list[list[str]] = [[] for _ in range(max_groups)]
+        for index, group in enumerate(ordered):
+            merged[index % max_groups].extend(group)
+        return [sorted(group) for group in merged if group]
+
+    @staticmethod
+    def _lane_kind(index: int, total: int) -> str:
+        if total <= 1:
+            return "implementation"
+        if index == 0:
+            return "primary"
+        if index == total - 1:
+            return "integration"
+        return "secondary"
+
+    @staticmethod
+    def _agent_hint_for_lane(lane_kind: str) -> str:
+        mapping = {
+            "primary": "backend",
+            "secondary": "frontend",
+            "integration": "reviewer",
+            "implementation": "coder",
+        }
+        return mapping.get(lane_kind, "coder")
+
+    @staticmethod
+    def _parallel_objective(task: Any) -> str:
+        return str(getattr(getattr(task, "input", None), "description", "") or "").strip()
+
+    @classmethod
+    def _should_parallelize_code_task(cls, task: Any, context: dict[str, Any] | None = None) -> bool:
+        task_type = str(getattr(getattr(task, "type", None), "value", getattr(task, "type", ""))).strip().lower()
+        if task_type not in {"code", "fix"}:
+            return False
+        hints = getattr(task, "routing_hints", {}) if isinstance(getattr(task, "routing_hints", {}), dict) else {}
+        if bool(hints.get("parallelize_code")):
+            return True
+        text = cls._task_text(task, context)
+        files = getattr(getattr(task, "input", None), "files", []) or []
+        acceptance = getattr(getattr(task, "input", None), "acceptance_criteria", []) or []
+        return (
+            len(files) > 1
+            or len(acceptance) > 1
+            or len(text) >= 80
+            or any(keyword in text for keyword in SOURCECRAFT_CODE_KEYWORDS)
+        )
+
+    @classmethod
+    def build_parallel_coding_brief(cls, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        files = [str(item) for item in (getattr(getattr(task, "input", None), "files", []) or []) if str(item).strip()]
+        acceptance = [str(item) for item in (getattr(getattr(task, "input", None), "acceptance_criteria", []) or []) if str(item).strip()]
+        constraints = [str(item) for item in (getattr(getattr(task, "input", None), "constraints", []) or []) if str(item).strip()]
+        hints = getattr(task, "routing_hints", {}) if isinstance(getattr(task, "routing_hints", {}), dict) else {}
+        explicit_parallel = bool(hints.get("parallelize_code"))
+        should_parallelize = cls._should_parallelize_code_task(task, context)
+        recommended_parallel_branches = max(2, min(4, len(files) if files else 2)) if should_parallelize else 1
+        requested_branches = hints.get("parallel_branches")
+        try:
+            requested_branches = int(requested_branches) if requested_branches is not None else None
+        except (TypeError, ValueError):
+            requested_branches = None
+        if requested_branches is not None and requested_branches >= 2:
+            recommended_parallel_branches = min(max(2, requested_branches), 6)
+        groups = cls._group_files_by_area(files, recommended_parallel_branches if should_parallelize else 1)
+        total_lanes = len(groups) if groups else 1
+        objective = cls._parallel_objective(task)
+        lanes: list[dict[str, Any]] = []
+        for index, group in enumerate(groups or [[]]):
+            lane_kind = cls._lane_kind(index, total_lanes)
+            lane_id = f"lane_{index + 1}"
+            lane_acceptance = acceptance if acceptance else ["code changes completed", "tests pass"]
+            if lane_kind == "integration":
+                lane_acceptance = [*lane_acceptance, "integration risks documented"]
+            lanes.append(
+                {
+                    "lane_id": lane_id,
+                    "lane_kind": lane_kind,
+                    "objective": objective,
+                    "file_targets": list(group),
+                    "acceptance_criteria": lane_acceptance,
+                    "capability": "review" if lane_kind == "integration" and total_lanes > 1 else "code",
+                    "agent_hint": cls._agent_hint_for_lane(lane_kind),
+                    "depends_on": [f"lane_{idx + 1}" for idx in range(index)] if lane_kind == "integration" and total_lanes > 1 else [],
+                    "focus_prompt": (
+                        f"Own the {lane_kind} lane for {', '.join(group)}. Keep overlap low and report integration boundaries."
+                        if group
+                        else f"Own the {lane_kind} lane. Document assumptions and integration boundaries."
+                    ),
+                }
+            )
+
+        orchestrator_payload = {
+            "parallelize_code": should_parallelize,
+            "parallel_branches": total_lanes if should_parallelize else 1,
+            "sourcecraft_parallel_delegate": True,
+            "sourcecraft_parallel_brief": {
+                "objective": objective,
+                "lanes": lanes,
+            },
+        }
+        if constraints:
+            orchestrator_payload["sourcecraft_constraints"] = constraints
+        instruction_lines = [
+            "Use the orchestrator to split this coding task into isolated lanes.",
+            "Keep health and provider endpoints on HTTP unless the task explicitly targets interactive progress over WebSocket.",
+            "Route code-writing to parallel code agents and reserve the final lane for integration or review when multiple lanes exist.",
+        ]
+        if constraints:
+            instruction_lines.append(f"Honor constraints: {', '.join(constraints)}.")
+        if files:
+            instruction_lines.append(f"Primary file targets: {', '.join(files)}.")
+        return {
+            "status": "ok",
+            "should_parallelize": should_parallelize,
+            "reason": "explicit_parallel_request" if explicit_parallel else ("multi_area_code_task" if should_parallelize else "single_lane_task"),
+            "recommended_parallel_branches": total_lanes if should_parallelize else 1,
+            "agent_lanes": lanes,
+            "orchestrator_instruction": " ".join(instruction_lines),
+            "orchestrator_payload": orchestrator_payload,
+            "plan_preview": {
+                "objective": objective,
+                "acceptance_criteria": acceptance,
+                "files": files,
+                "constraints": constraints,
+            },
+        }
+
+    @staticmethod
     def _supported_actions() -> list[str]:
         return [
             "repo_summary",
@@ -607,8 +769,9 @@ class SourceCraftModule(KernelModule):
                     self._last_probe = probe
                     self._version = str(probe.get("stdout") or "").splitlines()[0].strip() or None
         resolved_repo_path = repo_path or self._default_repo_path()
+        git_available = shutil.which("git") is not None
         try:
-            repo_slug = self._resolve_repo_slug(resolved_repo_path)
+            repo_slug = self._resolve_repo_slug(resolved_repo_path) if git_available else None
         except Exception:
             repo_slug = None
         ghbox_probe = self._run_with_fallback(
@@ -631,7 +794,7 @@ class SourceCraftModule(KernelModule):
             ["git", "config", "--global", "user.email"],
             repo_path=resolved_repo_path,
         )
-        branch_probe = self._run_command(["git", "symbolic-ref", "--short", "HEAD"], repo_path=resolved_repo_path)
+        branch_probe = self._run_command(["git", "symbolic-ref", "--short", "HEAD"], repo_path=resolved_repo_path) if git_available else {"ok": False, "stdout": "", "stderr": "git unavailable"}
         repo_access = (
             self._run_with_fallback(
                 ["dh", "gh", "repo", "view", repo_slug],
@@ -643,10 +806,12 @@ class SourceCraftModule(KernelModule):
         )
         ghbox_ready = bool(ghbox_probe.get("ok"))
         direct_gh = bool(ghbox_probe.get("fallback_from"))
+        current_branch = str(branch_probe.get("stdout") or "").strip() or None
         report = {
             "status": "ready",
             "checked_at": datetime.now(UTC).isoformat(),
             "repo_path": str(Path(resolved_repo_path).resolve()),
+            "git_ready": git_available,
             "src_ready": bool(self._binary),
             "src_version": self._version,
             "ghbox_ready": ghbox_ready,
@@ -660,29 +825,38 @@ class SourceCraftModule(KernelModule):
             },
             "origin_ready": bool(repo_slug),
             "repo_slug": repo_slug,
-            "detached_head": not bool((branch_probe.get("stdout") or "").strip()),
-            "current_branch": str(branch_probe.get("stdout") or "").strip() or None,
+            "detached_head": not bool(current_branch),
+            "current_branch": current_branch,
             "warnings": [],
+            "capabilities": {
+                "read_only_repo": bool(git_available and repo_slug and current_branch),
+                "github_api": bool(ghbox_ready and gh_auth.get("ok")),
+                "sourcecraft_cli": bool(self._binary),
+                "mutating_repo": bool(git_available and repo_slug and current_branch and (bool(self._binary) or bool(ghbox_ready and gh_auth.get("ok"))) and bool((git_name.get("stdout") or "").strip() and (git_email.get("stdout") or "").strip())),
+            },
         }
-        if not report["src_ready"]:
+        if not report["git_ready"]:
             report["status"] = "error"
-            report["warnings"].append("src binary not available")
-        if not report["ghbox_ready"]:
-            report["status"] = "degraded"
-            report["warnings"].append("GitHub CLI runtime is not ready")
-        if not report["gh_auth_ready"]:
-            report["status"] = "degraded"
-            report["warnings"].append("GitHub authentication is not ready")
-        if not report["git_identity"]["configured"]:
-            report["status"] = "degraded"
-            report["warnings"].append("Git identity is not configured")
+            report["warnings"].append("git is not available")
         if not report["origin_ready"]:
             report["status"] = "degraded"
             report["warnings"].append("origin remote could not be resolved")
         if report["detached_head"]:
             report["status"] = "degraded"
             report["warnings"].append("repository is in detached HEAD state")
+        if not report["src_ready"]:
+            report["warnings"].append("src binary not available")
+        if not report["ghbox_ready"]:
+            report["warnings"].append("GitHub CLI runtime is not ready")
+        if not report["gh_auth_ready"]:
+            report["warnings"].append("GitHub authentication is not ready")
+        if not report["git_identity"]["configured"]:
+            report["warnings"].append("Git identity is not configured")
+        if not report["capabilities"]["read_only_repo"] and report["status"] == "ready":
+            report["status"] = "degraded"
         self._runtime_health = report
+        self._status = report["status"]
+        self._last_error = None if report["status"] == "ready" else "; ".join(report["warnings"][:3]) or self._last_error
         return report
 
     def build_delegation_profile(self, task: Any, context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -791,6 +965,9 @@ class SourceCraftModule(KernelModule):
     def build_execution_plan(self, task: Any, context: dict[str, Any] | None = None):
         from .models import ExecutionPlan, Task, TaskInput, TaskType
         required_capability = str(getattr(task, "required_capability", "") or "").strip().lower()
+        hints = getattr(task, "routing_hints", {}) if isinstance(getattr(task, "routing_hints", {}), dict) else {}
+        if bool(hints.get("sourcecraft_parallel_delegate")):
+            return None
         delegation = self.build_delegation_profile(task, context)
         task_family = str(delegation.get("task_family") or "general")
         if required_capability not in SOURCECRAFT_CAPABILITIES and not bool(delegation.get("should_delegate")):
@@ -1216,32 +1393,26 @@ class SourceCraftModule(KernelModule):
         except Exception:
             self._host_bridge = None
         self._binary = self._resolve_binary()
+        self._status = "ready"
+        self._last_error = None
         if not self._binary:
-            self._status = "error"
-            self._last_error = "SourceCraft CLI binary not found"
-            self._last_probe = {"ok": False, "error": self._last_error, "binary_candidates": self._candidate_bins()}
-            self._runtime_health = {"status": "error", "warnings": [self._last_error], "src_ready": False}
-            api.log("warning", "[SOURCECRAFT] src binary not found; module loaded in degraded mode.")
-            return
-
-        self._last_probe = self._probe_version()
-        if self._last_probe.get("ok"):
-            self._version = str(self._last_probe.get("stdout") or "").splitlines()[0].strip()
-            self._status = "ready"
-            self._last_error = None
-            api.log("info", f"[SOURCECRAFT] src ready: {self._version}")
-            try:
-                self.ensure_ready(repo_path=self._default_repo_path())
-            except Exception as exc:
-                self._status = "degraded"
-                self._last_error = f"runtime bootstrap degraded: {exc}"
-                self._runtime_health = {"status": "degraded", "warnings": [self._last_error], "src_ready": True}
-                api.log("warning", f"[SOURCECRAFT] runtime bootstrap degraded: {exc}")
+            self._last_probe = {"ok": False, "error": "SourceCraft CLI binary not found", "binary_candidates": self._candidate_bins()}
+            api.log("warning", "[SOURCECRAFT] src binary not found; continuing with git-only repository workflows.")
         else:
+            self._last_probe = self._probe_version()
+            if self._last_probe.get("ok"):
+                self._version = str(self._last_probe.get("stdout") or "").splitlines()[0].strip()
+                api.log("info", f"[SOURCECRAFT] src ready: {self._version}")
+            else:
+                self._last_error = "; ".join(self._last_probe.get("errors", []))
+                api.log("warning", f"[SOURCECRAFT] src probe degraded: {self._last_error}")
+        try:
+            self.ensure_ready(repo_path=self._default_repo_path())
+        except Exception as exc:
             self._status = "degraded"
-            self._last_error = "; ".join(self._last_probe.get("errors", []))
-            self._runtime_health = {"status": "degraded", "warnings": [self._last_error], "src_ready": True}
-            api.log("warning", f"[SOURCECRAFT] src probe degraded: {self._last_error}")
+            self._last_error = f"runtime bootstrap degraded: {exc}"
+            self._runtime_health = {"status": "degraded", "warnings": [self._last_error], "src_ready": bool(self._binary)}
+            api.log("warning", f"[SOURCECRAFT] runtime bootstrap degraded: {exc}")
 
     def on_unload(self) -> None:
         self._status = "idle"

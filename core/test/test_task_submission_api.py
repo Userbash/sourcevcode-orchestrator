@@ -1,5 +1,5 @@
 from core.core.models import Priority, TaskType
-from core.core.task_submission_api import create_standard_task, normalize_user_payload
+from core.core.task_submission_api import create_standard_task, normalize_user_payload, validate_normalized_payload
 
 
 def test_normalize_user_payload_plain_text():
@@ -52,6 +52,29 @@ def test_create_standard_task_materializes_websocket_routing_hints():
     assert task.routing_hints["frame_orchestrator"]["status"] == "validated"
     assert task.routing_hints["frame_xml_package"].startswith("<orchestrator_package")
 
+
+def test_create_standard_task_preserves_ingress_routing_hints_and_route_mode():
+    task = create_standard_task(
+        {
+            "type": "plan",
+            "message": "Inspect websocket ingress routing",
+            "route_mode": "orchestrator",
+            "external_chat": True,
+            "routing_hints": {
+                "ingress_path": "/chat/ws",
+                "source_adapter": "gemini-cli",
+                "control_plane": "chat",
+            },
+        }
+    )
+
+    assert task.type == TaskType.PLAN
+    assert task.routing_hints["route_mode"] == "orchestrator"
+    assert task.routing_hints["force_orchestrator"] is True
+    assert task.routing_hints["external_chat"] is True
+    assert task.routing_hints["ingress_path"] == "/chat/ws"
+    assert task.routing_hints["source_adapter"] == "gemini-cli"
+    assert task.routing_hints["control_plane"] == "chat"
 
 
 def test_normalize_user_payload_dict_cleans_unicode_and_lists():
@@ -211,3 +234,10 @@ def test_create_standard_task_applies_strong_coverage_cost_and_parallel_downgrad
     assert task.routing_hints["original_parallel_branches"] == 3
     assert task.routing_hints["parallel_branches"] == 2
     assert task.routing_hints["socraticode_parallel_branches_applied"] is True
+
+
+def test_validate_normalized_payload_rejects_trigger_only_markers():
+    ok, issues = validate_normalized_payload({"message": "PLAN:"})
+
+    assert ok is False
+    assert "empty_or_garbage_description" in issues

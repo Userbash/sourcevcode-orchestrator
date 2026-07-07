@@ -57,6 +57,8 @@ _COST_TIER_ALIASES: dict[str, str] = {
 _GARBAGE_PATTERNS = (
     r"^[\W_]+$",
     r"^(n/?a|none|null|undefined|test|asdf|qwerty|lol)$",
+    r"^(core|ядро|яжро|ядра|ядер|ai|ии)$",
+    r"^(plan|план|design|дизайн|arch|архитектура|build|код|реализуй|write|напиши|dev|разработай|fix|исправь|почини|bug|ошибка|debug|отладка|clean|очисти|refactor|рефактор|optimize|оптимизируй|review|ревью|проверь|audit|аудит|security|безопасность|scan|сканируй|test|тест|протестируй|check|проверка|research|исследуй|find|найди|analyze|анализируй|learn|изучи|docs|документация|doc|опиши|readme|deploy|деплой|start|запусти|run)[:\s-]*$",
 )
 
 
@@ -374,8 +376,24 @@ def create_standard_task(data: dict[str, Any]) -> Task:
         ext_task_id = normalized.get("task_id")
         if isinstance(ext_task_id, str) and ext_task_id.strip():
             task.task_id = ext_task_id.strip()
+        inbound_routing_hints = normalized.get("routing_hints")
         if not task.routing_hints:
             task.routing_hints = {}
+        if isinstance(inbound_routing_hints, dict):
+            task.routing_hints.update(inbound_routing_hints)
+        route_mode = str(normalized.get("route_mode") or task.routing_hints.get("route_mode") or "").strip().lower()
+        if route_mode in {"orchestrator", "p2p"}:
+            task.routing_hints["route_mode"] = route_mode
+            if route_mode == "orchestrator":
+                task.routing_hints.setdefault("force_orchestrator", True)
+        for hint_key in ("channel", "ingress_path", "adapter", "source_adapter", "control_plane"):
+            hint_value = normalized.get(hint_key)
+            if isinstance(hint_value, str) and hint_value.strip():
+                task.routing_hints[hint_key] = hint_value.strip()
+        for flag_key in ("external_chat", "interactive", "force_orchestrator"):
+            flag_value = normalized.get(flag_key)
+            if isinstance(flag_value, bool):
+                task.routing_hints[flag_key] = flag_value
         task.routing_hints.setdefault("source", source)
         task.routing_hints.setdefault("cost_tier", cost_tier)
         task.routing_hints["normalized_text_profile"] = input_profile

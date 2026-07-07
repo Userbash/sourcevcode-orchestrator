@@ -14,6 +14,7 @@ from core.core.antigravity_provider import (
     resolve_antigravity_provider_config,
 )
 from core.core.env_loader import load_env_file
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, provider_response_has_assistant_content_or_tool_calls
 from core.core.antigravity_model_registry import AntigravityModelRegistry
 from core.core.host_bridge import HostBridge
 from .antigravity_session_store import AntigravitySessionStore
@@ -191,8 +192,13 @@ class AntigravityManager:
             )
             payload = response.json() if response.content else {}
             stdout = self._generation_text_from_payload(payload)
-            ok = response.status_code == 200 and bool(stdout or str(payload).strip())
-            stderr = "" if ok else response.text[:500]
+            empty_assistant = (
+                response.status_code == 200
+                and isinstance(payload, dict)
+                and not provider_response_has_assistant_content_or_tool_calls(payload)
+            )
+            ok = response.status_code == 200 and not empty_assistant and bool(stdout)
+            stderr = "" if ok else (EMPTY_ASSISTANT_RESPONSE_ERROR if empty_assistant else response.text[:500])
             return {"ok": ok, "status_code": response.status_code, "stdout": stdout, "stderr": stderr, "error": None if ok else stderr, "auth_mode": "api_key", "model": chosen_model}
         except Exception as exc:
             return {"ok": False, "status_code": None, "stdout": "", "stderr": str(exc), "error": str(exc), "auth_mode": "api_key", "model": model_name or "unknown"}

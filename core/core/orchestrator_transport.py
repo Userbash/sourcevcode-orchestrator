@@ -31,6 +31,14 @@ def _socraticode_module(orchestrator: Any) -> Any | None:
     return None
 
 
+def _sourcecraft_module(orchestrator: Any) -> Any | None:
+    if hasattr(orchestrator, "get_module"):
+        return orchestrator.get_module("sourcecraft")
+    if hasattr(orchestrator, "module_manager") and hasattr(orchestrator.module_manager, "get_module"):
+        return orchestrator.module_manager.get_module("sourcecraft")
+    return None
+
+
 def _resident_rows(module: Any) -> list[dict[str, Any]]:
     runtime = getattr(module, "runtime", None)
     if runtime is None or not hasattr(runtime, "list_resident_models_sync"):
@@ -99,6 +107,37 @@ def provider_runtime_inventory_single_payload(
         suppression_snapshot=_suppression_snapshot(orchestrator),
     )
     return {"status": "ok", "data": payload}, 200
+
+
+async def provider_runtime_inventory_single_stream(
+    orchestrator: Any,
+    provider: str,
+    *,
+    force_refresh: bool = False,
+    probe_limit: int | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    hub = getattr(orchestrator, "inventory_stream_hub", None)
+    if hub is not None and hasattr(hub, "stream"):
+        async for event in hub.stream("provider_runtime_inventory"):
+            snapshot = event.get("snapshot", {}) if isinstance(event, dict) else {}
+            providers = snapshot.get("providers") if isinstance(snapshot.get("providers"), dict) else {}
+            row = providers.get(provider, {})
+            yield {
+                "type": "snapshot" if str(event.get("kind") or "") == "snapshot" else "delta",
+                "provider": provider,
+                "data": row if isinstance(row, dict) else {},
+                "summary": snapshot.get("summary", {}) if isinstance(snapshot, dict) else {},
+                "published_at": event.get("published_at"),
+                "version": event.get("version"),
+            }
+        return
+    payload, _status = provider_runtime_inventory_single_payload(
+        orchestrator,
+        provider,
+        force_refresh=force_refresh,
+        probe_limit=probe_limit,
+    )
+    yield {"type": "snapshot", "provider": provider, "data": payload.get("data", {})}
 
 
 def _socraticode_context_compaction_snapshot(orchestrator: Any) -> dict[str, Any]:
@@ -194,7 +233,18 @@ def socraticode_context_compaction_status_payload(orchestrator: Any) -> tuple[di
 
 
 async def socraticode_context_compaction_status_stream(orchestrator: Any) -> AsyncIterator[dict[str, Any]]:
-    yield {"status": "ok", "data": _socraticode_context_compaction_snapshot(orchestrator)}
+    yield {"type": "snapshot", "status": "ok", "data": _socraticode_context_compaction_snapshot(orchestrator)}
+    runtime_hub = getattr(orchestrator, "runtime_event_stream_hub", None)
+    if runtime_hub is not None and hasattr(runtime_hub, "stream"):
+        async for event in runtime_hub.stream():
+            yield {
+                "type": "delta",
+                "status": "ok",
+                "data": _socraticode_context_compaction_snapshot(orchestrator),
+                "runtime_event": event.get("delta") if isinstance(event, dict) else None,
+                "published_at": event.get("published_at") if isinstance(event, dict) else None,
+                "version": event.get("version") if isinstance(event, dict) else None,
+            }
 
 
 def provider_models_index_payload(orchestrator: Any, *, force_refresh: bool = False) -> tuple[dict[str, Any], int]:
@@ -259,6 +309,78 @@ def local_llm_residents_payload(orchestrator: Any) -> tuple[dict[str, Any], int]
     if not module:
         return {"status": "error", "error": "local_llm module not loaded"}, 503
     return {"status": "ok", "data": {"resident_models": _resident_rows(module)}}, 200
+
+
+def stats_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:
+    usage_mod = orchestrator.module_manager.get_module("model_usage") if hasattr(orchestrator, "module_manager") else None
+    local_model_manager = orchestrator.module_manager.get_module("local_model_manager") if hasattr(orchestrator, "module_manager") else None
+    module_state = orchestrator.module_state() if hasattr(orchestrator, "module_state") else {}
+    return {
+        "status": "success",
+        "data": {
+            "model_usage": usage_mod.finalize() if usage_mod and hasattr(usage_mod, "finalize") else {},
+            "local_model_manager": local_model_manager.finalize() if local_model_manager and hasattr(local_model_manager, "finalize") else {},
+            "provider_inventory": module_state.get("provider_inventory", {}) if isinstance(module_state, dict) else {},
+        },
+    }, 200
+
+
+def openai_runtime_inventory_payload(
+    orchestrator: Any,
+    *,
+    force_refresh: bool = False,
+    probe_limit: int | None = None,
+) -> tuple[dict[str, Any], int]:
+    payload = orchestrator.provider_inventory.refresh_openai_runtime_inventory(
+        force_refresh=force_refresh,
+        probe_limit=probe_limit,
+    )
+    return {"status": "ok", "data": payload}, 200
+
+
+def openai_discovery_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:
+    from core.core.openai_bazzite_endpoint import load_openai_endpoint_discovery
+
+    return {"status": "ok", "data": load_openai_endpoint_discovery()}, 200
+
+
+def openai_model_templates_payload(
+    orchestrator: Any,
+    *,
+    force_refresh: bool = False,
+    probe_limit: int | None = None,
+) -> tuple[dict[str, Any], int]:
+    payload = orchestrator.provider_inventory.refresh_openai_runtime_inventory(
+        force_refresh=force_refresh,
+        probe_limit=probe_limit,
+    )
+    return {"status": "ok", "data": payload.get("model_templates", {})}, 200
+
+
+def local_model_health_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:
+    local_model_manager = orchestrator.module_manager.get_module("local_model_manager") if hasattr(orchestrator, "module_manager") else None
+    if local_model_manager and hasattr(local_model_manager, "finalize"):
+        state = local_model_manager.finalize()
+        return {
+            "status": "ok",
+            "resident_models": state.get("resident_models", []),
+            "blocked_models": state.get("blocked_models", []),
+            "memory_pressure": state.get("memory_pressure", {}),
+            "evictions": state.get("evictions", 0),
+            "warmups": state.get("warmups", 0),
+        }, 200
+    return {"status": "error", "error": "local_model_manager not loaded"}, 503
+
+
+def antigravity_status_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:
+    from core.core.antigravity_status_module import shared_antigravity_snapshot
+
+    return shared_antigravity_snapshot(force=False), 200
+
+
+def dump_memory_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:
+    modules = orchestrator.module_manager.loaded_modules() if hasattr(orchestrator, "module_manager") and hasattr(orchestrator.module_manager, "loaded_modules") else []
+    return {"status": "ok", "modules": modules}, 200
 
 
 def local_llm_connect_payload(orchestrator: Any, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -387,6 +509,147 @@ async def diagnostics_payload(
             "failure_code": "HTTP_DIAGNOSTICS_PAYLOAD_INVALID",
         }, 500
     return payload, 200
+
+
+async def diagnostics_stream(
+    orchestrator: Any,
+    *,
+    layers: list[str] | None = None,
+    matrix_only: bool = False,
+) -> AsyncIterator[dict[str, Any]]:
+    yield {
+        "type": "event",
+        "stage": "started",
+        "layers": list(layers or []),
+        "matrix_only": bool(matrix_only),
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    payload, status_code = await diagnostics_payload(orchestrator, layers=layers, matrix_only=matrix_only)
+    yield {
+        "type": "event",
+        "stage": "completed" if status_code == 200 else "failed",
+        "status_code": status_code,
+        "payload": payload,
+        "final": True,
+    }
+
+
+def sourcecraft_status_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:
+    module = _sourcecraft_module(orchestrator)
+    if not module:
+        return {"status": "error", "error": "sourcecraft module not loaded"}, 503
+    runtime_repo_path = module._default_repo_path() if hasattr(module, "_default_repo_path") else "."
+    runtime = module.ensure_ready(repo_path=runtime_repo_path) if hasattr(module, "ensure_ready") else {"status": "unknown"}
+    profile = module._role_profile().as_dict() if hasattr(module, "_role_profile") else {}
+    final = module.finalize() if hasattr(module, "finalize") else {}
+    return {
+        "status": final.get("status", runtime.get("status", "unknown")),
+        "runtime": runtime,
+        "role": profile,
+        "module": final,
+    }, 200
+
+
+def sourcecraft_delegate_payload(orchestrator: Any, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    from core.core.task_submission_api import create_standard_task
+
+    task = create_standard_task(payload)
+    module = _sourcecraft_module(orchestrator)
+    if not module:
+        return {"status": "error", "error": "sourcecraft module not loaded"}, 503
+    delegation = module.build_delegation_profile(task, payload) if hasattr(module, "build_delegation_profile") else {}
+    acceptance = orchestrator.router.route(task)
+    route = acceptance.as_dict() if hasattr(acceptance, "as_dict") else acceptance
+    assigned_agent = route.get("assigned_agent") if isinstance(route, dict) else None
+    route_mode = "orchestrator" if assigned_agent == "orchestrator" else "p2p"
+    schedule = {
+        "task_id": task.task_id,
+        "route_mode": route_mode,
+        "assigned_agent": assigned_agent,
+        "requires_orchestrator": route_mode == "orchestrator",
+        "reason": route.get("message") if isinstance(route, dict) else None,
+    }
+    return {
+        "status": "ok",
+        "delegation": delegation,
+        "route": route,
+        "schedule": schedule,
+    }, 200
+
+
+async def sourcecraft_delegate_stream(orchestrator: Any, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    yield {"type": "event", "stage": "accepted", "payload_keys": sorted(payload)}
+    result, status_code = sourcecraft_delegate_payload(orchestrator, payload)
+    if status_code != 200:
+        yield {"type": "event", "stage": "failed", "status_code": status_code, "payload": result, "final": True}
+        return
+    yield {"type": "event", "stage": "delegation_ready", "delegation": result.get("delegation", {})}
+    yield {
+        "type": "event",
+        "stage": "route_ready",
+        "route": result.get("route", {}),
+        "schedule": result.get("schedule", {}),
+        "final": True,
+    }
+
+
+def sourcecraft_parallel_delegate_payload(orchestrator: Any, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    from core.core.frame_orchestrator import build_frame_orchestrator_package
+    from core.core.task_submission_api import create_standard_task
+
+    task = create_standard_task(payload)
+    module = _sourcecraft_module(orchestrator)
+    if not module:
+        return {"status": "error", "error": "sourcecraft module not loaded"}, 503
+    if not hasattr(module, "build_parallel_coding_brief"):
+        return {"status": "error", "error": "sourcecraft parallel delegation unavailable"}, 503
+
+    brief = module.build_parallel_coding_brief(task, payload)
+    if not isinstance(task.routing_hints, dict):
+        task.routing_hints = {}
+    task.routing_hints.update(brief.get("orchestrator_payload") or {})
+    task.routing_hints["source"] = "sourcecraft_parallel_delegate"
+    task.routing_hints["sourcecraft_instruction"] = brief.get("orchestrator_instruction")
+    task.routing_hints["frame_orchestrator"] = build_frame_orchestrator_package(task, payload).as_dict()
+
+    plan = orchestrator.create_execution_plan(task)
+    atomic_tasks = getattr(plan, "atomic_tasks", []) or []
+    atomic_summary = [
+        {
+            "task_id": atomic.task_id,
+            "type": str(getattr(getattr(atomic, "type", None), "value", getattr(atomic, "type", ""))),
+            "draft_layer": atomic.draft_layer,
+            "required_capability": atomic.required_capability,
+            "preferred_agent_id": atomic.routing_hints.get("preferred_agent_id") if isinstance(atomic.routing_hints, dict) else None,
+            "fanout_label": atomic.routing_hints.get("fanout_label") if isinstance(atomic.routing_hints, dict) else None,
+            "dependencies": list(atomic.dependencies),
+            "files": list(atomic.input.files),
+        }
+        for atomic in atomic_tasks
+    ]
+    return {
+        "status": "ok",
+        "brief": brief,
+        "task": task.as_dict(),
+        "plan": plan.as_dict() if hasattr(plan, "as_dict") else {},
+        "atomic_task_summary": atomic_summary,
+    }, 200
+
+
+async def sourcecraft_parallel_delegate_stream(orchestrator: Any, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    yield {"type": "event", "stage": "accepted", "payload_keys": sorted(payload)}
+    result, status_code = sourcecraft_parallel_delegate_payload(orchestrator, payload)
+    if status_code != 200:
+        yield {"type": "event", "stage": "failed", "status_code": status_code, "payload": result, "final": True}
+        return
+    yield {"type": "event", "stage": "brief_ready", "brief": result.get("brief", {})}
+    yield {
+        "type": "event",
+        "stage": "plan_ready",
+        "plan": result.get("plan", {}),
+        "atomic_task_summary": result.get("atomic_task_summary", []),
+        "final": True,
+    }
 
 
 async def runtime_events_stream(orchestrator: Any) -> AsyncIterator[dict[str, Any]]:

@@ -105,6 +105,11 @@ class TaskRouter:
             return tdd_override
 
         capability = self._resolved_capability(task)
+        hints = task.routing_hints if isinstance(task.routing_hints, dict) else {}
+        route_mode = str(hints.get("route_mode") or "").strip().lower()
+        if route_mode == "orchestrator" or bool(hints.get("force_orchestrator")):
+            return TaskAcceptance(task.task_id, TaskStatus.ACCEPTED, "orchestrator", self.estimate_complexity(task), "Task accepted (ingress orchestrator routing)")
+
         preferred_agent_id = self._preferred_agent_id(task)
         if preferred_agent_id:
             preferred_agent = self.registry.get(preferred_agent_id)

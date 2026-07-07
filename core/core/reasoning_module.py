@@ -11,6 +11,7 @@ from typing import Any, Optional, Type, TypeVar
 from pydantic import BaseModel
 
 from .kernel_protocol import KernelAPI
+from .openai_payload_guard import EMPTY_PROVIDER_REQUEST_ERROR, has_meaningful_request_payload
 from .openai_provider import build_openai_client_kwargs
 
 T = TypeVar("T", bound=BaseModel)
@@ -157,28 +158,39 @@ class ReasoningModule:
 
     def structured_call(self, prompt: str, response_model: Type[T], system_prompt: str = "You are a senior system architect.", model: Optional[str] = None) -> Optional[T]:
         if self._client:
-            try:
-                result = self._client.chat.completions.create(
-                    model=self._resolve_model(model),
-                    response_model=response_model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-                self._bump_stat("cloud_success")
-                self._last_failure = None
-                return result
-            except Exception as e:
+            if not has_meaningful_request_payload([system_prompt, prompt]):
+                error = ValueError(EMPTY_PROVIDER_REQUEST_ERROR)
                 self._bump_stat("cloud_failure")
                 self._record_failure(
                     stage="cloud_structured_call",
                     response_model=response_model,
-                    error=e,
+                    error=error,
                     prompt=prompt,
                     requested_model=model,
                 )
-                logger.error(f"Cloud structured call failed, trying local LLM fallback: {e}")
+            else:
+                try:
+                    result = self._client.chat.completions.create(
+                        model=self._resolve_model(model),
+                        response_model=response_model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                    )
+                    self._bump_stat("cloud_success")
+                    self._last_failure = None
+                    return result
+                except Exception as e:
+                    self._bump_stat("cloud_failure")
+                    self._record_failure(
+                        stage="cloud_structured_call",
+                        response_model=response_model,
+                        error=e,
+                        prompt=prompt,
+                        requested_model=model,
+                    )
+                    logger.error(f"Cloud structured call failed, trying local LLM fallback: {e}")
 
         local_llm = self._api.get_module("local_llm") if self._api else None
         if local_llm and getattr(local_llm, "ready", False):

@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 import httpx
 
+from .openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR, extract_provider_response_text, has_meaningful_request_payload, provider_response_has_assistant_content_or_tool_calls
+
 
 @dataclass(slots=True)
 class AntigravityProviderConfig:
@@ -268,44 +270,15 @@ def fetch_antigravity_model_catalog(*, force_refresh: bool = False, timeout_sec:
 
 
 def extract_antigravity_response_text(payload: Any) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    choices = payload.get("choices") or []
-    if isinstance(choices, list) and choices:
-        message = (choices[0] or {}).get("message") or {}
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    text = item.get("text")
-                    if isinstance(text, str) and text.strip():
-                        parts.append(text.strip())
-            if parts:
-                return " ".join(parts).strip()
-    output = payload.get("output") or []
-    if isinstance(output, list):
-        parts: list[str] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            for content in item.get("content") or []:
-                if not isinstance(content, dict):
-                    continue
-                text = content.get("text") or content.get("output_text")
-                if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
-        if parts:
-            return " ".join(parts).strip()
-    return ""
+    return extract_provider_response_text(payload)
 
 
 def invoke_antigravity_native(model_name: str, prompt: str, *, timeout_sec: float = 45.0, max_completion_tokens: int = 1200, temperature: float = 0.2) -> tuple[dict[str, Any] | None, str | None, int | None]:
     cfg = resolve_antigravity_provider_config()
     if not cfg.api_key:
         return None, "ANTIGRAVITY_API_KEY not set", None
+    if not has_meaningful_request_payload(prompt):
+        return None, EMPTY_PROVIDER_REQUEST_ERROR, None
     normalized_model = _normalize_model_name(model_name)
     try:
         response = httpx.post(
@@ -335,4 +308,6 @@ def invoke_antigravity_native(model_name: str, prompt: str, *, timeout_sec: floa
                 message = f"{message}: {param}"
             return payload, message, response.status_code
         return None, (response.text or f"http_{response.status_code}").strip(), response.status_code
+    if isinstance(payload, dict) and not provider_response_has_assistant_content_or_tool_calls(payload):
+        return payload, EMPTY_ASSISTANT_RESPONSE_ERROR, response.status_code
     return payload if isinstance(payload, dict) else None, None, response.status_code

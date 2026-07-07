@@ -81,7 +81,7 @@ echo "[prod] Starting postgres/redis/backend/frontend/admin (no host port exposu
 $BRIDGE_CMD podman run -d --pull=never \
   --name hebrew_ai_postgres \
   --network hebrew-net \
-  -e POSTGRES_USER=postgres \
+  -e POSTGRES_USER="${DB_USER:?set DB_USER in .env or shell}" \
   -e POSTGRES_PASSWORD="$DB_PASSWORD" \
   -e POSTGRES_DB=hebrew_ai_db \
   -v "$PG_VOLUME_NAME":/var/lib/postgresql/data:Z \
@@ -105,7 +105,7 @@ $BRIDGE_CMD podman run -d --pull=never \
   -e JWT_SECRET="$JWT_SECRET" \
   -e DB_HOST=hebrew_ai_postgres \
   -e DB_PORT=5432 \
-  -e DB_USER=postgres \
+  -e DB_USER="${DB_USER:?set DB_USER in .env or shell}" \
   -e DB_PASSWORD="$DB_PASSWORD" \
   -e DB_NAME=hebrew_ai_db \
   -e REDIS_HOST=hebrew_ai_redis \

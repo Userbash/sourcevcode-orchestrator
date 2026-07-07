@@ -18,22 +18,29 @@ HTTP_CONTROL_PLANE_ENDPOINTS = [
     "/providers/{provider}/runtime_inventory",
     "/providers/models/index",
     "/providers/models/index/{model_name}",
+    "/socraticode/context_compaction/status",
     "/providers/local_llm/residents",
     "/providers/local_llm/connect",
     "/providers/local_llm/disconnect",
     "/providers/local_llm/warm",
+    "/providers/ai_kernel/gate",
+    "/providers/ai_kernel/ensure",
     "/health/local_models",
     "/dump_memory",
     "/sourcecraft",
     "/sourcecraft/delegate",
+    "/sourcecraft/parallel_delegate",
+    "/transport/audit",
     "/diagnostics",
 ]
 
 WS_ENDPOINTS = [
+    "/control/ws",
     "/ws/providers/inventory",
     "/ws/providers/runtime_inventory",
     "/ws/providers/models/index",
     "/ws/runtime/events",
+    "/ws/socraticode/context_compaction/status",
     "/chat/ws",
 ]
 
@@ -88,6 +95,14 @@ def build_transport_audit(orchestrator: Any | None = None) -> dict[str, Any]:
             'ws_only': True,
         },
         {
+            'name': 'control_plane_ws',
+            'transport': 'websocket',
+            'mode': 'command_session',
+            'direction': 'ingress_egress',
+            'endpoints': ['/control/ws'],
+            'ws_only': True,
+        },
+        {
             'name': 'provider_inventory_stream',
             'transport': 'websocket',
             'mode': 'event_stream',
@@ -112,6 +127,14 @@ def build_transport_audit(orchestrator: Any | None = None) -> dict[str, Any]:
             'ws_only': True,
         },
         {
+            'name': 'socraticode_context_compaction_stream',
+            'transport': 'websocket',
+            'mode': 'event_stream',
+            'direction': 'egress',
+            'endpoints': ['/ws/socraticode/context_compaction/status'],
+            'ws_only': True,
+        },
+        {
             'name': 'runtime_event_stream',
             'transport': 'websocket',
             'mode': 'event_stream',
@@ -120,7 +143,7 @@ def build_transport_audit(orchestrator: Any | None = None) -> dict[str, Any]:
             'ws_only': True,
         },
         {
-            'name': 'control_plane_api',
+            'name': 'control_plane_http_compat',
             'transport': 'http',
             'mode': 'request_response',
             'direction': 'ingress_egress',
@@ -161,24 +184,33 @@ def build_transport_audit(orchestrator: Any | None = None) -> dict[str, Any]:
     migration_plan = [
         {
             'phase': 'phase_1',
-            'title': 'Keep HTTP control-plane stable',
-            'goal': 'Do not move admin, health, readiness, or mutation endpoints to WS.',
-            'targets': ['/health', '/health/full', '/providers/*', '/diagnostics'],
-            'reason': 'These operations are idempotent control-plane calls and are safer over HTTP/FastAPI.',
+            'title': 'Keep HTTP health and readiness stable',
+            'goal': 'Do not move liveness and readiness probes away from HTTP.',
+            'targets': ['/health', '/health/full', '/api/health'],
+            'reason': 'These endpoints are consumed by Docker, systemd, CI probes, and reverse proxies.',
         },
         {
             'phase': 'phase_2',
-            'title': 'Move event streams to WS only where streaming matters',
-            'goal': 'Use WS for provider inventory, chat, live agent events, and fan-out/fan-in progress.',
-            'targets': ['provider_model_index_stream', 'runtime_event_stream', 'chat_ingress', 'delivery events', 'workflow progress'],
-            'reason': 'These paths benefit from push delivery and low-latency incremental updates.',
+            'title': 'Use /control/ws as the primary interactive control-plane',
+            'goal': 'Prefer websocket actions for interactive, long-running, or chatty control-plane operations.',
+            'targets': [
+                '/control/ws',
+                'sourcecraft.delegate',
+                'sourcecraft.parallel_delegate',
+                'diagnostics.subscribe',
+                'providers.runtime_inventory.*',
+                'providers.openai.runtime_inventory.*',
+                'providers.models.index.*',
+                'socraticode.context_compaction.status.*',
+            ],
+            'reason': 'These flows benefit from ack, progress events, and a shared operator session.',
         },
         {
             'phase': 'phase_3',
             'title': 'Keep internal orchestration on MessageBus or in-memory bus',
             'goal': 'Do not replace local direct-call and brokered agent dispatch with WS blindly.',
             'targets': ['agent_dispatch', 'module_invocation', 'inventory_runtime_sync'],
-            'reason': 'Internal RPC and queue semantics need ack/retry/state guarantees that WS alone does not provide.',
+            'reason': 'Internal RPC and queue semantics need ack, retry, and state guarantees that WS alone does not provide.',
         },
     ]
 
@@ -187,8 +219,8 @@ def build_transport_audit(orchestrator: Any | None = None) -> dict[str, Any]:
         'summary': {
             'fully_ws': False,
             'core_transport_mode': 'hybrid',
-            'control_plane_transport': 'http',
-            'event_stream_transport': 'hybrid',
+            'control_plane_transport': 'hybrid_http_ws',
+            'event_stream_transport': 'websocket',
             'internal_dispatch_transport': 'message_bus_and_direct_call',
             'ws_endpoint_count': len(WS_ENDPOINTS),
             'http_endpoint_count': len(HTTP_CONTROL_PLANE_ENDPOINTS),

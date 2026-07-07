@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 from core.agents.mistral_agent import MistralAgent
 from core.core.models import Task, TaskContext, TaskInput, TaskType
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR
 
 
 class _Security:
@@ -106,3 +107,36 @@ def test_mistral_agent_falls_back_to_fast_model_after_transient_failure(monkeypa
     assert result.status.value == "done"
     assert seen[-1] == "mistral-medium-latest"
     assert result.model_name == "mistral-medium-latest"
+
+
+def test_mistral_agent_rejects_empty_request_before_network(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
+
+    def fail_post(*_args, **_kwargs):
+        raise AssertionError("network should not be called")
+
+    monkeypatch.setattr("core.agents.mistral_agent.httpx.post", fail_post)
+    agent = MistralAgent("mistral-1", _Security())
+
+    result = agent.run(_task(TaskType.CODE, ""))
+
+    assert result.status.value == "failed"
+    assert result.errors == [EMPTY_PROVIDER_REQUEST_ERROR]
+
+
+def test_mistral_agent_rejects_empty_assistant_response(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "mistral_nonsecret_key_value_1234567890")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"choices": [{"message": {"content": [{"type": "text", "text": "   "}]}}]}
+        response.raise_for_status.return_value = None
+        return response
+
+    monkeypatch.setattr("core.agents.mistral_agent.httpx.post", fake_post)
+    agent = MistralAgent("mistral-1", _Security())
+
+    result = agent.run(_task(TaskType.REVIEW, "security review"))
+
+    assert result.status.value == "failed"
+    assert result.errors == [EMPTY_ASSISTANT_RESPONSE_ERROR]

@@ -27,6 +27,11 @@ from core.core.antigravity_runtime_router import AntigravityRuntimeRouter
 from core.core.mimo_provider import extract_mimo_response_text, invoke_mimo_native
 from core.core.host_bridge import HostBridge
 from core.core.models import Task
+from core.core.openai_payload_guard import (
+    EMPTY_ASSISTANT_RESPONSE_ERROR,
+    EMPTY_PROVIDER_REQUEST_ERROR,
+    has_meaningful_request_payload,
+)
 from core.core.provider_credentials import sync_provider_env_aliases
 
 
@@ -125,6 +130,8 @@ class ExternalAIBridge:
     def _run_prompt_via_proxy(self, prompt: str, timeout_sec: int) -> BridgeExecResult | None:
         if not self.proxy_url:
             return None
+        if not has_meaningful_request_payload(prompt):
+            return BridgeExecResult(False, "", EMPTY_PROVIDER_REQUEST_ERROR, "antigravity", "antigravity-proxy", 0, error_type="empty_request")
         try:
             response = self._request_json("POST", "prompt", timeout_sec=timeout_sec + 10, json_body={"prompt": prompt, "timeout_sec": timeout_sec})
             payload = response.json() if response.content else {}
@@ -133,7 +140,7 @@ class ExternalAIBridge:
             ok = bool(payload.get("ok") if isinstance(payload, dict) else response.status_code == 200)
             if ok and output:
                 return BridgeExecResult(True, output, "", "antigravity", "antigravity-proxy", 1, error_type="none")
-            error = err or response.text[:500] or "proxy_error"
+            error = err or (EMPTY_ASSISTANT_RESPONSE_ERROR if ok and response.status_code == 200 else response.text[:500] or "proxy_error")
             return BridgeExecResult(False, "", error, "antigravity", "antigravity-proxy", 1, error_type=self.classify_error(error))
         except Exception as exc:
             err = f"proxy_error: {exc}"
@@ -192,6 +199,11 @@ class ExternalAIBridge:
     def classify_error(raw_error: str, task: Task | None = None, api: Any | None = None, model: str = "unknown") -> str:
         text = (raw_error or "").lower()
 
+        if EMPTY_PROVIDER_REQUEST_ERROR.lower() in text:
+            return "empty_request"
+        if EMPTY_ASSISTANT_RESPONSE_ERROR.lower() in text:
+            return "empty_response"
+
         if api and task:
             intel = api.get_module("intelligence")
             if intel:
@@ -233,6 +245,8 @@ class ExternalAIBridge:
             return BridgeExecResult(False, "", "antigravity_api_base_url_missing", "antigravity", model, 0, error_type="unknown")
         if not self.api_key:
             return BridgeExecResult(False, "", "missing_api_key", "antigravity", model, 0, error_type="auth_fail")
+        if not has_meaningful_request_payload(prompt):
+            return BridgeExecResult(False, "", EMPTY_PROVIDER_REQUEST_ERROR, "antigravity", model, 0, error_type="empty_request")
         try:
             resolved_model = resolve_antigravity_model_alias(model)
             if self.proxy_url:
@@ -255,7 +269,7 @@ class ExternalAIBridge:
             err = str(payload.get("stderr") or payload.get("error") or "").strip() if isinstance(payload, dict) else ""
             if response.status_code == 200 and output and not self._response_output_error(output, err):
                 return BridgeExecResult(True, output, "", "antigravity", resolved_model, 1, error_type="none")
-            error = err or response.text[:500] or "antigravity_api_error"
+            error = err or (EMPTY_ASSISTANT_RESPONSE_ERROR if response.status_code == 200 and not output else response.text[:500] or "antigravity_api_error")
             output_error = self._response_output_error(output, error)
             if output_error:
                 error = output_error
@@ -308,16 +322,20 @@ class ExternalAIBridge:
 
     def _run_prompt_via_mimo_fallback(self, prompt: str, timeout_sec: int) -> BridgeExecResult:
         model = self._mimo_fallback_model()
+        if not has_meaningful_request_payload(prompt):
+            return BridgeExecResult(False, "", EMPTY_PROVIDER_REQUEST_ERROR, "mimo", model, 0, error_type="empty_request")
         payload, error_text, status_code = invoke_mimo_native(model, prompt, timeout_sec=float(timeout_sec))
         output = extract_mimo_response_text(payload) if payload else ""
         if output.strip():
             return BridgeExecResult(True, output.strip(), "", "mimo", model, 1, error_type="provider_fallback")
-        error = error_text or (f"status_code={status_code}" if status_code is not None else "mimo_fallback_failed")
+        error = error_text or (EMPTY_ASSISTANT_RESPONSE_ERROR if status_code == 200 else f"status_code={status_code}" if status_code is not None else "mimo_fallback_failed")
         return BridgeExecResult(False, "", error, "mimo", model, 1, error_type=self.classify_error(error))
 
     def _run_prompt_via_ai_kernel_fallback(self, prompt: str, timeout_sec: int) -> BridgeExecResult:
         model = self._ai_kernel_fallback_model()
         base_url = self._ai_kernel_fallback_base_url()
+        if not has_meaningful_request_payload(prompt):
+            return BridgeExecResult(False, "", EMPTY_PROVIDER_REQUEST_ERROR, "ai_kernel", model, 0, error_type="empty_request")
         try:
             response = httpx.post(
                 f"{base_url}/chat/completions",
@@ -334,7 +352,7 @@ class ExternalAIBridge:
             output = self._extract_text(payload).strip()
             if response.status_code == 200 and output:
                 return BridgeExecResult(True, output, "", "ai_kernel", model, 1, error_type="provider_fallback")
-            error = response.text[:500] or f"ai_kernel_status_{response.status_code}"
+            error = EMPTY_ASSISTANT_RESPONSE_ERROR if response.status_code == 200 and not output else response.text[:500] or f"ai_kernel_status_{response.status_code}"
             return BridgeExecResult(False, "", error, "ai_kernel", model, 1, error_type=self.classify_error(error))
         except Exception as exc:
             err = f"ai_kernel_fallback_error: {exc}"
@@ -371,6 +389,8 @@ class ExternalAIBridge:
         return combined if any(marker in text for marker in markers) else ""
 
     def run_antigravity_cli(self, task: Task, prompt: str, timeout_sec: int = 120) -> BridgeExecResult:
+        if not has_meaningful_request_payload(prompt):
+            return BridgeExecResult(False, "", EMPTY_PROVIDER_REQUEST_ERROR, "antigravity", "request-guard", 0, error_type="empty_request")
         proxied = self._run_prompt_via_proxy(prompt, timeout_sec)
         if proxied is not None:
             if proxied.ok:

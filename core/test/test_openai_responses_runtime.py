@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 
+from core.core.openai_payload_guard import EMPTY_ASSISTANT_RESPONSE_ERROR, EMPTY_PROVIDER_REQUEST_ERROR
 from core.core.openai_responses_runtime import (
     MissingToolOutputError,
     OpenAIResponsesRuntime,
+    OpenAIResponsesRuntimeError,
+    ResponsesRuntimeProtocolError,
     UnsupportedToolCallError,
 )
 
@@ -167,3 +170,27 @@ def test_runtime_parses_dict_arguments_and_message_text():
     )
 
     assert result.output_text == "router summary"
+
+def test_runtime_rejects_empty_outbound_request_payload():
+    client = _FakeResponsesClient([])
+    runtime = OpenAIResponsesRuntime(client)
+
+    try:
+        runtime.run(model="gpt-5.5", input="   ")
+    except OpenAIResponsesRuntimeError as exc:
+        assert str(exc) == EMPTY_PROVIDER_REQUEST_ERROR
+    else:
+        raise AssertionError("expected OpenAIResponsesRuntimeError")
+
+
+def test_runtime_rejects_empty_assistant_response_payload():
+    client = _FakeResponsesClient([{"id": "resp_1", "output": []}])
+    runtime = OpenAIResponsesRuntime(client)
+
+    try:
+        runtime.run(model="gpt-5.5", input="valid prompt")
+    except ResponsesRuntimeProtocolError as exc:
+        assert str(exc) == EMPTY_ASSISTANT_RESPONSE_ERROR
+    else:
+        raise AssertionError("expected ResponsesRuntimeProtocolError")
+

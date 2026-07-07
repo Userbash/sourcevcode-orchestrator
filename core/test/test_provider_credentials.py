@@ -35,14 +35,15 @@ def test_load_env_file_syncs_antigravity_aliases(tmp_path, monkeypatch) -> None:
 
 
 def test_load_env_file_syncs_github_aliases(tmp_path, monkeypatch) -> None:
-    for env_name in ("GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN"):
+    for env_name in ("GIT_API_KEY", "GITHUB_API", "GITHUB_API_KEY", "GITHUB_TOKEN", "GH_TOKEN", "HOST_BRIDGE_GH_TOKEN"):
         monkeypatch.delenv(env_name, raising=False)
 
     env_file = tmp_path / ".env.bridge"
-    env_file.write_text("GITHUB_API=github_nonsecret_token_value_1234567890\n", encoding="utf-8")
+    env_file.write_text("GIT_API_KEY=github_nonsecret_token_value_1234567890\n", encoding="utf-8")
 
     load_env_file(str(env_file), override=True)
 
+    assert os.getenv("GIT_API_KEY") == "github_nonsecret_token_value_1234567890"
     assert os.getenv("GITHUB_API") == "github_nonsecret_token_value_1234567890"
     assert os.getenv("GITHUB_API_KEY") == "github_nonsecret_token_value_1234567890"
     assert os.getenv("GITHUB_TOKEN") == "github_nonsecret_token_value_1234567890"
