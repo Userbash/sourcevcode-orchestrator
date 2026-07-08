@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from core.agents.base_agent import BaseAgent
 from core.agents.codex_agent import CodexAgent
+from core.agents.policy_agents import FixPolicyAgent, MemoryHandoffAgent, PlannerPolicyAgent, ProviderReadinessAgent, ReviewPolicyAgent, RoutingPolicyAgent, RuleGovernanceAgent, SecurityPolicyAgent
 
 from .agent_factory import AgentFactory
 from .agent_registry import AgentRegistry
@@ -26,7 +27,7 @@ from .load_balancer import LoadBalancer, is_agent_routable
 from .metrics import MetricsCollector
 from .message_bus import MessageBus
 from .model_selector import ModelChoice, ModelSelector
-from .models import AgentResult, AgentStatus, ExecutionPlan, P2PMessage, P2PMessageType, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskPayload, TaskStatus, TaskType, encapsulate
+from .models import AgentResult, AgentStatus, ExecutionPlan, HandoffPayload, P2PMessage, P2PMessageType, PolicyDecision, Priority, Task, TaskAcceptance, TaskContext, TaskInput, TaskPayload, TaskStatus, TaskType, encapsulate
 from .orchestration_config import OrchestrationConfig
 from .quality_analyzer import QualityAnalyzer
 from .security_gate import SecurityGate
@@ -358,6 +359,7 @@ class Orchestrator:
             payloads.append(payload)
         return payloads
 
+
     def _dispatch_dependency_handoffs(self, tasks: list[Task], results_by_task_id: dict[str, AgentResult]) -> int:
         dispatched = 0
         for task in tasks:
@@ -368,14 +370,17 @@ class Orchestrator:
                 result = results_by_task_id.get(dep_id)
                 if result is None or not result.agent_id or result.agent_id == target_agent:
                     continue
-                payload = {
-                    "dependency_task_id": dep_id,
-                    "summary": result.output.get("summary", ""),
-                    "errors": list(result.errors or []),
-                    "status": result.status.value,
-                    "artifacts": list(result.output.get("files_changed", [])),
-                }
-                message = P2PMessage(task_id=task.task_id, from_agent=result.agent_id, to_agent=target_agent, message_type=P2PMessageType.CONTEXT_TRANSFER, priority=task.priority, payload=payload)
+                handoff = HandoffPayload(
+                    from_agent=result.agent_id,
+                    to_agent=target_agent,
+                    task_id=task.task_id,
+                    dependency_task_id=dep_id,
+                    summary=str(result.output.get("summary", "") or ""),
+                    artifacts=list(result.output.get("files_changed", []) or []),
+                    errors=list(result.errors or []),
+                    evidence_refs=list(result.output.get("commands_run", []) or []),
+                )
+                message = P2PMessage(task_id=task.task_id, from_agent=result.agent_id, to_agent=target_agent, message_type=P2PMessageType.CONTEXT_TRANSFER, priority=task.priority, payload=handoff.as_dict())
                 peer_candidates = [peer for peer in self.message_bus.discover_peers("review") if peer not in {result.agent_id, target_agent}] if hasattr(self.message_bus, "discover_peers") else []
                 if peer_candidates:
                     self.message_bus.relay_p2p(message, nearest_peer=peer_candidates[0])
@@ -646,6 +651,7 @@ class Orchestrator:
         self._agent_runtime_lock = threading.Lock()
         self._agent_p2p_inbox: dict[str, list[P2PMessage]] = defaultdict(list)
         self._agent_worker_timeout_sec = max(30, int(os.getenv("AI_BRIDGE_AGENT_WORKER_TIMEOUT_SEC", "900") or "900"))
+        self.policy_agents: dict[str, BaseAgent] = self._init_policy_agents()
         
         components = AgentFactory.build(registry=registry, retry_limit=retry_limit, idle_shutdown_sec=idle_shutdown_sec)
         
@@ -1554,6 +1560,7 @@ class Orchestrator:
     def attach_local_agent(self, agent_id: str, agent: BaseAgent, agent_type: str = "custom", critical: bool = False, model_name: str = "local-small", provider: str = "local") -> None:
         self.local_agents[agent_id] = agent
         agent.set_host_bridge(self.host_bridge)
+        agent.set_identity(provider=provider, model_name=model_name)
         setattr(agent, "orchestrator", self)
         if hasattr(agent, "set_api"):
             agent.set_api(self)
@@ -1728,7 +1735,9 @@ class Orchestrator:
         if memory_control is not None:
             memory_control.register_submission(task, raw_payload=payload, normalized_payload=normalized, source=source)
 
-        result = await self.run_async(task)
+        # Run the heavy orchestration path off the websocket event loop so
+        # heartbeats and ping/pong frames can continue while the task executes.
+        result = await asyncio.to_thread(self.run_sync, task)
         self.session_memory.set(MemoryScope.SESSION, session_id, cache_key, result, ttl_sec=3600)
         return result
 
@@ -2681,7 +2690,73 @@ class Orchestrator:
             
         return final_report
 
+
+    def _init_policy_agents(self) -> dict[str, BaseAgent]:
+        return {
+            "planner": PlannerPolicyAgent(),
+            "security": SecurityPolicyAgent(),
+            "routing": RoutingPolicyAgent(),
+            "provider": ProviderReadinessAgent(),
+            "review": ReviewPolicyAgent(),
+            "fix": FixPolicyAgent(),
+            "memory": MemoryHandoffAgent(),
+            "governance": RuleGovernanceAgent(),
+        }
+
+    def _policy_context(self, policy_task: Task, **extra: Any) -> dict[str, Any]:
+        payload = {
+            "task_id": policy_task.task_id,
+            "task_type": policy_task.type.value,
+            "priority": policy_task.priority.value,
+            "capability": policy_task.required_capability or CAPABILITY_BY_TASK_TYPE[policy_task.type],
+            "retry_limit": self.feedback.retry_limit if hasattr(self.feedback, "retry_limit") else 0,
+            "registry": self.registry,
+            "availability": self.availability,
+            "live": not self._testing_mode(),
+        }
+        payload.update(extra)
+        return payload
+
+    def _run_policy_checks(self, policy_inputs: dict[str, tuple[BaseAgent, dict[str, Any]]]) -> dict[str, PolicyDecision]:
+        decisions: dict[str, PolicyDecision] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(policy_inputs))) as executor:
+            future_map = {
+                executor.submit(agent.evaluate, ctx["task"], ctx): name
+                for name, (agent, ctx) in policy_inputs.items()
+            }
+            for future, name in future_map.items():
+                    try:
+                        decisions[name] = future.result()
+                    except Exception as exc:
+                        decisions[name] = PolicyDecision(
+                            decision="DENY",
+                            severity="high",
+                            reasons=[f"policy_failure:{exc}"],
+                            evidence={"policy": name},
+                            policy_version="builtin/error",
+                            next_action="block",
+                            agent_id=policy_inputs[name][0].agent_id,
+                        )
+            return decisions
+
+    @staticmethod
+    def _policy_is_blocking(decision: PolicyDecision) -> bool:
+        return str(decision.decision).upper() in {"DENY", "FAIL"}
+
+    def _result_from_policy_decision(self, task: Task, decision: PolicyDecision) -> AgentResult:
+        summary = "; ".join(decision.reasons) or decision.decision
+        return AgentResult(
+            task.task_id,
+            decision.agent_id or "policy",
+            TaskStatus.FAILED,
+            {"summary": summary, "files_changed": [], "commands_run": [], "test_results": [], "diff": "", "policy_decision": decision.as_dict()},
+            0.0,
+            [summary],
+            [],
+        )
+
     def run_task(self, task: Task) -> AgentResult:
+
         # If we are in run_task (sync), we can't easily run the parallel self-check 
         # unless we wrap it in a loop. For truly multi-tasking orchestrator, 
         # we should prefer run_async.
@@ -2776,6 +2851,20 @@ class Orchestrator:
         )
         self.module_manager.before_task(task, module_context)
 
+        pre_policy = self._run_policy_checks(
+            {
+                "planner": (self.policy_agents["planner"], self._policy_context(task, task=task, module_context=module_context)),
+                "security": (self.policy_agents["security"], self._policy_context(task, task=task, module_context=module_context)),
+                "governance": (self.policy_agents["governance"], self._policy_context(task, task=task, module_context=module_context)),
+            }
+        )
+        module_context["policy_preflight"] = {name: decision.as_dict() for name, decision in pre_policy.items()}
+        blocking_pre = next((decision for decision in pre_policy.values() if self._policy_is_blocking(decision)), None)
+        if blocking_pre is not None:
+            failed_result = self._result_from_policy_decision(task, blocking_pre)
+            self.module_manager.after_task(task, failed_result, module_context)
+            return failed_result
+
         self.autoscaler.ensure_capacity(capability)
         decision = self.scheduler.schedule(task)
         if decision.requires_orchestrator:
@@ -2804,6 +2893,16 @@ class Orchestrator:
                 }
             )
             failed_result = AgentResult(task.task_id, "orchestrator", TaskStatus.FAILED, {"summary": acceptance.message, "files_changed": [], "commands_run": [], "test_results": [], "diff": ""}, 0.0, [acceptance.message], [])
+            self.module_manager.after_task(task, failed_result, module_context)
+            return failed_result
+
+        routing_policy = self.policy_agents["routing"].evaluate(
+            task,
+            self._policy_context(task, task=task, module_context=module_context, capability=capability),
+        )
+        module_context["routing_policy"] = routing_policy.as_dict()
+        if self._policy_is_blocking(routing_policy):
+            failed_result = self._result_from_policy_decision(task, routing_policy)
             self.module_manager.after_task(task, failed_result, module_context)
             return failed_result
 
@@ -2840,6 +2939,15 @@ class Orchestrator:
 
         # Pre-flight provider diagnostics: verify DNS/TCP/API/model readiness before spending a task attempt.
         provider = self._normalize_provider(agent_record.provider if agent_record else choice.provider)
+        provider_policy = self.policy_agents["provider"].evaluate(
+            task,
+            self._policy_context(task, task=task, module_context=module_context, provider=provider),
+        )
+        module_context["provider_policy"] = provider_policy.as_dict()
+        if self._policy_is_blocking(provider_policy):
+            failed_result = self._result_from_policy_decision(task, provider_policy)
+            self.module_manager.after_task(task, failed_result, module_context)
+            return failed_result
         preflight_live = os.getenv("AI_BRIDGE_PREFLIGHT_LIVE_PROBE", "true").strip().lower() in {"1", "true", "yes", "on"}
         if self._testing_mode():
             preflight_live = False
@@ -3067,8 +3175,17 @@ class Orchestrator:
                 self.model_replacement_policy.register_success(success_provider, str(result.model_name or getattr(task, 'assigned_model', '') or module_context.get("model") or choice.model_name or ""))
                 self._update_model_replacement_snapshot()
             quality = self.quality.analyze(task, result)
-            if result.status == TaskStatus.DONE and not quality.passed:
-                self.console.emit("REVIEW", f"Качество ниже порога: {', '.join(quality.issues)}")
+            review_policy = self.policy_agents["review"].evaluate(
+                task,
+                self._policy_context(task, task=task, module_context=module_context, result=result, quality=quality),
+            )
+            module_context["review_policy"] = review_policy.as_dict()
+            if review_policy.decision == "FAIL":
+                result.status = TaskStatus.FAILED
+                if review_policy.reasons:
+                    result.errors = list(dict.fromkeys(list(result.errors or []) + list(review_policy.reasons)))
+            elif review_policy.decision == "NEEDS_REVIEW" or (result.status == TaskStatus.DONE and not quality.passed):
+                self.console.emit("REVIEW", f"Качество ниже порога: {', '.join(quality.issues or review_policy.reasons)}")
                 result.status = TaskStatus.NEEDS_REVIEW
             if agent_record:
                 agent_record.metrics.quality_score = quality.score
@@ -3248,7 +3365,15 @@ class Orchestrator:
 
             if not quality.passed:
                 self.console.emit("REVIEW", f"Качество ниже порога: {', '.join(quality.issues)}")
+            fix_policy = self.policy_agents["fix"].evaluate(
+                task,
+                self._policy_context(task, task=task, module_context=module_context, result=result, review_decision=review_policy),
+            )
+            module_context["fix_policy"] = fix_policy.as_dict()
             ok, fix_task = self.feedback.evaluate(task, result)
+            if fix_policy.decision == "CREATE_FIX_TASK" and fix_task is None:
+                _, fix_task = self.feedback.evaluate(task, result)
+                ok = False if fix_task is not None else ok
             if not ok and fix_task:
                 self.live_trace_rows.append(
                     {

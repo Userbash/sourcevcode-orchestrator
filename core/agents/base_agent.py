@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -5,9 +6,25 @@ from typing import Protocol, runtime_checkable
 
 from core.core.host_bridge import HostBridge
 from core.core.kernel_api import KernelAPI
-from core.core.models import AgentHealth, AgentResult, AgentStatus, ResultOutput, Task, TaskStatus
-
-
+from core.core.models import (
+    AcceptanceDecision,
+    AgentHealth,
+    AgentPolicySurface,
+    AgentResult,
+    AgentStatus,
+    HandoffAck,
+    HandoffPayload,
+    PolicyDecision,
+    PolicyExplanation,
+    PostRunReport,
+    PreRunReport,
+    ResultOutput,
+    RuleChangeProposal,
+    SimulationReport,
+    Task,
+    TaskStatus,
+    ValidationReport,
+)
 
 
 @runtime_checkable
@@ -23,6 +40,7 @@ class PromptRecorder(Protocol):
         memory_context: dict | None = None,
     ) -> None:
         ...
+
 
 class BaseAgent(ABC):
     def __init__(self, agent_id: str, capabilities: list[str]) -> None:
@@ -62,7 +80,6 @@ class BaseAgent(ABC):
     def set_identity(self, *, provider: str, model_name: str) -> None:
         self.provider = provider
         self.model_name = model_name
-        # Keep legacy fields in sync while older modules still reference them.
         self._provider = provider
         self._model = model_name
 
@@ -119,13 +136,67 @@ class BaseAgent(ABC):
                     memory_context=memory_context,
                 )
             except Exception as exc:
-                # Prompt journaling must not break task execution, but keep the
-                # agent health surface honest when telemetry recording fails.
                 self.last_error = f"prompt_record_failed: {exc}"
+
+    def can_accept(self, task: Task, context: dict | None = None) -> AcceptanceDecision:
+        capability = task.required_capability
+        if capability and capability not in self.capabilities:
+            return AcceptanceDecision(
+                accepted=False,
+                capability=capability,
+                reasons=[f"capability_not_supported:{capability}"],
+                next_action="reroute",
+            )
+        return AcceptanceDecision(accepted=True, capability=capability)
+
+    def pre_run(self, task: Task, context: dict | None = None) -> PreRunReport:
+        return PreRunReport(allowed=True)
 
     @abstractmethod
     def run(self, task: Task, memory_context: dict | None = None) -> AgentResult:
         raise NotImplementedError
+
+    def post_run(self, task: Task, result: AgentResult, context: dict | None = None) -> PostRunReport:
+        return PostRunReport(ok=result.status != TaskStatus.FAILED)
+
+    def validate_result(self, task: Task, result: AgentResult) -> ValidationReport:
+        return ValidationReport(valid=True, evidence={"status": result.status.value, "agent_id": result.agent_id})
+
+    def build_handoff(self, task: Task, result: AgentResult, target_agent: str) -> HandoffPayload:
+        output = result.output
+        return HandoffPayload(
+            from_agent=self.agent_id,
+            to_agent=target_agent,
+            task_id=task.task_id,
+            summary=str(output.get("summary", "") or ""),
+            artifacts=list(output.get("files_changed", []) or []),
+            errors=list(result.errors or []),
+            evidence_refs=list(output.get("commands_run", []) or []),
+        )
+
+    def consume_handoff(self, task: Task, handoffs: list[dict] | None = None) -> HandoffAck:
+        return HandoffAck(accepted=True)
+
+    def policy_surface(self) -> AgentPolicySurface:
+        protocols = self.supported_protocols()
+        return AgentPolicySurface(agent_id=self.agent_id, capabilities=list(self.capabilities), protocols=protocols, policies=[])
+
+    def supported_protocols(self) -> list[str]:
+        return ["task_execution/v1", "handoff/v1"]
+
+    def evaluate(self, task: Task, context: dict | None = None) -> PolicyDecision:
+        return PolicyDecision(
+            decision="ALLOW",
+            reasons=["default_base_agent_evaluation"],
+            evidence={"agent_id": self.agent_id, "task_id": task.task_id},
+            agent_id=self.agent_id,
+        )
+
+    def explain(self, decision_id: str) -> PolicyExplanation:
+        return PolicyExplanation(decision_id=decision_id, explanation="No policy explanation is implemented for this agent.")
+
+    def simulate(self, rule_change: RuleChangeProposal | dict, sample_tasks: list[Task] | None = None) -> SimulationReport:
+        return SimulationReport(simulated=True, sample_size=len(sample_tasks or []), findings=["simulation_not_implemented"], metrics={})
 
     def execute(self, task: Task, memory_context: dict | None = None) -> AgentResult:
         return self.run(task, memory_context=memory_context)

@@ -59,7 +59,7 @@ def _start_http_api(orchestrator: Orchestrator, starter=None) -> bool:
     if not _http_api_enabled():
         return False
     if starter is None:
-        from core.scripts.orchestrator_daemon import _start_http_server as starter
+        from core.api.server import start_http_server as starter
     starter(orchestrator)
     return True
 

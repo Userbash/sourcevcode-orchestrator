@@ -155,6 +155,119 @@ class QualityReport(CompatModel):
     truth_basis: list[str] = Field(default_factory=list)
 
 
+
+class AcceptanceDecision(CompatModel):
+    accepted: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    capability: str | None = None
+    priority: str | None = None
+    next_action: str | None = None
+
+
+class PreRunReport(CompatModel):
+    allowed: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    context_updates: dict[str, Any] = Field(default_factory=dict)
+
+
+class PostRunReport(CompatModel):
+    ok: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class ValidationReport(CompatModel):
+    valid: bool = True
+    reasons: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class HandoffPayload(CompatModel):
+    from_agent: str
+    to_agent: str
+    task_id: str
+    dependency_task_id: str | None = None
+    summary: str = ""
+    artifacts: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    upstream_policy_versions: list[str] = Field(default_factory=list)
+    schema_version: str = "1.0"
+
+
+class HandoffAck(CompatModel):
+    accepted: bool = True
+    reasons: list[str] = Field(default_factory=list)
+
+
+class AgentPolicySurface(CompatModel):
+    agent_id: str
+    capabilities: list[str] = Field(default_factory=list)
+    protocols: list[str] = Field(default_factory=list)
+    policies: list[str] = Field(default_factory=list)
+
+
+class PolicyDecision(CompatModel):
+    decision: str
+    severity: str = "info"
+    reasons: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    policy_version: str = "builtin/v1"
+    confidence: float = 1.0
+    next_action: str | None = None
+    ttl: int = 300
+    agent_id: str | None = None
+
+
+class PolicyExplanation(CompatModel):
+    decision_id: str
+    explanation: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    policy_version: str = "builtin/v1"
+
+
+class SimulationReport(CompatModel):
+    simulated: bool = True
+    policy_version: str = "builtin/v1"
+    sample_size: int = 0
+    findings: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuleChangeProposal(CompatModel):
+    proposal_id: str = Field(default_factory=lambda: str(uuid4()))
+    domain: str
+    rule_diff: dict[str, Any] = Field(default_factory=dict)
+    expected_outcome: str = ""
+    owner: str = "system"
+    status: str = "draft"
+
+
+class ApprovalResult(CompatModel):
+    approved: bool = False
+    approver: str
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ActivationResult(CompatModel):
+    activated: bool = False
+    version: str
+    reasons: list[str] = Field(default_factory=list)
+
+
+class DeprecationResult(CompatModel):
+    deprecated: bool = False
+    rule_id: str
+    reasons: list[str] = Field(default_factory=list)
+
+
+class RemovalResult(CompatModel):
+    removed: bool = False
+    rule_id: str
+    reasons: list[str] = Field(default_factory=list)
+
+
 class RoleProfile(CompatModel):
     name: str
     capabilities: list[str] = Field(default_factory=list)

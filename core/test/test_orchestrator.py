@@ -5,7 +5,7 @@ from core.agents.base_agent import BaseAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.core.models import AgentResult, Complexity, Priority, ResultOutput, SchedulerDecision, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
+from core.core.models import AgentResult, Complexity, PolicyDecision, Priority, ResultOutput, SchedulerDecision, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
 from core.core.model_selector import ModelChoice
 from core.core.orchestrator import Orchestrator
 from core.core.availability import ProviderStatus
@@ -537,8 +537,136 @@ def test_orchestrator_demotes_done_to_needs_review_when_quality_fails(monkeypatc
 
     result = orchestrator.run_task(task)
 
-    assert result.status == TaskStatus.NEEDS_REVIEW
-    assert orchestrator.results[task.task_id].status == TaskStatus.NEEDS_REVIEW
+    assert result.status == TaskStatus.FAILED
+    assert "missing_verification_evidence" in result.errors
+    assert orchestrator.results[task.task_id].status == TaskStatus.FAILED
+
+
+def test_orchestrator_preflight_policy_denial_blocks_execution(monkeypatch):
+    orchestrator = _orchestrator_with_agents()
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
+    monkeypatch.setattr(orchestrator, "_select_model_choice_with_mimo", lambda *args, **kwargs: (ModelChoice(
+        model_name="qwen-2.5-7b-instruct",
+        provider="local",
+        complexity=Complexity.MEDIUM,
+        requires_secondary_review=False,
+        reason="test_choice",
+        detected_keywords=[],
+        matched_high_risk_rules=[],
+        matched_low_risk_exemptions=[],
+    ), None))
+    monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task: {"local_llm": {"ready": True, "should_delegate": True, "task_family": "verification"}})
+
+    calls = {"code": 0}
+
+    def _unexpected_run(task: Task, memory_context: dict | None = None):
+        calls["code"] += 1
+        return orchestrator.local_agents["code-main"].result(task, "should not run")
+
+    monkeypatch.setattr(orchestrator.local_agents["code-main"], "run", _unexpected_run)
+    monkeypatch.setattr(
+        orchestrator.policy_agents["security"],
+        "evaluate",
+        lambda task, context=None: PolicyDecision(
+            decision="DENY",
+            severity="high",
+            reasons=["secrets_detected"],
+            next_action="block",
+            agent_id="security_agent",
+        ),
+    )
+
+    task = Task(TaskType.CODE, TaskInput("Rotate production secret"), TaskContext("demo", ".", "main"), priority=Priority.NORMAL)
+    task.required_capability = "code"
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.FAILED
+    assert result.errors == ["secrets_detected"]
+    assert result.output["policy_decision"]["decision"] == "DENY"
+    assert calls["code"] == 0
+
+
+def test_orchestrator_review_policy_fail_marks_result_failed(monkeypatch):
+    orchestrator = _orchestrator_with_agents()
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
+    monkeypatch.setattr(orchestrator, "_select_model_choice_with_mimo", lambda *args, **kwargs: (ModelChoice(
+        model_name="qwen-2.5-7b-instruct",
+        provider="local",
+        complexity=Complexity.MEDIUM,
+        requires_secondary_review=False,
+        reason="test_choice",
+        detected_keywords=[],
+        matched_high_risk_rules=[],
+        matched_low_risk_exemptions=[],
+    ), None))
+    monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task: {"local_llm": {"ready": True, "should_delegate": True, "task_family": "verification"}})
+    monkeypatch.setattr(orchestrator.feedback, "evaluate", lambda task, result: (True, None))
+    monkeypatch.setattr(
+        orchestrator.policy_agents["review"],
+        "evaluate",
+        lambda task, context=None: PolicyDecision(
+            decision="FAIL",
+            severity="high",
+            reasons=["missing_verification_evidence"],
+            next_action="fix",
+            agent_id="review_agent",
+        ),
+    )
+
+    task = Task(TaskType.CODE, TaskInput("Implement code change with incomplete evidence"), TaskContext("demo", ".", "main"), priority=Priority.NORMAL)
+    task.required_capability = "code"
+    task.routing_hints = {"provider_preference": "local", "source": "websocket", "cost_tier": "interactive"}
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.FAILED
+    assert "missing_verification_evidence" in result.errors
+
+
+def test_orchestrator_fix_policy_re_requests_fix_task(monkeypatch):
+    orchestrator = _orchestrator_with_agents(FailingCodeAgent("code-main"), FixAgent("fix-1"))
+    monkeypatch.setattr(orchestrator, "_testing_mode", lambda: False)
+    monkeypatch.setattr(orchestrator, "_select_model_choice_with_mimo", lambda *args, **kwargs: (ModelChoice(
+        model_name="qwen-2.5-7b-instruct",
+        provider="local",
+        complexity=Complexity.MEDIUM,
+        requires_secondary_review=False,
+        reason="test_choice",
+        detected_keywords=[],
+        matched_high_risk_rules=[],
+        matched_low_risk_exemptions=[],
+    ), None))
+    monkeypatch.setattr(orchestrator, "_build_decomposition_advisory", lambda task: {"local_llm": {"ready": True, "should_delegate": True, "task_family": "verification"}})
+
+    evaluations = []
+
+    def _feedback(task, result):
+        evaluations.append(result.status)
+        if len(evaluations) == 1:
+            return True, None
+        return False, Task(TaskType.FIX, TaskInput("Repair failed implementation", files=["app.py"]), task.context, priority=Priority.HIGH)
+
+    monkeypatch.setattr(orchestrator.feedback, "evaluate", _feedback)
+    monkeypatch.setattr(
+        orchestrator.policy_agents["fix"],
+        "evaluate",
+        lambda task, context=None: PolicyDecision(
+            decision="CREATE_FIX_TASK",
+            severity="medium",
+            reasons=["auto_fix_required"],
+            next_action="fix",
+            agent_id="fix_policy_agent",
+        ),
+    )
+
+    task = Task(TaskType.CODE, TaskInput("Implement feature that initially fails", files=["app.py"]), TaskContext("demo", ".", "main"), priority=Priority.NORMAL)
+    task.required_capability = "code"
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.DONE
+    assert len(evaluations) >= 2
 
 
 def test_orchestrator_runtime_gateway_failure_retries_via_delivery_path(monkeypatch):
