@@ -124,6 +124,7 @@ def test_postgres_read_write_probe(monkeypatch):
 
 def test_run_healthcheck_includes_data_plane(monkeypatch):
     monkeypatch.setattr(healthcheck, "build_data_plane_snapshot", lambda **kwargs: type("S", (), {"ok": True, "tables": [], "rabbitmq_ok": True, "rabbitmq_target": "rabbitmq:5672", "details": "ok"})())
+    monkeypatch.setattr(healthcheck, "build_data_storage_analytics_report", lambda **kwargs: type("R", (), {"source": "file_fallback", "audit": {"latest_data_at": "2026-07-11T05:13:26+00:00", "issues": []}, "operational_signals": {"freshness_status": "healthy", "retrieval_readiness": "high", "orchestrator_confidence": "high"}, "management_summary": {"analytics_ready": True}})())
     ok, checks = healthcheck.run_healthcheck()
 
     data_plane = next(item for item in checks if item.name == "data_plane")

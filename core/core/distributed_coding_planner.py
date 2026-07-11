@@ -6,6 +6,7 @@ from typing import Any
 from .distributed_coding_protocol import DistributedCodingTask, JSONThemes
 from .frame_orchestrator import FrameWorkerRole
 from .message_bus import MessageBus
+from .adaptive_routing_engine import AdaptiveRoutingEngine, AdaptiveRoutingDecision, ParallelWorkAssignment
 from .models import Task
 
 
@@ -16,6 +17,9 @@ class DistributedCodingPlanner:
         "validation_security": ("review", "code", "fix"),
         "qa_test_automation": ("test", "code"),
     }
+
+    def __init__(self) -> None:
+        self.adaptive_router = AdaptiveRoutingEngine()
 
     def _code_agents(self, bus: MessageBus, dispatch_agent_id: str) -> list[str]:
         discovered: list[str] = []
@@ -85,6 +89,42 @@ class DistributedCodingPlanner:
             return 'integration'
         return 'secondary'
 
+
+    @staticmethod
+    def _assignment_target_capabilities(task: Task, assignment: ParallelWorkAssignment | None) -> tuple[str, ...]:
+        if assignment and assignment.target_capability:
+            return (assignment.target_capability,)
+        if task.type.value in {"code", "fix", "refactor"}:
+            return ("code", "fix", "refactor")
+        if task.type.value == "review":
+            return ("review", "code")
+        if task.type.value == "test":
+            return ("test", "code")
+        return (task.type.value, "code")
+
+    @staticmethod
+    def _assignment_role(task: Task, assignment: ParallelWorkAssignment | None) -> str:
+        if assignment and assignment.worker_role:
+            return assignment.worker_role
+        if task.type.value == "review":
+            return "validation_security"
+        if task.type.value == "test":
+            return "qa_test_automation"
+        return "core_logic"
+
+    @staticmethod
+    def _assignment_payload(assignment: ParallelWorkAssignment | None) -> dict[str, Any]:
+        if assignment is None:
+            return {}
+        return {
+            "model_name": assignment.model_name,
+            "provider": assignment.provider,
+            "routing_hints": dict(assignment.routing_hints),
+            "worker_role": assignment.worker_role,
+            "target_capability": assignment.target_capability,
+            "lane_kind": assignment.lane_kind,
+        }
+
     @staticmethod
     def _focus_prompt(file_targets: list[str], lane_kind: str) -> str:
         if file_targets:
@@ -110,18 +150,27 @@ class DistributedCodingPlanner:
                 result.append(FrameWorkerRole(**item))
         return result
 
-    def _frame_orchestrated_task(self, task: Task, bus: MessageBus, *, dispatch_agent_id: str) -> DistributedCodingTask | None:
+    def _frame_orchestrated_task(
+        self,
+        task: Task,
+        bus: MessageBus,
+        *,
+        dispatch_agent_id: str,
+        decision: AdaptiveRoutingDecision | None = None,
+    ) -> DistributedCodingTask | None:
         roles = self._frame_roles(task)
         if not roles:
             return None
         requested_parallelism = self._requested_parallelism(task)
+        assignments = list(decision.parallel_assignments) if decision else []
         selected_agents: list[str] = []
         shard_specs: list[dict[str, Any]] = []
         dropped_roles: list[str] = []
         used_agents: set[str] = set()
         fallback_pool = self._code_agents(bus, dispatch_agent_id)
-        for role in roles[:requested_parallelism]:
-            capability_order = self._ROLE_CAPABILITIES.get(role.role, (role.target_capability or "code",))
+        for index, role in enumerate(roles[:requested_parallelism]):
+            assignment = assignments[index] if index < len(assignments) else None
+            capability_order = self._ROLE_CAPABILITIES.get(role.role, self._assignment_target_capabilities(task, assignment))
             candidates = self._agents_for_capabilities(bus, dispatch_agent_id, capability_order, exclude=used_agents)
             agent_id = candidates[0] if candidates else next((item for item in fallback_pool if item not in used_agents), None)
             if not agent_id:
@@ -133,14 +182,15 @@ class DistributedCodingPlanner:
             shard_specs.append(
                 {
                     "target_agent": agent_id,
-                    "target_capability": role.target_capability or capability_order[0],
-                    "worker_role": role.role,
+                    "target_capability": role.target_capability or (assignment.target_capability if assignment else capability_order[0]),
+                    "worker_role": role.role or self._assignment_role(task, assignment),
                     "file_targets": list(role.file_targets),
                     "objective": role.objective or task.input.description,
                     "acceptance_criteria": list(role.acceptance_criteria or task.input.acceptance_criteria),
                     "dependencies": list(role.dependencies),
                     "lane_kind": lane_kind,
                     "focus_prompt": role.focus_prompt or self._focus_prompt(list(role.file_targets), lane_kind),
+                    **self._assignment_payload(assignment),
                     "json_themes": {
                         "primary": ["code", task.type.value, lane_kind],
                         "secondary": ["frame_orchestrated", "isolated_vfs"],
@@ -176,34 +226,71 @@ class DistributedCodingPlanner:
         )
 
     def build_task(self, task: Task, bus: MessageBus, *, dispatch_agent_id: str) -> DistributedCodingTask:
-        frame_task = self._frame_orchestrated_task(task, bus, dispatch_agent_id=dispatch_agent_id)
+        decision = self.adaptive_router.decide(task)
+        frame_task = self._frame_orchestrated_task(task, bus, dispatch_agent_id=dispatch_agent_id, decision=decision)
         if frame_task is not None:
             return frame_task
-        candidates = self._code_agents(bus, dispatch_agent_id)
         requested_parallelism = self._requested_parallelism(task)
         file_targets = list(task.input.files)
+        assignments = list(decision.parallel_assignments) if decision and decision.parallel_assignments else []
         safe_parallelism = requested_parallelism if file_targets else 1
-        selected_agents = candidates[: max(1, min(len(candidates), safe_parallelism))]
-        groups = self._group_files_by_area(file_targets, max(1, len(selected_agents) or 1))
+        lane_total = max(1, min(len(assignments) or safe_parallelism, safe_parallelism if file_targets else 1))
+        groups = self._group_files_by_area(file_targets, lane_total)
+        selected_agents: list[str] = []
         shard_specs: list[dict[str, Any]] = []
-        for index, agent_id in enumerate(selected_agents[: len(groups)]):
-            shard_files = list(groups[index]) if index < len(groups) else []
-            lane_kind = self._lane_kind(index, len(selected_agents[: len(groups)]))
+        used_agents: set[str] = set()
+        fallback_pool = self._code_agents(bus, dispatch_agent_id)
+        for index in range(max(len(groups), len(assignments) or 0)):
+            assignment = assignments[index] if index < len(assignments) else None
+            shard_files = list(assignment.file_targets) if assignment and assignment.file_targets else (list(groups[index]) if index < len(groups) else [])
+            capability_order = self._assignment_target_capabilities(task, assignment)
+            candidates = self._agents_for_capabilities(bus, dispatch_agent_id, capability_order, exclude=used_agents)
+            agent_id = candidates[0] if candidates else next((item for item in fallback_pool if item not in used_agents), None)
+            if not agent_id:
+                continue
+            used_agents.add(agent_id)
+            selected_agents.append(agent_id)
+            lane_kind = assignment.lane_kind if assignment else self._lane_kind(index, max(len(groups), 1))
             shard_specs.append(
                 {
                     'target_agent': agent_id,
+                    'target_capability': assignment.target_capability if assignment else capability_order[0],
+                    'worker_role': self._assignment_role(task, assignment),
                     'file_targets': shard_files,
                     'objective': task.input.description,
                     'acceptance_criteria': list(task.input.acceptance_criteria),
                     'lane_kind': lane_kind,
                     'focus_prompt': self._focus_prompt(shard_files, lane_kind),
+                    **self._assignment_payload(assignment),
                     'json_themes': {
                         'primary': ['code', task.type.value, lane_kind],
                         'secondary': ['parallel', 'isolated_vfs'],
-                        'tags': ['distributed', 'planner_v2'],
+                        'tags': ['distributed', 'planner_v2', 'adaptive_route'],
                     },
                 }
             )
+        if not shard_specs:
+            candidates = self._code_agents(bus, dispatch_agent_id)
+            selected_agents = candidates[: max(1, min(len(candidates), safe_parallelism))]
+            groups = self._group_files_by_area(file_targets, max(1, len(selected_agents) or 1))
+            for index, agent_id in enumerate(selected_agents[: len(groups)]):
+                shard_files = list(groups[index]) if index < len(groups) else []
+                lane_kind = self._lane_kind(index, len(selected_agents[: len(groups)]))
+                shard_specs.append(
+                    {
+                        'target_agent': agent_id,
+                        'file_targets': shard_files,
+                        'objective': task.input.description,
+                        'acceptance_criteria': list(task.input.acceptance_criteria),
+                        'lane_kind': lane_kind,
+                        'focus_prompt': self._focus_prompt(shard_files, lane_kind),
+                        'json_themes': {
+                            'primary': ['code', task.type.value, lane_kind],
+                            'secondary': ['parallel', 'isolated_vfs'],
+                            'tags': ['distributed', 'planner_v2'],
+                        },
+                    }
+                )
         themes = JSONThemes(
             primary=['code', task.type.value],
             secondary=['asyncio', 'rabbitmq', 'tdd'],
@@ -222,9 +309,13 @@ class DistributedCodingPlanner:
             metadata={
                 'parent_task_id': task.parent_task_id,
                 'session_id': task.session_id,
-                'planner': 'distributed_coding_v2',
+                'planner': 'distributed_coding_v3_adaptive',
                 'requested_parallelism': requested_parallelism,
                 'effective_parallelism': max(1, len(selected_agents)),
+                'route_mode': decision.trace.get('route_mode') if decision else 'legacy',
+                'primary_model': decision.primary_model if decision else '',
+                'primary_provider': decision.primary_provider if decision else '',
+                'fallback_models': list(decision.fallback_models) if decision else [],
             },
             shard_specs=shard_specs,
         )

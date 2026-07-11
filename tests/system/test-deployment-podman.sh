@@ -28,7 +28,7 @@ MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # Configuration
-PROJECT_ROOT="/var/home/sanya/Hebrew-web"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE_FILE="docker-compose-optimized.yml"
 TEST_DURATION=300  # 5 minutes max
 START_TIME=$(date +%s)

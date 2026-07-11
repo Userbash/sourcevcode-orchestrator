@@ -281,11 +281,20 @@ class SelfDiagnosticModule:
             return
         try:
             backend_type = type(memory.backend).__name__ if hasattr(memory, "backend") else "unknown"
+            module_state = self._module_state()
+            analytics = module_state.get("data_analytics", {}) if isinstance(module_state, dict) else {}
+            if not isinstance(analytics, dict):
+                analytics = {}
             report["memory"] = {
                 "status": "ok",
                 "backend": backend_type,
                 "session_count": len(memory._sessions) if hasattr(memory, "_sessions") else 0,
+                "data_analytics": analytics,
             }
+            signals = analytics.get("operational_signals", {}) if isinstance(analytics.get("operational_signals"), dict) else {}
+            freshness = str(signals.get("freshness_status") or "").strip().lower()
+            if freshness in {"stale", "future_skew", "empty"} or analytics.get("last_error"):
+                self._degrade(report)
         except Exception as exc:
             report["memory"] = {"status": "error", "error": str(exc)}
             self._degrade(report)

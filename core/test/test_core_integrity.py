@@ -32,7 +32,7 @@ def test_core_modules_importable():
 def test_execution_envelope_has_memory_fields():
     from core.core.models import Task
 
-    fields = getattr(Task, "__dataclass_fields__", {})
+    fields = getattr(Task, "model_fields", {})
 
     expected = {
         "session_id",
@@ -43,7 +43,7 @@ def test_execution_envelope_has_memory_fields():
         "repo_fingerprint",
     }
 
-    missing = expected - set(fields.keys())
+    missing = expected - set(fields)
     assert not missing, f"Missing memory fields: {missing}"
 
 

@@ -8,6 +8,7 @@ Older documents are still present when they contain useful release history or mi
 
 - `SYSTEM_OVERVIEW.md` - the best starting point for understanding how the orchestrator works today
 - `RUNTIME_CHANGES_AND_MIGRATION_NOTES.md` - what changed compared with older documentation and older runtime slices
+- `RELEASE_SUMMARY_ADAPTIVE_ROUTING_ANALYTICS_AND_RUNTIME_RECOVERY.md` - consolidated English summary of the current adaptive-routing, analytics, and runtime-recovery changes
 - `AI_BRIDGE_RUNTIME_ROUTING.md` - provider and model routing policy
 - `AI_BRIDGE_ARCHITECTURE.md` - bridge-level component wiring
 - `AI_ORCHESTRATOR_CORE.md` - technical reference for core orchestration behavior
@@ -17,6 +18,9 @@ Older documents are still present when they contain useful release history or mi
 ## Operations
 
 - `RUNBOOKS/OPERATIONS_RUNBOOK.md` - deployment and recovery procedures
+- `BWRAP_RUNTIME_SELECTOR.md` - runtime selector behavior when `bubblewrap` is blocked
+- `BWRAP_RUNTIME_RECOVERY_RUNBOOK.md` - recovery procedure for blocked user-namespace sandboxing
+- `ANALYTICS_MATRIX_AGENT_RUNBOOK.md` - analytics matrix engine and agent usage guide
 - `TEST_COVERAGE_MAP.md` - test coverage and known gaps
 - `AI_BRIDGE_HARDENING_BACKLOG.md` - runtime hardening backlog
 

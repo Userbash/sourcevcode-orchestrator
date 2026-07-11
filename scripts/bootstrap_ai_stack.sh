@@ -382,8 +382,8 @@ start_orchestrator() {
     --env-file "$PROJECT_ROOT/.env.bridge" \
     -e PYTHONPATH=/app \
     -e ORCHESTRATOR_PORT="${ORCHESTRATOR_CONTAINER_PORT}" \
-    -e PATH=/var/home/sanya/.npm-packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app/.local/bin \
-    -e NODE_PATH=/var/home/sanya/.npm-packages/lib/node_modules \
+    -e PATH=${HOME}/.npm-packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app/.local/bin \
+    -e NODE_PATH=${HOME}/.npm-packages/lib/node_modules \
     -e TESTING=false \
     -e AI_BRIDGE_AUTOSTART_LOCAL_LLM=false \
     -e AI_BRIDGE_AUTOSTART_EASY_DIFFUSION=false \
@@ -414,7 +414,7 @@ start_orchestrator() {
     -e AI_BRIDGE_CONFIRMATION_POLICY=full_auto \
     -e OPENAI_SESSION_TOKEN_BUDGET=120000 \
     -v "${MEMORY_VOLUME_NAME}:/app/memory_store" \
-    -v "/var/home/sanya/.npm-packages:/var/home/sanya/.npm-packages:ro,z" \
+    -v "${HOME}/.npm-packages:${HOME}/.npm-packages:ro,z" \
     -v "$PROJECT_ROOT/.env.bridge:/app/.env.bridge:ro,z" \
     -v "$PROJECT_ROOT/scripts:/app/scripts:ro,z" \
     -v "$PROJECT_ROOT/.tooling:/app/.tooling:ro,z" \

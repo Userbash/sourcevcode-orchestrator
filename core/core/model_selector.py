@@ -12,6 +12,8 @@ from .model_lifecycle import ModelLifecycleManager
 from .mimo_bridge import MimoBridge, MimoModel
 from .experience_policy_learner import ExperiencePolicyLearner
 from .provider_credentials import has_usable_credential
+from .adaptive_routing_engine import AdaptiveRoutingEngine
+from .model_health_registry import ModelHealthRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,12 @@ class ModelChoice:
 class ModelSelector:
     def __init__(self) -> None:
         self.policy_mode = os.getenv("AI_BRIDGE_POLICY_MODE", "legacy").strip().lower()
+        self._configured_credentials = {
+            "openai": self._explicit_credential_present("OPENAI_API_KEY", "CODEX_SALE_API_KEY"),
+            "mistral": self._explicit_credential_present("MISTRAL_API_KEY"),
+            "antigravity": self._explicit_credential_present("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+            "mimo": self._explicit_credential_present("MIMO_API_KEY", "AI_BRIDGE_MIMO_API_KEY"),
+        }
         self.openai_router = OpenAIRuntimeRouter()
         self.qwen_router = QwenRuntimeRouter()
         self.model_lifecycle = ModelLifecycleManager()
@@ -58,12 +66,74 @@ class ModelSelector:
         self.mimo_bridge = MimoBridge()
         self.mimo_models: list[MimoModel] = []
         self.experience_policy = ExperiencePolicyLearner()
+        self.model_health = ModelHealthRegistry()
+        self.adaptive_router = AdaptiveRoutingEngine(
+            openai_router=self.openai_router,
+            experience_policy=self.experience_policy,
+        )
 
     def sync_with_mimo(self) -> None:
         self.mimo_models = self.mimo_bridge.get_models()
 
     def set_api(self, api: Any) -> None:
         self._api = api
+        self.adaptive_router.bus = getattr(api, "message_bus", None)
+
+    @staticmethod
+    def _adaptive_context_depth(complexity: Complexity) -> int:
+        if complexity == Complexity.CRITICAL:
+            return 5
+        if complexity == Complexity.HIGH:
+            return 4
+        if complexity == Complexity.MEDIUM:
+            return 3
+        return 2
+
+    def _adaptive_choice(
+        self,
+        task: Task,
+        complexity: Complexity,
+        advisory_context: dict[str, Any] | None,
+        *,
+        secondary_review: bool,
+    ) -> ModelChoice | None:
+        try:
+            decision = self.adaptive_router.decide(task, advisory_context)
+        except Exception:
+            return None
+        if decision is None:
+            return None
+        if self._choice_blocked(decision.primary_provider, decision.primary_model):
+            return None
+        if not self._provider_is_usable(decision.primary_provider):
+            return None
+        return ModelChoice(
+            decision.primary_model,
+            decision.primary_provider,
+            complexity,
+            params=ModelParams(temperature=0.35, context_depth=self._adaptive_context_depth(complexity)),
+            requires_secondary_review=secondary_review or task.type == TaskType.REVIEW,
+            reason=f"adaptive_routing:{decision.role}:{decision.primary_provider}",
+            selection_trace=dict(decision.trace),
+        )
+
+    @staticmethod
+    def _explicit_credential_present(*env_names: str) -> bool:
+        return any(str(os.getenv(env_name, "")).strip() for env_name in env_names)
+
+    def _provider_is_usable(self, provider: str) -> bool:
+        normalized = str(provider or "").strip().lower()
+        if normalized == "openai":
+            return bool(self._configured_credentials.get("openai")) and has_usable_credential("OPENAI_API_KEY")
+        if normalized == "mistral":
+            return bool(self._configured_credentials.get("mistral")) and has_usable_credential("MISTRAL_API_KEY")
+        if normalized == "antigravity":
+            return bool(self._configured_credentials.get("antigravity")) and has_usable_credential("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+        if normalized == "mimo":
+            return bool(self._configured_credentials.get("mimo")) and has_usable_credential("MIMO_API_KEY", "AI_BRIDGE_MIMO_API_KEY")
+        if normalized in {"local", "ai_kernel"}:
+            return True
+        return True
 
     def _evaluate_with_advisor(self, task: Task) -> RiskEvaluation | None:
         if not self._api:
@@ -116,6 +186,27 @@ class ModelSelector:
     @staticmethod
     def _ai_kernel_enabled() -> bool:
         return os.getenv("AI_KERNEL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+    def _selected_model_health(self, provider: str, model_name: str) -> dict[str, Any] | None:
+        payload = self.model_health.load()
+        rows = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return None
+        provider_keys = {str(provider or "").strip().lower()}
+        if "local" in provider_keys:
+            provider_keys.add("local_llm")
+        if "local_llm" in provider_keys:
+            provider_keys.add("local")
+        normalized_model = str(model_name or "").strip()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("model_name") or "").strip() != normalized_model:
+                continue
+            if str(row.get("provider") or "").strip().lower() in provider_keys:
+                return row
+        return None
 
     def _query_local_model_manager_state(self, key: str, default: Any) -> Any:
         if self._api is None or not hasattr(self._api, "query_module_state"):
@@ -316,10 +407,10 @@ class ModelSelector:
         )
 
     def _openai_choice(self, task: Task, complexity: Complexity, secondary_review: bool, reason: str, fallback_model: str) -> ModelChoice:
-        if not has_usable_credential("OPENAI_API_KEY"):
-            if has_usable_credential("MISTRAL_API_KEY"):
+        if not self._provider_is_usable("openai"):
+            if self._provider_is_usable("mistral"):
                 return ModelChoice("mistral-large-latest", "mistral", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_mistral_fallback:{reason}")
-            if has_usable_credential("ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            if self._provider_is_usable("antigravity"):
                 return ModelChoice("antigravity-pro", "antigravity", complexity, params=ModelParams(temperature=0.7), requires_secondary_review=secondary_review, reason=f"openai_auto_no_key_antigravity_fallback:{reason}")
             fallback_choice = self._local_planning_choice(task, complexity) if task.type in {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH, TaskType.REVIEW} else self._local_code_choice(complexity)
             if fallback_choice is not None:
@@ -332,7 +423,9 @@ class ModelSelector:
 
     def _attach_selection_trace(self, choice: ModelChoice, task: Task, advisory_context: dict[str, Any] | None = None) -> ModelChoice:
         local = self._local_llm_advisory(advisory_context) or {}
+        base_trace = choice.selection_trace if isinstance(choice.selection_trace, dict) else {}
         choice.selection_trace = {
+            **base_trace,
             "provider": choice.provider,
             "model_name": choice.model_name,
             "complexity": getattr(choice.complexity, "value", str(choice.complexity)),
@@ -355,10 +448,21 @@ class ModelSelector:
         complexity = self.classify(task)
         task.complexity = complexity
         risk = evaluate_risk_context(self._task_text(task))
+        adaptive_choice = self._adaptive_choice(
+            task,
+            complexity,
+            advisory_context,
+            secondary_review=self._should_escalate_to_cloud(task, complexity, risk),
+        )
 
         if self._should_escalate_to_cloud(task, complexity, risk):
+            if adaptive_choice and adaptive_choice.provider != "local":
+                return self._attach_selection_trace(adaptive_choice, task, advisory_context)
             choice = self._apply_experience_policy(task, self._openai_choice(task, complexity, True, "high_risk_or_complexity_escalation", "gpt-5.5"))
             return self._attach_selection_trace(choice, task, advisory_context)
+
+        if adaptive_choice is not None:
+            return self._attach_selection_trace(adaptive_choice, task, advisory_context)
 
         local_choice = self._local_policy_choice(task, complexity, advisory_context)
         if local_choice:

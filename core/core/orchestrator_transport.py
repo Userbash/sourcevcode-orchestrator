@@ -308,7 +308,16 @@ def local_llm_residents_payload(orchestrator: Any) -> tuple[dict[str, Any], int]
     module = _local_llm_module(orchestrator)
     if not module:
         return {"status": "error", "error": "local_llm module not loaded"}, 503
-    return {"status": "ok", "data": {"resident_models": _resident_rows(module)}}, 200
+    try:
+        resident_models = _resident_rows(module)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": "local_llm residents unavailable",
+            "details": {"reason": str(exc)},
+            "data": {"resident_models": []},
+        }, 503
+    return {"status": "ok", "data": {"resident_models": resident_models}}, 200
 
 
 def stats_payload(orchestrator: Any) -> tuple[dict[str, Any], int]:

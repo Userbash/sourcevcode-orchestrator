@@ -12,6 +12,8 @@ from typing import Any
 from core.core.antigravity_model_registry import AntigravityModelRegistry
 from core.core.mistral_model_registry import MistralModelRegistry
 from core.core.model_inventory_index import ModelInventoryIndex
+from core.core.model_health_registry import ModelHealthRegistry
+from core.core.local_llm_bridge import LocalLLMBridge
 from core.core.local_model_runtime import LocalModelRuntime, LocalModelRuntimeConfig
 from core.core.openai_model_registry import OpenAIModelRegistry
 from core.core.openai_compatible_inventory import is_text_compatible_model, sync_openai_compatible_artifacts
@@ -32,6 +34,14 @@ _OPENAI_RUNTIME_BLOCK_MARKERS = (
     "does not exist",
     "not found",
     "no eligible resources",
+)
+
+_OPENAI_RUNTIME_MODEL_UNAVAILABLE_MARKERS = (
+    "model is not available",
+    "model unavailable",
+    "not available for",
+    "is not available",
+    "is unavailable",
 )
 
 
@@ -79,6 +89,7 @@ class ProviderInventoryService:
         self.openai_runtime_inventory_path = Path(os.getenv("OPENAI_RUNTIME_INVENTORY_PATH", "core/.cache/openai_runtime_inventory.json"))
         self.model_index_path = Path(os.getenv("PROVIDER_MODEL_INDEX_PATH", "core/.cache/provider_model_index.json"))
         self.model_index = ModelInventoryIndex(self.model_index_path)
+        self.model_health = ModelHealthRegistry()
         self.ai_kernel_bridge = AIKernelBridge()
         self._entry_refresh_intervals_sec = {
             "openai": self._read_int_env("AI_BRIDGE_PROVIDER_REFRESH_OPENAI_SEC", 300),
@@ -302,6 +313,67 @@ class ProviderInventoryService:
             return ordered
         return ordered[:limit]
 
+    def _read_openai_runtime_inventory_cache(self) -> dict[str, Any]:
+        if not self.openai_runtime_inventory_path.exists():
+            return {}
+        payload = self._load_json(self.openai_runtime_inventory_path)
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _validated_row_lookup(rows: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+        lookup: dict[str, dict[str, Any]] = {}
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            model_name = str(row.get("model") or "").strip()
+            if model_name:
+                lookup[model_name] = dict(row)
+        return lookup
+
+    def _merge_openai_validated_rows(
+        self,
+        *,
+        previous_rows: list[dict[str, Any]] | None,
+        current_rows: list[dict[str, Any]] | None,
+        models: list[str],
+    ) -> list[dict[str, Any]]:
+        previous_lookup = self._validated_row_lookup(previous_rows)
+        current_lookup = self._validated_row_lookup(current_rows)
+        merged: list[dict[str, Any]] = []
+        for model_name in models:
+            row = current_lookup.get(model_name) or previous_lookup.get(model_name)
+            if row:
+                merged.append(dict(row))
+        return merged
+
+    def _select_openai_probe_models_with_rotation(
+        self,
+        models: list[str],
+        *,
+        default_model: str = "",
+        limit: int = 8,
+        previous_runtime: dict[str, Any] | None = None,
+    ) -> list[str]:
+        ordered = self._select_openai_probe_models(models, default_model=default_model, limit=0)
+        if limit <= 0:
+            return ordered
+
+        previous_runtime = previous_runtime if isinstance(previous_runtime, dict) else {}
+        previous_selected = [
+            str(model).strip()
+            for model in (previous_runtime.get("selected_models") or [])
+            if str(model).strip()
+        ]
+        previous_validated = [
+            str(row.get("model") or "").strip()
+            for row in (previous_runtime.get("validated_models") or [])
+            if isinstance(row, dict) and str(row.get("model") or "").strip()
+        ]
+        previously_seen = set(previous_selected + previous_validated)
+        rotating_tail = [model for model in ordered if model not in previously_seen]
+        rotating_tail.extend(model for model in ordered if model in previously_seen)
+        return rotating_tail[:limit]
+
     @staticmethod
     def _extract_openai_probe_text(payload: Any) -> str:
         if isinstance(payload, dict):
@@ -327,6 +399,171 @@ class ProviderInventoryService:
                     return " ".join(parts)[:160]
         return ""
 
+    @staticmethod
+    def _extract_openai_probe_error(payload: Any, fallback: str = "") -> str:
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                for key in ("message", "detail", "error", "type"):
+                    value = str(error.get(key) or "").strip()
+                    if value:
+                        return value[:240]
+            if isinstance(error, str) and error.strip():
+                return error.strip()[:240]
+            for key in ("message", "detail"):
+                value = str(payload.get(key) or "").strip()
+                if value:
+                    return value[:240]
+        return str(fallback or "").strip()[:240]
+
+    @staticmethod
+    def _openai_status_family(status_code: int | None) -> str | None:
+        if status_code is None:
+            return None
+        if 100 <= status_code < 200:
+            return "1xx"
+        if 200 <= status_code < 300:
+            return "2xx"
+        if 300 <= status_code < 400:
+            return "3xx"
+        if 400 <= status_code < 500:
+            return "4xx"
+        if 500 <= status_code < 600:
+            return "5xx"
+        return None
+
+    @classmethod
+    def _classify_openai_probe_failure(
+        cls,
+        *,
+        endpoint_name: str,
+        status_code: int | None,
+        error: str,
+    ) -> dict[str, Any]:
+        lowered = str(error or "").strip().lower()
+        retryable = False
+        model_blocked = False
+
+        if "no eligible resources" in lowered:
+            kind = "messages_pool_unavailable" if endpoint_name.startswith("messages") else "provider_pool_unavailable"
+            retryable = True
+        elif any(marker in lowered for marker in _OPENAI_RUNTIME_BLOCK_MARKERS):
+            kind = "unsupported_model"
+            model_blocked = True
+        elif any(marker in lowered for marker in _OPENAI_RUNTIME_MODEL_UNAVAILABLE_MARKERS):
+            kind = "model_unavailable"
+            model_blocked = True
+        elif status_code == 400:
+            kind = "invalid_request"
+        elif status_code == 401 or any(marker in lowered for marker in ("invalid api key", "unauthorized", "authentication required", "auth failed")):
+            kind = "auth_failed"
+        elif status_code == 403:
+            kind = "forbidden"
+        elif status_code == 404:
+            kind = "not_found"
+        elif status_code == 408:
+            kind = "request_timeout"
+            retryable = True
+        elif status_code == 409:
+            kind = "conflict"
+        elif status_code == 429:
+            kind = "rate_limited"
+            retryable = True
+        elif status_code == 501:
+            kind = "not_implemented"
+        elif status_code in {502, 503, 504}:
+            kind = "upstream_unavailable"
+            retryable = True
+        elif status_code is not None and status_code >= 500:
+            kind = "upstream_error"
+            retryable = True
+        elif status_code is None:
+            kind = "network_error"
+            retryable = True
+        else:
+            kind = "probe_failed"
+
+        return {
+            "error_kind": kind,
+            "retryable": retryable,
+            "model_blocked": model_blocked,
+            "status_family": cls._openai_status_family(status_code),
+        }
+
+    @classmethod
+    def _openai_endpoint_probe_names(cls) -> tuple[str, ...]:
+        return ("chat_completions", "responses", "messages", "messages_count_tokens")
+
+    @classmethod
+    def _collect_openai_endpoint_failures(cls, row: dict[str, Any]) -> list[dict[str, Any]]:
+        failures: list[dict[str, Any]] = []
+        for endpoint_name in cls._openai_endpoint_probe_names():
+            payload = row.get(endpoint_name)
+            if not isinstance(payload, dict) or payload.get("ok") or payload.get("skipped"):
+                continue
+            failures.append({
+                "endpoint": endpoint_name,
+                "endpoint_url": str(payload.get("endpoint_url") or ""),
+                "status_code": payload.get("status_code"),
+                "status_family": payload.get("status_family"),
+                "error_kind": str(payload.get("error_kind") or "probe_failed"),
+                "error": str(payload.get("error") or ""),
+                "retryable": bool(payload.get("retryable")),
+                "model_blocked": bool(payload.get("model_blocked")),
+            })
+        return failures
+
+    @classmethod
+    def _build_openai_endpoint_probe_summary(
+        cls,
+        rows: list[dict[str, Any]],
+        endpoint_manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        manifest_endpoints = (endpoint_manifest or {}).get("endpoints") if isinstance(endpoint_manifest, dict) else {}
+        summary: dict[str, Any] = {}
+        for endpoint_name in cls._openai_endpoint_probe_names():
+            endpoint_url = str((manifest_endpoints or {}).get(endpoint_name) or "")
+            bucket = {
+                "configured": bool(endpoint_url),
+                "endpoint_url": endpoint_url,
+                "ok_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "status_code_counts": {},
+                "error_kind_counts": {},
+                "retryable_count": 0,
+                "model_blocked_count": 0,
+                "failed_models": [],
+            }
+            for row in rows:
+                payload = row.get(endpoint_name)
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("skipped"):
+                    bucket["skipped_count"] += 1
+                    continue
+                if payload.get("ok"):
+                    bucket["ok_count"] += 1
+                    continue
+                bucket["failed_count"] += 1
+                status_code = payload.get("status_code")
+                if status_code is not None:
+                    key = str(status_code)
+                    bucket["status_code_counts"][key] = int(bucket["status_code_counts"].get(key) or 0) + 1
+                error_kind = str(payload.get("error_kind") or "probe_failed")
+                bucket["error_kind_counts"][error_kind] = int(bucket["error_kind_counts"].get(error_kind) or 0) + 1
+                if payload.get("retryable"):
+                    bucket["retryable_count"] += 1
+                if payload.get("model_blocked"):
+                    bucket["model_blocked_count"] += 1
+                bucket["failed_models"].append({
+                    "model": str(row.get("model") or ""),
+                    "status_code": status_code,
+                    "error_kind": error_kind,
+                })
+            summary[endpoint_name] = bucket
+        return summary
+
     async def _probe_openai_runtime_matrix_async(
         self,
         *,
@@ -334,6 +571,8 @@ class ProviderInventoryService:
         api_key: str,
         chat_endpoint: str,
         responses_endpoint: str,
+        messages_endpoint: str,
+        messages_count_tokens_endpoint: str,
         prompt: str,
         max_parallel: int,
     ) -> list[dict[str, Any]]:
@@ -342,12 +581,45 @@ class ProviderInventoryService:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            async def _call(endpoint_name: str, endpoint_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            async def _call(
+                endpoint_name: str,
+                endpoint_url: str,
+                payload: dict[str, Any],
+                *,
+                extra_headers: dict[str, str] | None = None,
+            ) -> dict[str, Any]:
+                if not str(endpoint_url or "").strip():
+                    return {
+                        "ok": False,
+                        "status_code": None,
+                        "error": "endpoint_not_configured",
+                        "response_sample": "",
+                        "endpoint": endpoint_name,
+                        "endpoint_url": "",
+                        "skipped": True,
+                        "error_kind": "endpoint_not_configured",
+                        "retryable": False,
+                        "model_blocked": False,
+                        "status_family": None,
+                    }
                 async with semaphore:
                     try:
-                        response = await client.post(endpoint_url, headers=headers, json=payload)
+                        request_headers = dict(headers)
+                        if extra_headers:
+                            request_headers.update(extra_headers)
+                        response = await client.post(endpoint_url, headers=request_headers, json=payload)
                     except Exception as exc:
-                        return {"ok": False, "status_code": None, "error": str(exc), "response_sample": "", "endpoint": endpoint_name}
+                        failure = self._classify_openai_probe_failure(endpoint_name=endpoint_name, status_code=None, error=str(exc))
+                        return {
+                            "ok": False,
+                            "status_code": None,
+                            "error": str(exc)[:240],
+                            "response_sample": "",
+                            "endpoint": endpoint_name,
+                            "endpoint_url": endpoint_url,
+                            "skipped": False,
+                            **failure,
+                        }
                     try:
                         body: Any = response.json() if response.content else {}
                     except Exception:
@@ -359,28 +631,52 @@ class ProviderInventoryService:
                             "error": None,
                             "response_sample": self._extract_openai_probe_text(body),
                             "endpoint": endpoint_name,
+                            "endpoint_url": endpoint_url,
+                            "skipped": False,
+                            "error_kind": None,
+                            "retryable": False,
+                            "model_blocked": False,
+                            "status_family": self._openai_status_family(int(response.status_code)),
                         }
+                    error_text = self._extract_openai_probe_error(body, response.text)
+                    failure = self._classify_openai_probe_failure(
+                        endpoint_name=endpoint_name,
+                        status_code=int(response.status_code),
+                        error=error_text,
+                    )
                     return {
                         "ok": False,
                         "status_code": int(response.status_code),
-                        "error": str(response.text[:240]),
+                        "error": error_text,
                         "response_sample": "",
                         "endpoint": endpoint_name,
+                        "endpoint_url": endpoint_url,
+                        "skipped": False,
+                        **failure,
                     }
 
             async def _probe_model(model_name: str) -> dict[str, Any]:
                 chat_payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
                 responses_payload = {"model": model_name, "input": prompt, "max_output_tokens": 8}
-                chat_result, responses_result = await asyncio.gather(
+                messages_payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}], "max_tokens": 8}
+                count_tokens_payload = {"model": model_name, "messages": [{"role": "user", "content": prompt}]}
+                anthropic_headers = {"anthropic-version": "2023-06-01"}
+                results = await asyncio.gather(
                     _call("chat_completions", chat_endpoint, chat_payload),
                     _call("responses", responses_endpoint, responses_payload),
+                    _call("messages", messages_endpoint, messages_payload, extra_headers=anthropic_headers),
+                    _call("messages_count_tokens", messages_count_tokens_endpoint, count_tokens_payload, extra_headers=anthropic_headers),
                 )
-                return {
+                row = {
                     "model": model_name,
-                    "chat_completions": chat_result,
-                    "responses": responses_result,
-                    "fully_routable": bool(chat_result.get("ok") and responses_result.get("ok")),
+                    "chat_completions": results[0],
+                    "responses": results[1],
+                    "messages": results[2],
+                    "messages_count_tokens": results[3],
+                    "fully_routable": bool(results[0].get("ok") and results[1].get("ok")),
                 }
+                row["endpoint_failures"] = self._collect_openai_endpoint_failures(row)
+                return row
 
             return await asyncio.gather(*(_probe_model(model_name) for model_name in model_names))
 
@@ -388,15 +684,27 @@ class ProviderInventoryService:
     def _openai_probe_availability(row: dict[str, Any]) -> dict[str, Any]:
         chat = row.get("chat_completions") if isinstance(row.get("chat_completions"), dict) else {}
         responses = row.get("responses") if isinstance(row.get("responses"), dict) else {}
+        messages = row.get("messages") if isinstance(row.get("messages"), dict) else {}
+        messages_count_tokens = row.get("messages_count_tokens") if isinstance(row.get("messages_count_tokens"), dict) else {}
         chat_ok = bool(chat.get("ok"))
         responses_ok = bool(responses.get("ok"))
+        messages_ok = bool(messages.get("ok"))
+        messages_count_tokens_ok = bool(messages_count_tokens.get("ok"))
         chat_status = int(chat.get("status_code") or 0) if str(chat.get("status_code") or '').strip() else None
         responses_status = int(responses.get("status_code") or 0) if str(responses.get("status_code") or '').strip() else None
-        errors = ' '.join(filter(None, [str(chat.get("error") or '').strip().lower(), str(responses.get("error") or '').strip().lower()]))
+        errors = ' '.join(filter(None, [
+            str(chat.get("error") or '').strip().lower(),
+            str(responses.get("error") or '').strip().lower(),
+            str(messages.get("error") or '').strip().lower(),
+            str(messages_count_tokens.get("error") or '').strip().lower(),
+        ]))
+        endpoint_failures = row.get("endpoint_failures") if isinstance(row.get("endpoint_failures"), list) else []
         text_present = bool(str(chat.get("response_sample") or '').strip() or str(responses.get("response_sample") or '').strip())
         criteria = {
             "chat_completions_ok": chat_ok,
             "responses_ok": responses_ok,
+            "messages_ok": messages_ok,
+            "messages_count_tokens_ok": messages_count_tokens_ok,
             "http_chat_success": chat_status is not None and chat_status < 400,
             "http_responses_success": responses_status is not None and responses_status < 400,
             "text_response_present": text_present,
@@ -404,6 +712,8 @@ class ProviderInventoryService:
             "auth_failed": any(code in {401, 403} for code in (chat_status, responses_status) if code is not None),
             "rate_limited": any(code == 429 for code in (chat_status, responses_status) if code is not None),
             "server_error": any(code >= 500 for code in (chat_status, responses_status) if code is not None),
+            "messages_pool_unavailable": any(str(item.get("error_kind") or "") == "messages_pool_unavailable" for item in endpoint_failures if isinstance(item, dict)),
+            "retryable_endpoint_failure": any(bool(item.get("retryable")) for item in endpoint_failures if isinstance(item, dict)),
         }
         if chat_ok and responses_ok:
             availability = "available"
@@ -431,6 +741,8 @@ class ProviderInventoryService:
             "availability": availability,
             "reason": reason,
             "criteria": criteria,
+            "claude_messages_ready": messages_ok,
+            "claude_count_tokens_ready": messages_count_tokens_ok,
         }
 
     @staticmethod
@@ -498,6 +810,7 @@ class ProviderInventoryService:
         diagnostics = dict(self.openai.diagnostics())
         discovery = load_openai_endpoint_discovery()
         cfg = resolve_openai_provider_config()
+        previous_runtime = self._read_openai_runtime_inventory_cache()
         diagnostics["discovery"] = discovery
         sync_summary: dict[str, Any] = {}
         artifact_models = self._openai_artifact_models()
@@ -507,10 +820,11 @@ class ProviderInventoryService:
         diagnostics["configured_model_count"] = len(configured_models)
         diagnostics["effective_model_count"] = len(models)
 
-        selected = self._select_openai_probe_models(
+        selected = self._select_openai_probe_models_with_rotation(
             models,
             default_model=str(getattr(cfg, "default_model", "") or ""),
             limit=self._openai_probe_limit() if probe_limit is None else int(probe_limit),
+            previous_runtime=previous_runtime,
         )
         probe_rows: list[dict[str, Any]] = []
         execution_mode = "skipped"
@@ -521,8 +835,10 @@ class ProviderInventoryService:
                     api_key=str(cfg.api_key),
                     chat_endpoint=str(cfg.chat_completions_endpoint),
                     responses_endpoint=str(cfg.responses_endpoint),
+                    messages_endpoint=str(getattr(cfg, "messages_endpoint", "") or ""),
+                    messages_count_tokens_endpoint=str(getattr(cfg, "messages_count_tokens_endpoint", "") or ""),
                     prompt=self._openai_probe_prompt(),
-                    max_parallel=max(2, min(16, len(selected) * 2)),
+                    max_parallel=max(2, min(16, len(selected) * 4)),
                 )
             )
             try:
@@ -535,17 +851,6 @@ class ProviderInventoryService:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     probe_rows = pool.submit(runner).result()
 
-        if models:
-            try:
-                sync_summary = sync_openai_compatible_artifacts(
-                    models,
-                    base_url=str(cfg.base_url or "").strip(),
-                    validated_rows=probe_rows,
-                    default_model=str(getattr(cfg, "default_model", "") or ""),
-                )
-            except Exception as exc:
-                sync_summary = {"ok": False, "error": str(exc)}
-
         enriched_probe_rows: list[dict[str, Any]] = []
         for row in probe_rows:
             availability = self._openai_probe_availability(row)
@@ -554,11 +859,31 @@ class ProviderInventoryService:
             enriched["cost"] = self._openai_model_cost_snapshot(str(row.get("model") or ""))
             enriched_probe_rows.append(enriched)
 
-        fully_routable = [row for row in enriched_probe_rows if bool(row.get("available"))]
-        chat_ready = [row for row in enriched_probe_rows if bool(((row.get("chat_completions") or {}).get("ok")))]
-        responses_ready = [row for row in enriched_probe_rows if bool(((row.get("responses") or {}).get("ok")))]
+        merged_validated_rows = self._merge_openai_validated_rows(
+            previous_rows=previous_runtime.get("validated_models") if isinstance(previous_runtime, dict) else None,
+            current_rows=enriched_probe_rows,
+            models=models,
+        )
+
+        if models:
+            try:
+                sync_summary = sync_openai_compatible_artifacts(
+                    models,
+                    base_url=str(cfg.base_url or "").strip(),
+                    validated_rows=merged_validated_rows,
+                    default_model=str(getattr(cfg, "default_model", "") or ""),
+                )
+            except Exception as exc:
+                sync_summary = {"ok": False, "error": str(exc)}
+
+        fully_routable = [row for row in merged_validated_rows if bool(row.get("available"))]
+        chat_ready = [row for row in merged_validated_rows if bool(((row.get("chat_completions") or {}).get("ok")))]
+        responses_ready = [row for row in merged_validated_rows if bool(((row.get("responses") or {}).get("ok")))]
+        messages_ready = [row for row in merged_validated_rows if bool(((row.get("messages") or {}).get("ok")))]
+        messages_count_tokens_ready = [row for row in merged_validated_rows if bool(((row.get("messages_count_tokens") or {}).get("ok")))]
         identity = resolve_openai_provider_identity(cfg)
         endpoint_manifest = openai_endpoint_manifest(cfg)
+        endpoint_probe_summary = self._build_openai_endpoint_probe_summary(merged_validated_rows, endpoint_manifest)
         payload = {
             "provider": "openai",
             "provider_id": identity["provider_id"],
@@ -571,14 +896,19 @@ class ProviderInventoryService:
             "model_preview": models[:50],
             "selected_models": selected,
             "selected_model_count": len(selected),
-            "validated_models": enriched_probe_rows,
-            "validated_model_count": len(enriched_probe_rows),
+            "validated_models": merged_validated_rows,
+            "validated_model_count": len(merged_validated_rows),
             "fully_routable_models": [str(row.get("model") or "") for row in fully_routable],
             "fully_routable_count": len(fully_routable),
             "chat_ready_models": [str(row.get("model") or "") for row in chat_ready],
             "chat_ready_count": len(chat_ready),
             "responses_ready_models": [str(row.get("model") or "") for row in responses_ready],
             "responses_ready_count": len(responses_ready),
+            "messages_ready_models": [str(row.get("model") or "") for row in messages_ready],
+            "messages_ready_count": len(messages_ready),
+            "messages_count_tokens_ready_models": [str(row.get("model") or "") for row in messages_count_tokens_ready],
+            "messages_count_tokens_ready_count": len(messages_count_tokens_ready),
+            "endpoint_probe_summary": endpoint_probe_summary,
             "artifact_sync": sync_summary,
             "model_templates": (sync_summary or {}).get("model_template_manifest", {}) if isinstance(sync_summary, dict) else {},
             "base_url": str(getattr(cfg, "base_url", "") or ""),
@@ -626,16 +956,18 @@ class ProviderInventoryService:
 
     def _read_snapshot_file(self) -> dict[str, Any]:
         if not self.snapshot_path.exists():
-            return {"updated_at": None, "providers": {}}
+            return {"updated_at": None, "providers": {}, "model_health": self.model_health.load()}
         try:
             payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 providers = payload.get("providers")
                 if isinstance(providers, dict):
+                    if not isinstance(payload.get("model_health"), dict):
+                        payload["model_health"] = self.model_health.load()
                     return payload
         except Exception:
             pass
-        return {"updated_at": None, "providers": {}}
+        return {"updated_at": None, "providers": {}, "model_health": self.model_health.load()}
 
     def _snapshot_is_stale(self, payload: dict[str, Any]) -> bool:
         updated_at = payload.get("updated_at") if isinstance(payload, dict) else None
@@ -917,6 +1249,7 @@ class ProviderInventoryService:
         gpu_backend = str(os.getenv("AI_BRIDGE_LOCAL_LLM_GPU_BACKEND", "") or os.getenv("AI_BRIDGE_LOCAL_LLM_GPU_BACKEND_DETECTED", "") or "").strip()
         gpu_enabled = (os.getenv("OLLAMA_GPU_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"})
         default_options = dict(getattr(runtime_config, "default_options", {}) or {})
+        bridge = LocalLLMBridge()
         diagnostics: dict[str, Any] = {
             "configured_endpoint": configured_endpoint,
             "candidate_endpoints": candidate_endpoints,
@@ -929,6 +1262,10 @@ class ProviderInventoryService:
                 "main_gpu": default_options.get("main_gpu"),
             },
         }
+        if force_refresh:
+            bridge.ensure_ready(configured_model or None)
+            if bridge.last_bootstrap_status:
+                diagnostics["bootstrap"] = dict(bridge.last_bootstrap_status)
         try:
             health = runtime.check_health_sync(configured_model or None)
             residents = runtime.list_resident_models_sync()
@@ -978,6 +1315,8 @@ class ProviderInventoryService:
                 "resident_models": [],
                 "resident_model_count": 0,
             })
+            if bridge.last_bootstrap_status and "bootstrap" not in diagnostics:
+                diagnostics["bootstrap"] = dict(bridge.last_bootstrap_status)
             return ProviderInventoryEntry(
                 provider="local_llm",
                 fetched_at=int(time.time()),
@@ -1058,15 +1397,20 @@ class ProviderInventoryService:
             source = "artifact_reports"
         else:
             source = str(live_catalog.get("source") or "direct_http_catalog")
-        error = None if merged else str(live_catalog.get("error") or "native_model_catalog_empty")
+        status_code = int(live_catalog["status_code"]) if live_catalog.get("status_code") is not None else None
+        live_error = str(live_catalog.get("error") or "").strip()
+        billing_blocked = status_code == 402 or any(marker in live_error.lower() for marker in ("payment required", "insufficient account balance", "billing hard limit", "credit balance"))
+        error = live_error or "native_model_catalog_empty"
+        if merged and not billing_blocked:
+            error = None
         return ProviderInventoryEntry(
             provider="mimo",
             fetched_at=int(time.time()),
-            ok=bool(merged),
+            ok=bool(merged) and not billing_blocked,
             source=source,
             models=merged,
             error=error,
-            status_code=int(live_catalog["status_code"]) if live_catalog.get("status_code") is not None else None,
+            status_code=status_code,
             diagnostics={
                 "direct_http_only": True,
                 "live_catalog": live_catalog,
@@ -1074,6 +1418,7 @@ class ProviderInventoryService:
                 "generated_models_count": len(generated_models),
                 "usable_artifact_models_count": len(usable_models),
                 "ping_artifact_models_count": len(ping_models),
+                "runtime_status": "billing_blocked" if billing_blocked else ("ready" if merged else "offline"),
             },
         )
 
@@ -1082,12 +1427,21 @@ class ProviderInventoryService:
     def _classify_provider_error(entry: dict[str, Any]) -> str:
         diagnostics = entry.get("diagnostics") if isinstance(entry, dict) else {}
         diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        bootstrap = diagnostics.get("bootstrap") if isinstance(diagnostics.get("bootstrap"), dict) else {}
         status_code = entry.get("status_code")
+        bootstrap_state = str(bootstrap.get("state") or "").strip().lower()
+        bootstrap_reason = str(bootstrap.get("reason") or bootstrap.get("error") or "").strip().lower()
         error_text = str(entry.get("error") or diagnostics.get("error_message") or diagnostics.get("error_type") or "").strip().lower()
+        if bootstrap_state == "runtime_missing" or any(marker in bootstrap_reason for marker in ("ollama_not_installed", "ollama_install_failed", "command not found")):
+            return "runtime_missing"
         if status_code in {401, 403} or "auth" in error_text or "invalid api key" in error_text or "missing_api_key" in error_text:
             return "auth_failed"
+        if status_code == 402 or any(marker in error_text for marker in ("payment required", "insufficient account balance", "billing hard limit", "credit balance")):
+            return "billing_blocked"
         if status_code == 429 or "rate limit" in error_text or "quota" in error_text:
             return "quota_exceeded"
+        if any(marker in error_text for marker in ("ollama_not_installed", "ollama_install_failed", "command not found")):
+            return "runtime_missing"
         if any(marker in error_text for marker in ("connection refused", "timeout", "temporarily unavailable", "endpoint_unavailable", "tcp_timeout")):
             return "offline"
         if error_text:
@@ -1285,6 +1639,10 @@ class ProviderInventoryService:
                     **dict(endpoint_inventory.get("summary") or {}),
                     "validated_models": int(runtime.get("validated_model_count") or 0),
                     "fully_routable_models": int(runtime.get("fully_routable_count") or 0),
+                    "chat_ready_models": int(runtime.get("chat_ready_count") or 0),
+                    "responses_ready_models": int(runtime.get("responses_ready_count") or 0),
+                    "messages_ready_models": int(runtime.get("messages_ready_count") or 0),
+                    "messages_count_tokens_ready_models": int(runtime.get("messages_count_tokens_ready_count") or 0),
                 },
                 "endpoints": {
                     "base_url": runtime.get("base_url"),
@@ -1299,11 +1657,19 @@ class ProviderInventoryService:
                 "recommended_models": runtime.get("recommended_models") or {},
                 "pricing": runtime.get("pricing") or {},
                 "models": endpoint_inventory.get("models") or [],
-                "diagnostics": endpoint_inventory.get("diagnostics") or {},
+                "diagnostics": {
+                    **dict(endpoint_inventory.get("diagnostics") or {}),
+                    "endpoint_probe_summary": runtime.get("endpoint_probe_summary") or {},
+                },
                 "runtime": {
                     "selected_models": runtime.get("selected_models") or [],
                     "fully_routable_models": runtime.get("fully_routable_models") or [],
+                    "chat_ready_models": runtime.get("chat_ready_models") or [],
+                    "responses_ready_models": runtime.get("responses_ready_models") or [],
+                    "messages_ready_models": runtime.get("messages_ready_models") or [],
+                    "messages_count_tokens_ready_models": runtime.get("messages_count_tokens_ready_models") or [],
                     "validated_models": runtime.get("validated_models") or [],
+                    "endpoint_probe_summary": runtime.get("endpoint_probe_summary") or {},
                     "model_templates": runtime.get("model_templates") or {},
                 },
             }
@@ -1474,7 +1840,9 @@ class ProviderInventoryService:
 
     def write_snapshot(self, payload: dict[str, Any]) -> None:
         self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-        body = {"updated_at": int(time.time()), "providers": payload}
+        runtime_inventory = self._read_openai_runtime_inventory_cache()
+        model_health = self.model_health.refresh(provider_snapshot={"providers": payload}, runtime_inventory=runtime_inventory)
+        body = {"updated_at": int(time.time()), "providers": payload, "model_health": model_health}
         self.snapshot_path.write_text(json.dumps(body, ensure_ascii=True, indent=2), encoding="utf-8")
         self._index_payload(payload)
 
@@ -1492,7 +1860,8 @@ class ProviderInventoryService:
         payload = self._read_snapshot_file()
         if self._snapshot_is_stale(payload) and not self._testing_mode():
             try:
-                return {"updated_at": int(time.time()), "providers": self.refresh(force_refresh=True)}
+                refreshed = self.refresh(force_refresh=True)
+                return {"updated_at": int(time.time()), "providers": refreshed, "model_health": self.model_health.load()}
             except Exception:
                 providers = payload.get("providers", {}) if isinstance(payload, dict) else {}
                 if isinstance(providers, dict):
@@ -1516,20 +1885,28 @@ class ProviderInventoryService:
     def _row_reason(provider: str, row: dict[str, Any]) -> tuple[str, str]:
         error = str(row.get("error") or "").strip()
         skip_reason = str(row.get("skip_reason") or "").strip()
-        model = str(row.get("model") or "").strip()
         lowered = error.lower()
+        error_kind = str(row.get("error_kind") or "").strip().lower()
         if skip_reason:
             return skip_reason, "excluded_from_chat_routing"
         if "personal access tokens are not supported" in lowered:
             return "github_pat_not_supported", "use GitHub user/OAuth session instead of PAT or keep provider disabled"
-        if any(marker in lowered for marker in ("invalid api key", "unauthorized", "authentication required", "auth failed")) or row.get("status_code") == 401:
+        if error_kind == "auth_failed" or any(marker in lowered for marker in ("invalid api key", "unauthorized", "authentication required", "auth failed")) or row.get("status_code") == 401:
             return "auth_failed", "refresh provider credentials or keep the provider globally suppressed"
         if "labs model" in lowered or "labs_not_enabled" in lowered:
             return "labs_not_enabled", "enable the Labs model in Mistral organization settings or keep it excluded"
+        if error_kind in {"unsupported_model", "model_unavailable"}:
+            return error_kind, "remove the model from this endpoint route or keep it excluded from manifests"
+        if error_kind == "rate_limited" or row.get("status_code") == 429:
+            return "rate_limited", "reduce probe frequency or keep the route disabled until quota recovers"
+        if error_kind == "messages_pool_unavailable":
+            return "messages_pool_unavailable", "keep Claude messages routing disabled for this provider until the pool recovers"
         if "invalid model" in lowered or row.get("status_code") == 400:
             return "invalid_model", "remove the stale model id from routing allowlists and manifests"
         if row.get("status_code") == 403:
             return "forbidden", "fix provider entitlement or keep model excluded"
+        if error_kind in {"upstream_unavailable", "upstream_error"}:
+            return error_kind, "retry later and keep the provider endpoint out of critical routing until it stabilizes"
         return "probe_failed", "keep excluded until a ping returns usable text"
 
     def build_participation_snapshot(self, agent_records: list[Any] | None = None) -> dict[str, Any]:

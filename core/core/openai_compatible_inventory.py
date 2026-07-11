@@ -293,6 +293,18 @@ def _runtime_status_for_model(model_id: str, row: dict[str, Any] | None) -> str:
     return 'probe_failed'
 
 
+def _template_availability_rank(status: str) -> int:
+    return {
+        'routable': 0,
+        'chat_only': 1,
+        'responses_only': 1,
+        'discovered': 2,
+        'probe_failed': 3,
+        'blocked': 4,
+        'non_chat_incompatible': 5,
+    }.get(str(status or ''), 6)
+
+
 def build_runtime_model_template_manifest(
     models: list[str],
     *,
@@ -356,46 +368,87 @@ def build_runtime_model_template_manifest(
     }
 
 
-def build_orchestrator_templates(models: list[str], *, base_url: str = '') -> dict[str, Any]:
+def build_orchestrator_templates(
+    models: list[str],
+    *,
+    base_url: str = '',
+    validated_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     compatible = sorted({str(model).strip() for model in models if is_text_compatible_model(model)}, key=_family_rank)
+    validated_map = _validated_row_map(validated_rows)
     roles = ('code_parallel', 'review_primary', 'plan_primary', 'test_primary', 'docs_primary', 'research_primary')
+    runtime_rows: dict[str, dict[str, Any]] = {}
+    fallback_statuses = {'routable', 'chat_only', 'responses_only', 'discovered'}
+    for model in compatible:
+        status = _runtime_status_for_model(model, validated_map.get(model))
+        runtime_rows[model] = {
+            'runtime_status': status,
+            'kernel_eligible': status == 'routable',
+            'fallback_candidate': status in fallback_statuses,
+        }
     templates_by_role: dict[str, list[dict[str, Any]]] = {}
     for role in roles:
         rows: list[dict[str, Any]] = []
         for model in compatible:
+            runtime = runtime_rows.get(model, {})
             rows.append({
                 'role': role,
                 'provider': 'openai',
                 'model_name': model,
                 'family': _family_name(model),
                 'tier': _profile_tier(model),
+                'runtime_status': runtime.get('runtime_status', 'discovered'),
+                'kernel_eligible': bool(runtime.get('kernel_eligible')),
+                'fallback_candidate': bool(runtime.get('fallback_candidate')),
                 'preferred_task_types': _template_preferred_task_types(model),
                 'strengths': _template_strengths(model),
                 'score': _template_score(model, role),
             })
-        rows.sort(key=lambda row: (-float(row['score']), _family_rank(str(row['model_name']))))
-        unique_families: set[str] = set()
-        diversified: list[dict[str, Any]] = []
-        for row in rows:
-            family = str(row.get('family') or '')
-            if family and family not in unique_families:
-                diversified.append(row)
-                unique_families.add(family)
-            if len(diversified) >= 4:
-                break
-        overflow = [row for row in rows if row not in diversified]
-        templates_by_role[role] = diversified + overflow[:4]
+        candidate_rows = [row for row in rows if bool(row.get('fallback_candidate'))]
+        active_rows = candidate_rows or rows
+        active_rows.sort(
+            key=lambda row: (
+                _template_availability_rank(str(row.get('runtime_status') or '')),
+                -float(row['score']),
+                _family_rank(str(row['model_name'])),
+            )
+        )
+        ordered_rows: list[dict[str, Any]] = []
+        for rank in sorted({_template_availability_rank(str(row.get('runtime_status') or '')) for row in active_rows}):
+            bucket = [row for row in active_rows if _template_availability_rank(str(row.get('runtime_status') or '')) == rank]
+            unique_families: set[str] = set()
+            diversified: list[dict[str, Any]] = []
+            for row in bucket:
+                family = str(row.get('family') or '')
+                if family and family not in unique_families:
+                    diversified.append(row)
+                    unique_families.add(family)
+                if len(diversified) >= 4:
+                    break
+            overflow = [row for row in bucket if row not in diversified]
+            ordered_rows.extend(diversified + overflow)
+        templates_by_role[role] = ordered_rows[:8]
+
+    review_defaults = templates_by_role.get('review_primary') or [{}]
+    planning_defaults = templates_by_role.get('plan_primary') or [{}]
 
     return {
         'generated_at': int(time.time()),
         'provider': 'openai',
         'base_url': base_url,
         'template_count': sum(len(items) for items in templates_by_role.values()),
+        'availability_summary': {
+            'routable_count': sum(1 for row in runtime_rows.values() if row.get('runtime_status') == 'routable'),
+            'partial_count': sum(1 for row in runtime_rows.values() if row.get('runtime_status') in {'chat_only', 'responses_only'}),
+            'discovered_count': sum(1 for row in runtime_rows.values() if row.get('runtime_status') == 'discovered'),
+            'blocked_count': sum(1 for row in runtime_rows.values() if row.get('runtime_status') == 'blocked'),
+            'probe_failed_count': sum(1 for row in runtime_rows.values() if row.get('runtime_status') == 'probe_failed'),
+        },
         'roles': templates_by_role,
         'defaults': {
             'code_parallel_branch_count': min(4, len(templates_by_role.get('code_parallel', []))),
-            'review_model': (templates_by_role.get('review_primary') or [{}])[0].get('model_name', ''),
-            'planning_model': (templates_by_role.get('plan_primary') or [{}])[0].get('model_name', ''),
+            'review_model': review_defaults[0].get('model_name', ''),
+            'planning_model': planning_defaults[0].get('model_name', ''),
         },
     }
 
@@ -443,7 +496,11 @@ def sync_openai_compatible_artifacts(
             generated_combo_files.append(str(Path('combinations') / combo_name))
             seen_combo_names.add(combo_name)
 
-    template_payload = build_orchestrator_templates(compatible, base_url=base_url)
+    template_payload = build_orchestrator_templates(
+        compatible,
+        base_url=base_url,
+        validated_rows=validated_rows,
+    )
     templates_path.parent.mkdir(parents=True, exist_ok=True)
     templates_path.write_text(json.dumps(template_payload, ensure_ascii=True, indent=2) + '\n', encoding='utf-8')
 

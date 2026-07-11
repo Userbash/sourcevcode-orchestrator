@@ -112,8 +112,8 @@ class ModelAvailability:
 
     def __init__(self) -> None:
         load_env_file()
-        load_env_file(".env.bridge", override=True)
-        load_env_file(".env.gemini.local", override=True)
+        load_env_file(".env.bridge")
+        load_env_file(".env.gemini.local")
         self._health_cache: dict[str, ProviderHealth] = {}
         self._failure_cache: dict[str, ProviderHealth] = {}
         self.inventory = ProviderInventoryService()
@@ -408,6 +408,21 @@ class ModelAvailability:
             health = ProviderHealth("mimo", ProviderStatus.OFFLINE, latency, datetime.now(UTC), error="mimo_api_key_missing", diagnostics=diagnostics)
             return self._cache(health)
 
+        auth_categories = diagnostics.get("auth_categories") or {}
+        auth_failure_categories = {
+            "invalid_api_key",
+            "illegal_access",
+            "token_plan_base_url_missing",
+            "github_pat_not_supported",
+        }
+        if isinstance(auth_categories, dict) and any(key in auth_categories for key in auth_failure_categories):
+            health = ProviderHealth("mimo", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error="mimo_auth_degraded", diagnostics=diagnostics)
+            diagnostics["remediation"] = [
+                "Проверь MIMO_API_KEY и entitlement на native Xiaomi MIMO models.",
+                "Если ключ формата tp-..., задай MIMO_BASE_URL/AI_BRIDGE_MIMO_BASE_URL из Token Plan page.",
+            ]
+            return self._cache(health)
+
         if snapshot.get("ready"):
             status = ProviderStatus.HEALTHY if not snapshot.get("failed_count") else ProviderStatus.DEGRADED
             health = ProviderHealth("mimo", status, latency, datetime.now(UTC), diagnostics=diagnostics)
@@ -416,15 +431,6 @@ class ModelAvailability:
                     "Часть MIMO моделей недоступна; используй usable_models_sample и auth_categories для routing policy.",
                     "Для GitHub Copilot-backed моделей проверь тип токена: PAT часто не поддерживается для run endpoint.",
                 ]
-            return self._cache(health)
-
-        auth_categories = diagnostics.get("auth_categories") or {}
-        if isinstance(auth_categories, dict) and any(key in auth_categories for key in {"invalid_api_key", "illegal_access", "token_plan_base_url_missing"}):
-            health = ProviderHealth("mimo", ProviderStatus.AUTH_FAILED, latency, datetime.now(UTC), error="mimo_auth_degraded", diagnostics=diagnostics)
-            diagnostics["remediation"] = [
-                "Проверь MIMO_API_KEY и entitlement на native Xiaomi MIMO models.",
-                "Если ключ формата tp-..., задай MIMO_BASE_URL/AI_BRIDGE_MIMO_BASE_URL из Token Plan page.",
-            ]
             return self._cache(health)
 
         health = ProviderHealth("mimo", ProviderStatus.DEGRADED, latency, datetime.now(UTC), error="mimo_models_unavailable", diagnostics=diagnostics)

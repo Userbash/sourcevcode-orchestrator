@@ -1,31 +1,10 @@
 {
-  "generated_at": 1783493414,
+  "generated_at": 1783785529,
   "provider": "mimo",
   "base_url": "https://api.xiaomimimo.com/v1",
-  "models": [
-    "xiaomi/mimo-v2.5",
-    "xiaomi/mimo-v2.5-asr",
-    "xiaomi/mimo-v2.5-pro",
-    "xiaomi/mimo-v2.5-tts",
-    "xiaomi/mimo-v2.5-tts-voiceclone",
-    "xiaomi/mimo-v2.5-tts-voicedesign"
-  ],
-  "model_profiles": [
-    "models/model__mimo-v2.5.json",
-    "models/model__mimo-v2.5-asr.json",
-    "models/model__mimo-v2.5-pro.json",
-    "models/model__mimo-v2.5-tts.json",
-    "models/model__mimo-v2.5-tts-voiceclone.json",
-    "models/model__mimo-v2.5-tts-voicedesign.json"
-  ],
-  "combo_profiles": [
-    "combinations/combo__mimo__mimo-v2.5.json",
-    "combinations/combo__mimo__mimo-v2.5-asr.json",
-    "combinations/combo__mimo__mimo-v2.5-pro.json",
-    "combinations/combo__mimo__mimo-v2.5-tts.json",
-    "combinations/combo__mimo__mimo-v2.5-tts-voiceclone.json",
-    "combinations/combo__mimo__mimo-v2.5-tts-voicedesign.json"
-  ],
+  "models": [],
+  "model_profiles": [],
+  "combo_profiles": [],
   "orchestrator_templates": "orchestrator_templates.json",
   "endpoint_manifest": {
     "provider": "mimo",

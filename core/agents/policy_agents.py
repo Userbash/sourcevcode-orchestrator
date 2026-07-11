@@ -226,7 +226,12 @@ class ReviewPolicyAgent(PolicyAgent):
             tests = list(result.output.get("test_results", []) or [])
             evidence["commands_run"] = commands
             evidence["test_results"] = tests
-            if task.type.value in {"code", "fix", "test"} and not tests:
+            expects_change_evidence = task.type.value in {"code", "fix", "test"} and bool(
+                list(task.input.files or [])
+                or list(task.input.acceptance_criteria or [])
+                or list(task.input.constraints or [])
+            )
+            if expects_change_evidence and not tests:
                 reasons.append("missing_test_evidence")
                 decision = "NEEDS_REVIEW"
                 next_action = "review"

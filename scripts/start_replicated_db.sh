@@ -1,7 +1,7 @@
 #!/bin/bash
 # Replicated Database Startup Script
 BRIDGE_CMD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bridge/exec.sh"
-DB_DIR="/var/home/sanya/Hebrew-web/backend/database"
+DB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../backend/database" && pwd)"
 MASTER_DB_USER="${MASTER_DB_USER:-}"
 MASTER_DB_PASSWORD="${MASTER_DB_PASSWORD:-}"
 REPLICATION_DB_USER="${REPLICATION_DB_USER:-}"

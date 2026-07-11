@@ -283,6 +283,17 @@ class TaskDecomposer:
                 parent_task_id=task.task_id,
                 draft_layer=f"parallel_code_{label}",
                 routing_hints=branch_hints,
+                branch_id=f"code_fanout:{label}",
+                review_depth=0,
+                checkpoint_policy="batch",
+                execution_contract={
+                    "branch_goal": f"Own the {label} implementation lane for: {task.input.description}",
+                    "assumptions": ["Coordinate through review task", "Minimize overlap with sibling branches"],
+                    "exit_criteria": list(task.input.acceptance_criteria),
+                    "expected_artifacts": list(task.input.files),
+                    "lane_label": label,
+                    "parallel_group": "code_fanout",
+                },
             )
             if requested_model:
                 branch.assigned_model = requested_model
@@ -309,6 +320,17 @@ class TaskDecomposer:
             dependencies=[branch.task_id for branch in branches],
             draft_layer="parallel_code_review",
             routing_hints=review_hints,
+            branch_id="code_fanout:review",
+            review_depth=1,
+            checkpoint_policy="batch",
+            execution_contract={
+                "branch_goal": f"Review and merge code_fanout branches for: {task.input.description}",
+                "assumptions": ["All branch results are available before review"],
+                "exit_criteria": ["best implementation selected", "tradeoffs documented"],
+                "expected_artifacts": list(task.input.files),
+                "parallel_group": "code_fanout",
+                "requires_branch_comparison": True,
+            },
         )
         if review_model:
             review.assigned_model = review_model

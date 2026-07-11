@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from .agent_registry import AgentRegistry
 from .models import (
@@ -24,6 +25,8 @@ SOURCECRAFT_KEYWORDS = ("sourcecraft", "src ", " src", "repo", "repository", "pu
 SOURCECRAFT_ROUTABLE_TASK_TYPES = {TaskType.PLAN, TaskType.DOCS, TaskType.RESEARCH}
 SOURCECRAFT_CAPABILITIES = {"sourcecraft", "repo_ops", "pr_flow", "release_flow", "issue_flow", "branch_governance"}
 ORCHESTRATOR_CAPABILITIES = {"security", "auth", "database", "architecture", "orchestrator", *SOURCECRAFT_CAPABILITIES}
+HARD_RISK_TERMS = {"rollback", "migration", "secret", "security", "billing", "schema"}
+SOFT_RISK_TERMS = {"auth", "database", "api"}
 BLOCKED_STATUSES = {
     AgentStatus.OFFLINE,
     AgentStatus.DISABLED,
@@ -54,6 +57,27 @@ class SmartScheduler:
         normalized = text.lower()
         return any(keyword in normalized for keyword in SOURCECRAFT_KEYWORDS)
 
+    @staticmethod
+    def _contains_risky_term(text: str, risky_terms: set[str]) -> bool:
+        tokens = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        return any(term in tokens for term in risky_terms)
+
+    @staticmethod
+    def _scheduler_text(task: Task) -> str:
+        routing_hints = task.routing_hints or {}
+        base_description = routing_hints.get('original_description') or task.input.description
+        raw_parts = [base_description, *task.input.constraints, *task.input.files]
+        filtered: list[str] = []
+        for part in raw_parts:
+            for line in str(part or '').splitlines():
+                normalized = line.strip().lower()
+                if normalized.startswith('core_boundary:'):
+                    continue
+                if normalized.startswith('role: you are an expert '):
+                    continue
+                filtered.append(line)
+        return ' '.join(filtered).lower()
+
     def schedule_envelope(self, envelope: TaskEnvelope, graph: TaskGraph | None = None) -> SchedulerDecision:
         """Schedule a network-like TaskEnvelope, enforcing DAG dependency checks and security policies."""
         if graph and envelope.dependencies:
@@ -73,7 +97,7 @@ class SmartScheduler:
             envelope.priority in {Priority.CRITICAL, "critical"}
             or envelope.target_capability in ORCHESTRATOR_CAPABILITIES
             or sourcecraft_task
-            or any(term in text for term in risky_terms)
+            or self._contains_risky_term(text, risky_terms)
         )
 
         task_score = p_val * 0.5 + (8 if requires_orchestrator else 2) * 0.5
@@ -126,15 +150,23 @@ class SmartScheduler:
 
     def requires_orchestrator(self, task: Task) -> bool:
         capability = task.required_capability or CAPABILITY_BY_TASK_TYPE[task.type]
-        text = " ".join([task.input.description, *task.input.constraints, *task.input.files]).lower()
-        risky_terms = {"rollback", "migration", "secret", "security", "auth", "database", "billing", "api", "schema"}
+        text = self._scheduler_text(task)
+        has_hard_risk = self._contains_risky_term(text, HARD_RISK_TERMS)
+        has_soft_risk = self._contains_risky_term(text, SOFT_RISK_TERMS)
+        low_risk_code_task = (
+            task.type in {TaskType.CODE, TaskType.FIX, TaskType.TEST, TaskType.REVIEW}
+            and capability == "code"
+            and task.priority in {Priority.LOW, Priority.NORMAL}
+            and task.complexity in {None, Complexity.LOW, Complexity.MEDIUM}
+        )
         return (
             task.priority == Priority.CRITICAL
             or task.type in ORCHESTRATOR_TASK_TYPES
             or task.complexity == Complexity.CRITICAL
             or capability in ORCHESTRATOR_CAPABILITIES
             or (task.type in SOURCECRAFT_ROUTABLE_TASK_TYPES and self._is_sourcecraft_work(text))
-            or any(term in text for term in risky_terms)
+            or has_hard_risk
+            or (has_soft_risk and not low_risk_code_task)
         )
 
     def readiness(self, agent: AgentRecord) -> AgentReadiness:

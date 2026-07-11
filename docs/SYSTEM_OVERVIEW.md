@@ -35,13 +35,22 @@ The routing path is policy-driven. It takes into account:
 - risk level
 - normalized input quality
 - provider health
+- provider endpoint capability
 - session and provider budget state
 - agent readiness
 - fallback restrictions
 
+The selection path is no longer based on static provider preference alone. The runtime now keeps a provider inventory snapshot, a model health registry, and an adaptive routing layer. Together they answer three separate questions before work starts:
+
+- is the provider reachable and authenticated
+- is the model visible, routable, and healthy for the requested role
+- is there a better primary or fallback choice for this task shape right now
+
 ### 4. Execution
 
 Execution happens through the delivery supervisor and mailbox handoff path rather than through loose direct calls. That gives the runtime a more consistent way to supervise local agents, track handshakes, detect timeouts, and preserve branch-level task state.
+
+The execution loop now has stronger failure control than older builds. Repeated identical handoffs can be suppressed, repeated failed executions can trigger a loop-guard event, and agent or provider failures can be retried, quarantined, or routed to a fallback lane depending on the failure class.
 
 ### 5. Memory and validation
 
@@ -56,11 +65,20 @@ The important pieces are:
 
 The final module state now includes a `memory_warmup_report` so operators can see warmup totals, conflict counts, pressure state, and the latest validation-memory snapshot in one place.
 
+The runtime also adds two data-oriented modules to the normal task path:
+
+- `DataAnalyticsModule` inspects memory storage, retrieval readiness, freshness, retention, and operational risk, then exposes those signals to routing and health checks
+- `DataIntelligenceModule` builds keyword, phrase, sentence, and template matrices from the task, retrieves related analytics memories, and prepares a prompt data pool for downstream agents
+
 ### 6. Fan-out and fan-in for code tasks
 
 Large coding tasks can fan out across multiple agents. This branch family is not just cosmetic. Each branch can be assigned its own agent and memory profile.
 
 The important correction in the current code is the fan-in rule: downstream tasks now wait for the whole parallel branch set, not just the first branch that happened to be created. That keeps review, test, and merge steps aligned with the actual execution graph.
+
+Each branch now also carries a more explicit execution contract. That contract can include branch goals, assumptions, exit criteria, expected artifacts, lane labels, and parallel-group metadata. In practice this makes parallel work easier to audit and easier to merge.
+
+The same planning machinery now supports specialized multi-agent waves for analytics-heavy work. The runtime can build dedicated plans for analytics coding tasks and for analytics matrix tasks instead of forcing those requests into the generic coding path.
 
 ### 7. Final merge and report
 
@@ -73,6 +91,8 @@ When execution ends, the orchestrator merges branch results, applies review and 
 - module state
 - orchestration report
 
+The final runtime snapshot now also carries model-health data and data-analytics state, which makes it easier to understand why a provider was selected, skipped, retried, or degraded.
+
 ## Main modules in the active path
 
 ### Orchestrator
@@ -81,19 +101,31 @@ Owns planning, routing, execution, fallback, and result merge.
 
 ### TaskDecomposer
 
-Builds the task graph and now supports parallel coding branches with proper dependency fan-in.
+Builds the task graph and now supports parallel coding branches with proper dependency fan-in and richer branch contracts.
 
 ### ModelSelector and provider routing modules
 
 Choose providers and model families using current runtime policy rather than static preferences alone.
 
+### AdaptiveRoutingEngine and ModelHealthRegistry
+
+Turn provider inventory, role suitability, recent probe history, and runtime health into concrete primary, fallback, and parallel routing decisions.
+
 ### MemoryControlModule and ValidationMemoryGate
 
 Build runtime context, warm memory from persistent storage, detect memory conflicts, and expose validation state.
 
+### DataAnalyticsModule and DataIntelligenceModule
+
+Expose storage health and retrieval readiness to the runtime, then build structured analytics context that other agents can reuse.
+
 ### DeliverySupervisor
 
 Supervises mailbox-style delivery for local agents and gives the orchestrator a consistent handoff path.
+
+### AgentLoopGuard
+
+Detects repeated identical handoffs or repeated failure patterns so the orchestrator can stop burning cycles on work that is not making progress.
 
 ## What is no longer the main architecture story
 

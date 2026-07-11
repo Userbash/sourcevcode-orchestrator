@@ -1,8 +1,15 @@
 {
-  "generated_at": 1783493411,
+  "generated_at": 1783783915,
   "provider": "openai",
   "base_url": "https://codex.sale/v1",
   "template_count": 48,
+  "availability_summary": {
+    "routable_count": 6,
+    "partial_count": 7,
+    "discovered_count": 0,
+    "blocked_count": 0,
+    "probe_failed_count": 11
+  },
   "roles": {
     "code_parallel": [
       {
@@ -11,6 +18,9 @@
         "model_name": "gpt-5.5",
         "family": "gpt",
         "tier": "frontier",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -28,20 +38,114 @@
       {
         "role": "code_parallel",
         "provider": "openai",
-        "model_name": "claude-sonnet-4-6",
-        "family": "claude",
-        "tier": "frontier",
+        "model_name": "deepseek-v4-flash",
+        "family": "deepseek",
+        "tier": "economy",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "docs"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "test_generation"
+        ],
+        "score": 0.73
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "gpt-5.4",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
           "review",
           "plan",
-          "code",
-          "research"
+          "docs",
+          "test"
         ],
         "strengths": [
           "coding",
           "review"
         ],
-        "score": 1.18
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "gpt-5.6-sol",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "gpt-5.6-terra",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.98
+      },
+      {
+        "role": "code_parallel",
+        "provider": "openai",
+        "model_name": "gpt-5.4-mini",
+        "family": "gpt",
+        "tier": "mini",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test",
+          "fix"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "review"
+        ],
+        "score": 0.91
       },
       {
         "role": "code_parallel",
@@ -49,6 +153,9 @@
         "model_name": "deepseek-v4-pro",
         "family": "deepseek",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "test",
@@ -67,87 +174,12 @@
       {
         "role": "code_parallel",
         "provider": "openai",
-        "model_name": "qwen3.7-max",
-        "family": "qwen",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "test",
-          "fix",
-          "review",
-          "plan",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "test_generation"
-        ],
-        "score": 1.15
-      },
-      {
-        "role": "code_parallel",
-        "provider": "openai",
-        "model_name": "claude-opus-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.18
-      },
-      {
-        "role": "code_parallel",
-        "provider": "openai",
-        "model_name": "claude-opus-4-7",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.18
-      },
-      {
-        "role": "code_parallel",
-        "provider": "openai",
-        "model_name": "claude-opus-4-8",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.18
-      },
-      {
-        "role": "code_parallel",
-        "provider": "openai",
-        "model_name": "mimo-v2-pro",
+        "model_name": "mimo-v2.5-pro",
         "family": "mimo",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -165,27 +197,12 @@
       {
         "role": "review_primary",
         "provider": "openai",
-        "model_name": "claude-sonnet-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "coding",
-          "review"
-        ],
-        "score": 1.24
-      },
-      {
-        "role": "review_primary",
-        "provider": "openai",
         "model_name": "gpt-5.5",
         "family": "gpt",
         "tier": "frontier",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -203,9 +220,124 @@
       {
         "role": "review_primary",
         "provider": "openai",
+        "model_name": "deepseek-v4-flash",
+        "family": "deepseek",
+        "tier": "economy",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "docs"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "test_generation"
+        ],
+        "score": 0.68
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-sol",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-terra",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4-mini",
+        "family": "gpt",
+        "tier": "mini",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test",
+          "fix"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "review"
+        ],
+        "score": 0.86
+      },
+      {
+        "role": "review_primary",
+        "provider": "openai",
         "model_name": "deepseek-v4-pro",
         "family": "deepseek",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "test",
@@ -224,87 +356,12 @@
       {
         "role": "review_primary",
         "provider": "openai",
-        "model_name": "qwen3.7-max",
-        "family": "qwen",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "test",
-          "fix",
-          "review",
-          "plan",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "test_generation"
-        ],
-        "score": 1.06
-      },
-      {
-        "role": "review_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.24
-      },
-      {
-        "role": "review_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-7",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.24
-      },
-      {
-        "role": "review_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-8",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.24
-      },
-      {
-        "role": "review_primary",
-        "provider": "openai",
-        "model_name": "mimo-v2-pro",
+        "model_name": "mimo-v2.5-pro",
         "family": "mimo",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -322,27 +379,12 @@
       {
         "role": "plan_primary",
         "provider": "openai",
-        "model_name": "claude-sonnet-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "plan_primary",
-        "provider": "openai",
         "model_name": "gpt-5.5",
         "family": "gpt",
         "tier": "frontier",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -360,9 +402,124 @@
       {
         "role": "plan_primary",
         "provider": "openai",
+        "model_name": "deepseek-v4-flash",
+        "family": "deepseek",
+        "tier": "economy",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "docs"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "test_generation"
+        ],
+        "score": 0.62
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-sol",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-terra",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4-mini",
+        "family": "gpt",
+        "tier": "mini",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test",
+          "fix"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "review"
+        ],
+        "score": 0.84
+      },
+      {
+        "role": "plan_primary",
+        "provider": "openai",
         "model_name": "deepseek-v4-pro",
         "family": "deepseek",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "test",
@@ -381,87 +538,12 @@
       {
         "role": "plan_primary",
         "provider": "openai",
-        "model_name": "qwen3.7-max",
-        "family": "qwen",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "test",
-          "fix",
-          "review",
-          "plan",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "test_generation"
-        ],
-        "score": 1.06
-      },
-      {
-        "role": "plan_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "plan_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-7",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "plan_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-8",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "plan_primary",
-        "provider": "openai",
-        "model_name": "mimo-v2-pro",
+        "model_name": "mimo-v2.5-pro",
         "family": "mimo",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -479,9 +561,147 @@
       {
         "role": "test_primary",
         "provider": "openai",
+        "model_name": "gpt-5.5",
+        "family": "gpt",
+        "tier": "frontier",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "research"
+        ],
+        "strengths": [
+          "deep_reasoning",
+          "coding",
+          "review"
+        ],
+        "score": 1.14
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "deepseek-v4-flash",
+        "family": "deepseek",
+        "tier": "economy",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "docs"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "test_generation"
+        ],
+        "score": 0.8
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-sol",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-terra",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.9
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4-mini",
+        "family": "gpt",
+        "tier": "mini",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test",
+          "fix"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "review"
+        ],
+        "score": 0.8
+      },
+      {
+        "role": "test_primary",
+        "provider": "openai",
         "model_name": "deepseek-v4-pro",
         "family": "deepseek",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "test",
@@ -500,125 +720,12 @@
       {
         "role": "test_primary",
         "provider": "openai",
-        "model_name": "qwen3.7-max",
-        "family": "qwen",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "test",
-          "fix",
-          "review",
-          "plan",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "test_generation"
-        ],
-        "score": 1.17
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
-        "model_name": "gpt-5.5",
-        "family": "gpt",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "review",
-          "plan",
-          "docs",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.14
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
-        "model_name": "claude-sonnet-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "coding",
-          "review"
-        ],
-        "score": 1.1
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.1
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-7",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.1
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-8",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.1
-      },
-      {
-        "role": "test_primary",
-        "provider": "openai",
-        "model_name": "mimo-v2-pro",
+        "model_name": "mimo-v2.5-pro",
         "family": "mimo",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -639,6 +746,9 @@
         "model_name": "gpt-5.5",
         "family": "gpt",
         "tier": "frontier",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -656,27 +766,124 @@
       {
         "role": "docs_primary",
         "provider": "openai",
-        "model_name": "claude-sonnet-4-6",
-        "family": "claude",
-        "tier": "frontier",
+        "model_name": "deepseek-v4-flash",
+        "family": "deepseek",
+        "tier": "economy",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "docs"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "test_generation"
+        ],
+        "score": 0.67
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
           "review",
           "plan",
-          "code",
-          "research"
+          "docs",
+          "test"
         ],
         "strengths": [
           "coding",
           "review"
         ],
-        "score": 1.16
+        "score": 0.94
       },
       {
         "role": "docs_primary",
         "provider": "openai",
-        "model_name": "mimo-v2-pro",
+        "model_name": "gpt-5.6-sol",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-terra",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.94
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4-mini",
+        "family": "gpt",
+        "tier": "mini",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test",
+          "fix"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "review"
+        ],
+        "score": 0.87
+      },
+      {
+        "role": "docs_primary",
+        "provider": "openai",
+        "model_name": "mimo-v2.5-pro",
         "family": "mimo",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -695,6 +902,9 @@
         "model_name": "deepseek-v4-pro",
         "family": "deepseek",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "test",
@@ -709,108 +919,18 @@
           "test_generation"
         ],
         "score": 1.05
-      },
-      {
-        "role": "docs_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.16
-      },
-      {
-        "role": "docs_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-7",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.16
-      },
-      {
-        "role": "docs_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-8",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.16
-      },
-      {
-        "role": "docs_primary",
-        "provider": "openai",
-        "model_name": "mimo-v2.5-pro",
-        "family": "mimo",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "review",
-          "plan",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "drafting"
-        ],
-        "score": 1.1
       }
     ],
     "research_primary": [
       {
         "role": "research_primary",
         "provider": "openai",
-        "model_name": "claude-sonnet-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "research_primary",
-        "provider": "openai",
         "model_name": "gpt-5.5",
         "family": "gpt",
         "tier": "frontier",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -828,9 +948,124 @@
       {
         "role": "research_primary",
         "provider": "openai",
+        "model_name": "deepseek-v4-flash",
+        "family": "deepseek",
+        "tier": "economy",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "test",
+          "fix",
+          "docs"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "test_generation"
+        ],
+        "score": 0.62
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-sol",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.6-terra",
+        "family": "gpt",
+        "tier": "standard",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test"
+        ],
+        "strengths": [
+          "coding",
+          "review"
+        ],
+        "score": 0.96
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
+        "model_name": "gpt-5.4-mini",
+        "family": "gpt",
+        "tier": "mini",
+        "runtime_status": "routable",
+        "kernel_eligible": true,
+        "fallback_candidate": true,
+        "preferred_task_types": [
+          "code",
+          "review",
+          "plan",
+          "docs",
+          "test",
+          "fix"
+        ],
+        "strengths": [
+          "fast_turnaround",
+          "coding",
+          "review"
+        ],
+        "score": 0.86
+      },
+      {
+        "role": "research_primary",
+        "provider": "openai",
         "model_name": "deepseek-v4-pro",
         "family": "deepseek",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "test",
@@ -849,87 +1084,12 @@
       {
         "role": "research_primary",
         "provider": "openai",
-        "model_name": "qwen3.7-max",
-        "family": "qwen",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "code",
-          "test",
-          "fix",
-          "review",
-          "plan",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "test_generation"
-        ],
-        "score": 1.06
-      },
-      {
-        "role": "research_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-6",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "research_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-7",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "research_primary",
-        "provider": "openai",
-        "model_name": "claude-opus-4-8",
-        "family": "claude",
-        "tier": "frontier",
-        "preferred_task_types": [
-          "review",
-          "plan",
-          "code",
-          "research"
-        ],
-        "strengths": [
-          "deep_reasoning",
-          "coding",
-          "review"
-        ],
-        "score": 1.22
-      },
-      {
-        "role": "research_primary",
-        "provider": "openai",
-        "model_name": "mimo-v2-pro",
+        "model_name": "mimo-v2.5-pro",
         "family": "mimo",
         "tier": "frontier",
+        "runtime_status": "chat_only",
+        "kernel_eligible": false,
+        "fallback_candidate": true,
         "preferred_task_types": [
           "code",
           "review",
@@ -946,7 +1106,7 @@
   },
   "defaults": {
     "code_parallel_branch_count": 4,
-    "review_model": "claude-sonnet-4-6",
-    "planning_model": "claude-sonnet-4-6"
+    "review_model": "gpt-5.5",
+    "planning_model": "gpt-5.5"
   }
 }

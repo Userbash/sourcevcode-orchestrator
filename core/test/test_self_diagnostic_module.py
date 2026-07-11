@@ -63,7 +63,7 @@ def test_run_diagnostics_structure(monkeypatch):
     manager = _FakeModuleManager({"worker": _FakeModule(), "self_diagnostic": _FakeModule({"status": "active"})})
     api = _build_api(module_manager=manager, memory=memory)
 
-    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "model_availability": {"status": "active", "cached_report": {"openai": {"provider": "openai", "status": "healthy"}}}, "local_model_manager": {"blocked_models": [], "resident_models": [], "memory_pressure": {"pressure_state": "normal"}}, "antigravity_status": {"ready": True}}
+    api.module_state.return_value = {"worker": {"health": "ok"}, "self_diagnostic": {"status": "active"}, "data_analytics": {"operational_signals": {"freshness_status": "healthy"}}, "model_availability": {"status": "active", "cached_report": {"openai": {"provider": "openai", "status": "healthy"}}}, "local_model_manager": {"blocked_models": [], "resident_models": [], "memory_pressure": {"pressure_state": "normal"}}, "antigravity_status": {"ready": True}}
     asyncio.run(module.on_load(api))
     report = asyncio.run(module.run_diagnostics())
 
@@ -72,6 +72,7 @@ def test_run_diagnostics_structure(monkeypatch):
     assert "worker" in report["components"]
     assert "self_diagnostic" not in report["components"]
     assert report["memory"]["status"] == "ok"
+    assert report["memory"]["data_analytics"]["operational_signals"]["freshness_status"] == "healthy"
     assert report["layer_check_status"]["ok"] is True
     assert report["diagnostic_matrix"]["source"] == "diagnostic_contracts"
     assert report["layer_checks"][0]["name"] == "boot_contract"

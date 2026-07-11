@@ -192,8 +192,13 @@ class HandoffPayload(CompatModel):
     errors: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    acceptance_criteria_delta: list[str] = Field(default_factory=list)
+    required_followups: list[str] = Field(default_factory=list)
+    verification_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    branch_goal: str | None = None
+    execution_contract: dict[str, Any] = Field(default_factory=dict)
     upstream_policy_versions: list[str] = Field(default_factory=list)
-    schema_version: str = "1.0"
+    schema_version: str = "1.1"
 
 
 class HandoffAck(CompatModel):
@@ -369,6 +374,13 @@ class Task(CompatModel):
     cache_policy: str = "read_write"
     memory_keys: list[str] = Field(default_factory=list)
     memory_ttl_sec: int = 3600
+    estimated_cost: float | None = None
+    branch_id: str | None = None
+    checkpoint_policy: str = "batch"
+    review_depth: int = 0
+    resume_token: str | None = None
+    execution_contract: dict[str, Any] = Field(default_factory=dict)
+    repo_fingerprint: str | None = None
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if args:
@@ -511,6 +523,18 @@ class ExecutionPlan(CompatModel):
     root_task_id: str
     atomic_tasks: list[Task]
     draft_layers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PlanTaskArtifact(CompatModel):
+    task: Task
+
+
+class PlanArtifact(CompatModel):
+    schema_version: str = "1.0"
+    root_task_id: str
+    tasks: list[PlanTaskArtifact]
+    draft_layers: list[dict[str, Any]] = Field(default_factory=list)
+    goal: str | None = None
 
 
 class TaskGraph(CompatModel):

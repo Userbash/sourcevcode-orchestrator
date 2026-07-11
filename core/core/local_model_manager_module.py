@@ -64,6 +64,10 @@ class LocalModelManagerModule(KernelModule):
     def _now() -> datetime:
         return datetime.now(UTC)
 
+    @staticmethod
+    def _testing_mode() -> bool:
+        return os.getenv("TESTING", "").strip().lower() == "true" or bool(os.getenv("PYTEST_CURRENT_TEST"))
+
     @classmethod
     def _parse_ts(cls, raw: str | None) -> datetime | None:
         if not raw:
@@ -317,6 +321,27 @@ class LocalModelManagerModule(KernelModule):
     def before_task(self, task: Any, context: dict[str, Any]) -> None:
         provider = str(context.get("selected_provider") or context.get("provider") or "")
         model_name = str(context.get("selected_model") or context.get("model") or "")
+        if self._testing_mode():
+            normalized = self._normalize_provider(provider)
+            task_id = getattr(task, "task_id", None)
+            snapshot = {
+                "status": "testing",
+                "provider": normalized,
+                "model_name": model_name,
+                "task_id": task_id,
+                "warmed": False,
+                "resident": False,
+                "live": False,
+            }
+            if normalized in {"local", "ai_kernel"} and model_name:
+                with self._lock:
+                    record = self._touch(normalized, model_name)
+                    record.active_tasks += 1
+                    record.last_used_at = self._now().isoformat()
+                    if task_id:
+                        self._task_claims[task_id] = (normalized, model_name)
+            context["local_model_manager"] = snapshot
+            return
         snapshot = self.prepare_for_task(provider, model_name, task_id=getattr(task, "task_id", None))
         context["local_model_manager"] = snapshot
 

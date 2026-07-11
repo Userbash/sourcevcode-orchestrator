@@ -108,6 +108,96 @@ Why it matters:
 - handoff state is easier to inspect
 - local execution supervision is closer to the rest of the runtime protocol
 
+### 7. Adaptive routing and model health are now part of normal selection
+
+The routing stack now keeps a provider inventory snapshot, a model health registry, and an adaptive routing engine. Selection can use task role, probe results, provider status, and recent runtime history instead of relying on a narrow static preference list.
+
+Why it matters:
+
+- a model can be visible but still blocked from routing if health or endpoint support is wrong
+- the runtime can pick a better primary model for a specific role
+- fallback is based on observed provider state, not guesswork
+
+### 8. Provider probing is more detailed than before
+
+The provider inventory path now records more than simple availability. OpenAI-compatible probing can distinguish chat, responses, messages, and count-tokens support, and it keeps endpoint-level failure details in the runtime snapshot.
+
+Why it matters:
+
+- operators can see whether a model is unavailable or just incompatible with one endpoint family
+- runtime routing can avoid sending work to a model that is healthy for one path but blocked on another
+- probe summaries are stable enough to reuse across refresh cycles instead of resetting to zero every time
+
+### 9. Loop protection and runtime failure containment were added
+
+The orchestrator now tracks repeated failure patterns and repeated identical handoffs. It can suppress branch loops, quarantine noisy agents, and retry or fall back when a provider failure looks transient.
+
+Why it matters:
+
+- the runtime wastes less time on stuck execution patterns
+- repeated branch handoffs are easier to diagnose
+- failure recovery is more deliberate and more observable
+
+### 10. Data analytics became part of the runtime state
+
+The new data analytics path inspects memory storage, retention, freshness, retrieval readiness, and operating confidence. Those signals are injected into routing hints, exposed in module state, and checked by the core healthcheck and self-diagnostic paths.
+
+Why it matters:
+
+- storage quality is now part of task routing, not an afterthought
+- operators can spot stale or weak retrieval conditions before they distort task results
+- the healthcheck can fail for real data-readiness reasons instead of only for process-level problems
+
+### 11. Data intelligence now builds reusable task-side analytics context
+
+The runtime can now build keyword, phrase, sentence, template, and character-matrix views of a task, then match those artifacts against analytics memories to produce a prompt data pool.
+
+Why it matters:
+
+- analytics-heavy tasks can start with better context
+- related prior work is easier to retrieve
+- the generated context is structured enough to reuse across agents
+
+### 12. Analytics-specific multi-agent plans were added
+
+The planner can now recognize analytics coding work and analytics matrix work as dedicated orchestration shapes. Those requests can fan out into specialized branch sets instead of using the plain code lane.
+
+Why it matters:
+
+- analytics tasks get branch roles that match the work
+- integration, testing, and review steps line up better with data-platform changes
+- prompt and routing hints are more specific from the start
+
+### 13. Branch metadata is more explicit
+
+Parallel branches now carry richer execution contracts, including branch goals, assumptions, exit criteria, expected artifacts, lane labels, and parallel-group metadata.
+
+Why it matters:
+
+- branch intent is easier to review
+- merge behavior is easier to reason about
+- downstream review and test steps can validate the right output
+
+### 14. Availability handling now preserves explicit environment settings
+
+The availability path no longer forces `.env` files to override explicit environment values, and MIMO failure reporting now separates authentication, entitlement, billing, and runtime-missing states more clearly.
+
+Why it matters:
+
+- local overrides behave predictably
+- MIMO support issues are easier to diagnose
+- operator guidance is closer to the real failure mode
+
+### 15. New operational scripts were added
+
+The repository now includes a focused preflight runner for the core checks and a storage analytics report generator.
+
+Why it matters:
+
+- preflight validation is easier to run in one command
+- storage health can be reviewed without stepping through the orchestrator
+- operational debugging no longer depends on ad hoc shell work
+
 ## Legacy pieces that should not guide new work
 
 The following categories should be treated carefully:
@@ -129,8 +219,13 @@ If you want the most accurate picture of the live system, read in this order:
 2. `README.md`
 3. `core/core/orchestrator.py`
 4. `core/core/task_decomposer.py`
-5. `core/core/memory_control_module.py`
-6. `core/core/validation_memory_gate.py`
+5. `core/core/model_selector.py`
+6. `core/core/provider_inventory_service.py`
+7. `core/core/model_health_registry.py`
+8. `core/core/data_analytics_module.py`
+9. `core/core/data_intelligence_module.py`
+10. `core/core/memory_control_module.py`
+11. `core/core/validation_memory_gate.py`
 
 ## Guidance for future updates
 

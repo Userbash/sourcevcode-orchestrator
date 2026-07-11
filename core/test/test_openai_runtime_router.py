@@ -391,3 +391,81 @@ def test_openai_runtime_router_prefers_runtime_economy_recommendations(tmp_path,
     plan = router.build_plan(task, "prefer economy docs model")
 
     assert plan.models[0] == "gpt-5.4-mini"
+
+
+
+def test_openai_runtime_router_prefers_model_health_role_models(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "fully_routable_models": ["gpt-5.5", "gpt-5.4-mini"],
+            "recommended_models": {
+                "roles": {"code_parallel": ["gpt-5.4-mini", "gpt-5.5"]},
+                "defaults": {"best_overall": ["gpt-5.5"]}
+            },
+            "validated_models": [
+                {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+                {"model": "gpt-5.4-mini", "chat_completions": {"ok": True}, "responses": {"ok": True}}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    model_health = tmp_path / "model_health_registry.json"
+    model_health.write_text(
+        json.dumps({
+            "generated_at": 123,
+            "roles": {"code_parallel": ["gpt-5.5", "gpt-5.4-mini"]},
+            "models": [
+                {"provider": "openai", "model_name": "gpt-5.5", "routable": True, "status": "routable"},
+                {"provider": "openai", "model_name": "gpt-5.4-mini", "routable": True, "status": "routable"}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("MODEL_HEALTH_REGISTRY_PATH", str(model_health))
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "gpt-5.4-mini,gpt-5.5")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+
+    plan = router.build_plan(_task(complexity=Complexity.HIGH), "prefer model health role ordering")
+
+    assert plan.models[0] == "gpt-5.5"
+
+
+def test_openai_runtime_router_uses_model_health_blocked_rows(tmp_path, monkeypatch):
+    runtime_inventory = tmp_path / "openai_runtime_inventory.json"
+    runtime_inventory.write_text(
+        json.dumps({
+            "fully_routable_models": ["gpt-5.5", "claude-sonnet-4-6"],
+            "validated_models": [
+                {"model": "gpt-5.5", "chat_completions": {"ok": True}, "responses": {"ok": True}},
+                {"model": "claude-sonnet-4-6", "chat_completions": {"ok": True}, "responses": {"ok": True}}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    model_health = tmp_path / "model_health_registry.json"
+    model_health.write_text(
+        json.dumps({
+            "generated_at": 123,
+            "roles": {},
+            "models": [
+                {"provider": "openai", "model_name": "gpt-5.5", "routable": True, "status": "routable"},
+                {"provider": "openai", "model_name": "claude-sonnet-4-6", "routable": False, "status": "blocked", "failure_reason": "runtime_incompatible"}
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_RUNTIME_INVENTORY_PATH", str(runtime_inventory))
+    monkeypatch.setenv("MODEL_HEALTH_REGISTRY_PATH", str(model_health))
+    monkeypatch.setenv("OPENAI_HIGH_MODELS", "claude-sonnet-4-6,gpt-5.5")
+    monkeypatch.setenv("AI_BRIDGE_OPENAI_REQUIRE_ROUTABLE_MODELS", "true")
+    OpenAIRuntimeRouter._session_token_usage.clear()
+    router = OpenAIRuntimeRouter()
+
+    plan = router.build_plan(_task(complexity=Complexity.HIGH), "drop blocked health rows")
+
+    assert "claude-sonnet-4-6" not in plan.models
+    assert plan.models[0] == "gpt-5.5"

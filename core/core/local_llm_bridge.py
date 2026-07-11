@@ -6,7 +6,7 @@ import shlex
 import subprocess
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 from urllib.request import urlopen
 
 from core.core.host_bridge import HostBridge
@@ -21,6 +21,7 @@ class LocalLLMBridge:
     ollama_host: str = "0.0.0.0"
     ollama_port: int = 11434
     host_bridge: HostBridge = field(default_factory=HostBridge)
+    _last_bootstrap_status: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __init__(
         self,
@@ -40,6 +41,14 @@ class LocalLLMBridge:
         except (TypeError, ValueError):
             self.ollama_port = default_port
         self.host_bridge = host_bridge or HostBridge()
+        self._last_bootstrap_status: dict[str, Any] = {}
+
+    @property
+    def last_bootstrap_status(self) -> Mapping[str, Any]:
+        return dict(self._last_bootstrap_status)
+
+    def _set_bootstrap_status(self, state: str, **details: Any) -> None:
+        self._last_bootstrap_status = {"state": state, **details}
 
     def _run(self, args: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
         try:
@@ -63,6 +72,13 @@ class LocalLLMBridge:
         except Exception:
             return False
 
+    def ollama_installed(self) -> bool:
+        try:
+            result = self._run(["distrobox", "enter", self.container_name, "--", "bash", "-lc", "command -v ollama >/dev/null 2>&1"])
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def _host_probe(self) -> dict[str, Any]:
         endpoints = [
             f"http://host.containers.internal:{self.ollama_port}/api/tags",
@@ -81,45 +97,67 @@ class LocalLLMBridge:
 
     def ensure_ready(self, model_name: str) -> bool:
         auto_provision = os.getenv("AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION", "true").strip().lower() in {"1", "true", "yes", "on"}
-        if not self.container_exists():
-            if not auto_provision:
-                logger.warning("Local LLM container '%s' does not exist; skipping autostart.", self.container_name)
+        original_run_command = deploy_local_llm.run_command
+        try:
+            deploy_local_llm.run_command = lambda cmd, **kwargs: self._run(cmd, **kwargs)
+            deploy_local_llm.CONTAINER_NAME = self.container_name
+            deploy_local_llm.MODEL_NAME = model_name
+            deploy_local_llm.OLLAMA_HOST = self.ollama_host
+            deploy_local_llm.OLLAMA_PORT = str(self.ollama_port)
+
+            if not self.container_exists():
+                if not auto_provision:
+                    logger.warning("Local LLM container '%s' does not exist; skipping autostart.", self.container_name)
+                    self._set_bootstrap_status('container_missing', container=self.container_name, autoprovision=False)
+                    return False
+                try:
+                    deploy_local_llm.ensure_container(self.container_name)
+                    deploy_local_llm.install_ollama(self.container_name)
+                    deploy_local_llm.start_service(self.container_name)
+                except Exception as exc:
+                    logger.warning("Failed to auto-provision local LLM container '%s': %s", self.container_name, exc)
+                    self._set_bootstrap_status('container_create_failed', container=self.container_name, error=str(exc))
+                    return False
+            elif not self.ollama_installed():
+                try:
+                    deploy_local_llm.install_ollama(self.container_name)
+                except Exception as exc:
+                    logger.warning("Failed to install Ollama in local LLM container '%s': %s", self.container_name, exc)
+                    self._set_bootstrap_status('runtime_missing', container=self.container_name, reason='ollama_install_failed', error=str(exc))
+                    return False
+
+            if not self.ollama_installed():
+                self._set_bootstrap_status('runtime_missing', container=self.container_name, reason='ollama_not_installed')
                 return False
-            original_run_command = deploy_local_llm.run_command
-            try:
-                deploy_local_llm.run_command = lambda cmd, **kwargs: self._run(cmd, **kwargs)
-                deploy_local_llm.CONTAINER_NAME = self.container_name
-                deploy_local_llm.MODEL_NAME = model_name
-                deploy_local_llm.OLLAMA_HOST = self.ollama_host
-                deploy_local_llm.OLLAMA_PORT = str(self.ollama_port)
-                deploy_local_llm.ensure_container(self.container_name)
-                deploy_local_llm.install_ollama(self.container_name)
-                deploy_local_llm.start_service(self.container_name)
-            except Exception as exc:
-                logger.warning("Failed to auto-provision local LLM container '%s': %s", self.container_name, exc)
+
+            quoted_model = shlex.quote(model_name)
+            gpu_exports = deploy_local_llm.gpu_env_exports() if hasattr(deploy_local_llm, 'gpu_env_exports') else ''
+            boot_cmd = (
+                "set -euo pipefail; "
+                + (f"{gpu_exports}; " if gpu_exports else "")
+                + f"export OLLAMA_HOST={shlex.quote(self.ollama_host)} OLLAMA_ORIGINS='*'; "
+                + "if ! pgrep -x ollama >/dev/null 2>&1; then nohup ollama serve > /tmp/ollama.log 2>&1 & fi; "
+                + "sleep 2; "
+                + f"ollama pull {quoted_model}"
+            )
+            result = self._run(["distrobox", "enter", self.container_name, "--", "bash", "-lc", boot_cmd])
+            if result.returncode != 0:
+                logger.warning("Failed to bootstrap local LLM container '%s': %s", self.container_name, (result.stderr or result.stdout).strip())
+                self._set_bootstrap_status('bootstrap_failed', container=self.container_name, model=model_name, error=(result.stderr or result.stdout).strip())
                 return False
-            finally:
-                deploy_local_llm.run_command = original_run_command
 
-        quoted_model = shlex.quote(model_name)
-        gpu_exports = deploy_local_llm.gpu_env_exports() if hasattr(deploy_local_llm, 'gpu_env_exports') else ''
-        boot_cmd = (
-            "set -euo pipefail; "
-            + (f"{gpu_exports}; " if gpu_exports else "")
-            + f"export OLLAMA_HOST={shlex.quote(self.ollama_host)} OLLAMA_ORIGINS='*'; "
-            + "if ! pgrep -x ollama >/dev/null 2>&1; then nohup ollama serve > /tmp/ollama.log 2>&1 & fi; "
-            + "sleep 2; "
-            + f"ollama pull {quoted_model}"
-        )
-        result = self._run(["distrobox", "enter", self.container_name, "--", "bash", "-lc", boot_cmd])
-        if result.returncode != 0:
-            logger.warning("Failed to bootstrap local LLM container '%s': %s", self.container_name, (result.stderr or result.stdout).strip())
-            return False
+            probe = self._host_probe()
+            if not probe.get("ok"):
+                logger.warning("Local LLM host bridge is not reachable: %s", probe.get("error", "unknown error"))
+                self._set_bootstrap_status('host_unreachable', container=self.container_name, endpoint=str(probe.get('url') or ''), error=str(probe.get('error') or 'unknown error'))
+                return False
 
-        probe = self._host_probe()
-        if not probe.get("ok"):
-            logger.warning("Local LLM host bridge is not reachable: %s", probe.get("error", "unknown error"))
-            return False
-
-        return self.is_model_downloaded(model_name)
+            model_ready = self.is_model_downloaded(model_name)
+            if not model_ready:
+                self._set_bootstrap_status('model_unavailable', container=self.container_name, model=model_name)
+                return False
+            self._set_bootstrap_status('ready', container=self.container_name, model=model_name, endpoint=str(probe.get('url') or ''))
+            return True
+        finally:
+            deploy_local_llm.run_command = original_run_command
 

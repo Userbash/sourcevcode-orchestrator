@@ -11,6 +11,7 @@ from .agent_registry import AgentRegistry
 from .env_loader import load_env_file
 from .host_bridge import HostBridge
 from .data_plane_monitor import build_data_plane_snapshot
+from .data_storage_analytics import build_data_storage_analytics_report
 from .memory_backend import InMemoryBackend
 from .memory_policy import MemoryPolicy
 from .orchestrator import Orchestrator
@@ -135,6 +136,24 @@ def _check_data_plane() -> CheckResult:
     return CheckResult("data_plane", snapshot.ok, ' | '.join(detail_parts))
 
 
+def _check_data_analytics() -> CheckResult:
+    report = build_data_storage_analytics_report(
+        database_url=os.getenv("AI_BRIDGE_MEMORY_DATABASE_URL", "").strip() or None,
+    )
+    audit = report.audit if isinstance(report.audit, dict) else {}
+    signals = report.operational_signals if isinstance(report.operational_signals, dict) else {}
+    details = (
+        f"source={report.source} "
+        f"freshness={signals.get('freshness_status', 'unknown')} "
+        f"retrieval={signals.get('retrieval_readiness', 'unknown')} "
+        f"confidence={signals.get('orchestrator_confidence', 'unknown')} "
+        f"latest={audit.get('latest_data_at') or 'n/a'} "
+        f"issues={','.join(audit.get('issues', [])) or 'none'}"
+    )
+    ok = bool(report.management_summary.get("analytics_ready")) and str(signals.get("freshness_status") or "") not in {"future_skew", "empty"}
+    return CheckResult("data_analytics", ok, details)
+
+
 def run_healthcheck() -> tuple[bool, list[CheckResult]]:
     checks = [
         _check_imports(),
@@ -144,6 +163,7 @@ def run_healthcheck() -> tuple[bool, list[CheckResult]]:
         _check_orchestrator_wiring(),
         _check_memory_plane(),
         _check_data_plane(),
+        _check_data_analytics(),
         _check_host_bridge(),
         _check_container_provider(),
         _check_policy_config(),

@@ -867,9 +867,11 @@ class PromptOptimizerModule:
             rewritten = self._antigravity_rewrite(task, instruction)
 
         final_instruction = rewritten or instruction
+        original_description = str(task.input.description or "")
         task.input.description = final_instruction
         if not task.routing_hints:
             task.routing_hints = {}
+        task.routing_hints.setdefault("original_description", original_description)
         task.routing_hints["prompt_optimizer"] = {
             "history_items": len(history),
             "local_llm_used": bool(offload),

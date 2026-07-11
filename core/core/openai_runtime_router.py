@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Complexity, Task, TaskType
+from .model_health_registry import ModelHealthRegistry
 from .openai_model_registry import OpenAIModelRegistry
 from .model_routing_policy import ModelRoutingPolicy
 
@@ -57,6 +58,7 @@ class OpenAIRuntimeRouter:
     def __init__(self) -> None:
         self.session_budget = self._read_int("OPENAI_SESSION_TOKEN_BUDGET", 120_000)
         self.registry = OpenAIModelRegistry()
+        self.model_health = ModelHealthRegistry()
 
     @staticmethod
     def enabled() -> bool:
@@ -116,6 +118,21 @@ class OpenAIRuntimeRouter:
         return payload if isinstance(payload, dict) else {}
 
     @staticmethod
+    def _load_model_health_payload() -> dict[str, Any]:
+        return ModelHealthRegistry().load()
+
+    @classmethod
+    def _openai_model_health_rows(cls) -> list[dict[str, Any]]:
+        payload = cls._load_model_health_payload()
+        rows = payload.get("models") if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            return []
+        return [
+            row for row in rows
+            if isinstance(row, dict) and str(row.get("provider") or "").strip().lower() == "openai"
+        ]
+
+    @staticmethod
     def _role_for_task(task: Task, complexity: Complexity) -> str:
         if task.type in {TaskType.CODE, TaskType.FIX}:
             return "code_parallel"
@@ -134,18 +151,23 @@ class OpenAIRuntimeRouter:
     @classmethod
     def _recommended_models_for_task(cls, task: Task, complexity: Complexity) -> list[str]:
         payload = cls._load_runtime_inventory_payload()
+        health_payload = cls._load_model_health_payload()
         recommendations = payload.get("recommended_models") if isinstance(payload.get("recommended_models"), dict) else {}
         roles = recommendations.get("roles") if isinstance(recommendations.get("roles"), dict) else {}
         defaults = recommendations.get("defaults") if isinstance(recommendations.get("defaults"), dict) else {}
+        health_roles = health_payload.get("roles") if isinstance(health_payload.get("roles"), dict) else {}
         role = cls._role_for_task(task, complexity)
+        health_role_models = health_roles.get(role) if isinstance(health_roles.get(role), list) else []
         role_models = roles.get(role) if isinstance(roles.get(role), list) else []
         hints = getattr(task, "routing_hints", {}) or {}
         cost_tier = str(hints.get("cost_tier") or "").strip().lower()
         preferred: list[str] = []
         if cost_tier == "economy":
             preferred.extend(str(item).strip() for item in (defaults.get("economy") or []) if str(item).strip())
+            preferred.extend(str(item).strip() for item in health_role_models if str(item).strip())
             preferred.extend(str(item).strip() for item in role_models if str(item).strip())
         else:
+            preferred.extend(str(item).strip() for item in health_role_models if str(item).strip())
             preferred.extend(str(item).strip() for item in role_models if str(item).strip())
             if cost_tier == "premium" or complexity in {Complexity.HIGH, Complexity.CRITICAL}:
                 preferred.extend(str(item).strip() for item in (defaults.get("premium") or []) if str(item).strip())
@@ -154,6 +176,14 @@ class OpenAIRuntimeRouter:
 
     @classmethod
     def _load_routable_allowlist(cls) -> set[str] | None:
+        health_rows = cls._openai_model_health_rows()
+        if health_rows:
+            return {
+                str(row.get("model_name") or "").strip()
+                for row in health_rows
+                if str(row.get("model_name") or "").strip() and bool(row.get("routable"))
+            }
+
         path = cls._runtime_inventory_path()
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -183,6 +213,32 @@ class OpenAIRuntimeRouter:
 
     @classmethod
     def _load_runtime_blocklist(cls) -> set[str]:
+        health_rows = cls._openai_model_health_rows()
+        if health_rows:
+            blocked: set[str] = set()
+            hard_failures = {
+                "blocked",
+                "auth_failed",
+                "billing_blocked",
+                "runtime_incompatible",
+                "non_chat_incompatible",
+                "probe_failed",
+                "suppressed",
+                "provider_unavailable",
+            }
+            for row in health_rows:
+                model_name = str(row.get("model_name") or "").strip()
+                if not model_name:
+                    continue
+                if not cls.is_chat_routable_model(model_name):
+                    blocked.add(model_name)
+                    continue
+                status = str(row.get("status") or "").strip().lower()
+                reason = str(row.get("failure_reason") or "").strip().lower()
+                if status in hard_failures or reason in hard_failures:
+                    blocked.add(model_name)
+            return blocked
+
         path = cls._runtime_inventory_path()
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))

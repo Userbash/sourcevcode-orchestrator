@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -128,7 +129,7 @@ def _antigravity_worker_prompt(owner: str) -> str:
     prompts = {
         "lead": """
 Контекст:
-- Antigravity CLI resolves to `/var/home/sanya/.npm-packages/bin/gemini`.
+- Antigravity CLI resolves to `$HOME/.npm-packages/bin/gemini`.
 - Direct generation probe returned upstream `429 RESOURCE_EXHAUSTED / MODEL_CAPACITY_EXHAUSTED`.
 - `AntigravityManager.status()` currently reports `models_probe.ok=true`, `generation_probe.ok=false`, `api_probe.status_code=403`, `auth_mode=api_key`.
 
@@ -815,7 +816,7 @@ def build_antigravity_cli_bridge_task_board(*, repo_path: str | None = None, bra
             "failure_domain": "antigravity_cli_bridge",
             "repo_path": repo_path,
             "branch": branch,
-            "observed_cli_command": ["/var/home/sanya/.npm-packages/bin/gemini"],
+            "observed_cli_command": [os.path.join(os.path.expanduser("~"), ".npm-packages", "bin", "gemini")],
             "observed_direct_generation_probe": {
                 "command": ["gemini", "-p", "healthcheck: reply with ok", "--skip-trust"],
                 "error_signature": "429 RESOURCE_EXHAUSTED MODEL_CAPACITY_EXHAUSTED",

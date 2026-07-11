@@ -1,6 +1,4 @@
 
-import sys
-sys.path.append('/var/home/sanya/wisper/core')
 from agents.codex_agent import CodexAgent
 from core.core.models import Priority, Task, TaskContext, TaskInput, TaskType
 

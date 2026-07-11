@@ -5,7 +5,7 @@ from core.agents.base_agent import BaseAgent
 from core.agents.planner_agent import PlannerAgent
 from core.agents.reviewer_agent import ReviewerAgent
 from core.agents.tester_agent import TesterAgent
-from core.core.models import AgentResult, Complexity, PolicyDecision, Priority, ResultOutput, SchedulerDecision, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
+from core.core.models import AgentResult, Complexity, ExecutionPlan, PlanArtifact, PlanTaskArtifact, PolicyDecision, Priority, ResultOutput, SchedulerDecision, Task, TaskAcceptance, TaskContext, TaskInput, TaskStatus, TaskType
 from core.core.model_selector import ModelChoice
 from core.core.orchestrator import Orchestrator
 from core.core.availability import ProviderStatus
@@ -34,6 +34,26 @@ class FailingCodeAgent(BaseAgent):
 
     def run(self, task: Task, memory_context: dict | None = None):
         return self.result(task, "Implementation failed tests.", TaskStatus.FAILED, confidence=0.2, errors=["tests failed"])
+
+
+class FlakyTransientAgent(BaseAgent):
+    def __init__(self, agent_id: str = "code-flaky") -> None:
+        super().__init__(agent_id, ["code"])
+        self.calls = 0
+
+    def run(self, task: Task, memory_context: dict | None = None):
+        self.calls += 1
+        if self.calls == 1:
+            return self.result(task, "Temporary upstream timeout.", TaskStatus.FAILED, confidence=0.2, errors=["api timeout while contacting provider"])
+        return self.result(task, "Recovered after transient timeout.")
+
+
+class ProviderTimeoutAgent(BaseAgent):
+    def __init__(self, agent_id: str = "code-timeout") -> None:
+        super().__init__(agent_id, ["code"])
+
+    def run(self, task: Task, memory_context: dict | None = None):
+        return self.result(task, "Provider timed out.", TaskStatus.FAILED, confidence=0.1, errors=["api timeout 503 stream disconnected"])
 
 
 class FixAgent(BaseAgent):
@@ -446,11 +466,13 @@ def test_refresh_provider_inventory_snapshot_records_worker_sync(monkeypatch):
     monkeypatch.setattr(orchestrator.provider_inventory, "refresh", _fake_refresh)
     monkeypatch.setattr(orchestrator.provider_inventory, "build_participation_snapshot", _fake_participation)
     monkeypatch.setattr(orchestrator, "sync_openai_template_workers", _fake_sync)
+    monkeypatch.setattr(orchestrator.provider_inventory.model_health, "load", lambda: {"generated_at": 123, "summary": {"routable_count": 1}, "models": []})
 
     snapshot = orchestrator._refresh_provider_inventory_snapshot(force_refresh=True)
 
     assert calls["enabled"] is True
     assert snapshot["providers"]["openai"]["diagnostics"]["worker_sync"]["attached"] == ["codex-openai-claude-sonnet-4-6"]
+    assert snapshot["model_health"]["summary"]["routable_count"] == 1
     assert snapshot["participation"]["agent_count"] >= 1
 
 
@@ -475,6 +497,7 @@ def test_refresh_provider_inventory_snapshot_suppresses_failed_provider(monkeypa
     monkeypatch.setattr(orchestrator.provider_inventory, "refresh", _fake_refresh)
     monkeypatch.setattr(orchestrator.provider_inventory, "build_participation_snapshot", _fake_participation)
     monkeypatch.setattr(orchestrator, "sync_openai_template_workers", lambda **kwargs: {"attached": [], "removed": [], "kept": [], "enabled": True})
+    monkeypatch.setattr(orchestrator.provider_inventory.model_health, "load", lambda: {"generated_at": 456, "summary": {"blocked_count": 1}, "models": []})
     monkeypatch.setattr(orchestrator.availability, "cached_report", lambda: {
         "mimo": {"status": "auth_failed", "error": "auth_failed"},
         "openai": {"status": "healthy", "error": None},
@@ -484,6 +507,7 @@ def test_refresh_provider_inventory_snapshot_suppresses_failed_provider(monkeypa
 
     assert 'mimo' in snapshot['provider_suppression']['suppressed']
     assert snapshot['provider_suppression']['suppressed']['mimo']['error_type'] == 'auth_fail'
+    assert snapshot['model_health']['summary']['blocked_count'] == 1
     assert 'mimo' in snapshot['provider_budget_router']['global_suppression']
     assert 'openai' not in snapshot['provider_budget_router']['global_suppression']
 
@@ -869,3 +893,312 @@ def test_orchestrator_module_state_exposes_memory_warmup_report():
     assert report["parallel_batches_total"] >= 1
     assert report["status"] in {"active", "conflict"}
     assert "conflict_total" in report
+
+
+def test_create_plan_artifact_serializes_parallel_plan():
+    orchestrator = _orchestrator_with_agents()
+    task = Task(TaskType.CODE, TaskInput("Implement backend and frontend changes", files=["backend/app.py", "frontend/ui.tsx"]), TaskContext("demo", ".", "main"))
+    task.routing_hints = {"parallelize_code": True, "parallel_branches": 2}
+
+    plan = orchestrator.decomposer.decompose(task)
+    artifact = orchestrator.create_plan_artifact(plan, goal=task.input.description)
+
+    assert artifact.root_task_id == plan.root_task_id
+    assert artifact.goal == task.input.description
+    assert [item.task.task_id for item in artifact.tasks] == [item.task_id for item in plan.atomic_tasks]
+
+
+def test_run_from_plan_replays_same_tasks_without_redecomposition(monkeypatch):
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents())
+    root = Task(TaskType.PLAN, TaskInput("Build feature", acceptance_criteria=["tests pass"]), TaskContext("demo", ".", "main"))
+    plan = orchestrator.create_execution_plan(root)
+    artifact = orchestrator.create_plan_artifact(plan, goal=root.input.description)
+
+    calls = {"count": 0}
+    captured = {}
+
+    def _unexpected(*args, **kwargs):
+        calls["count"] += 1
+        raise AssertionError("decompose should not be called during replay")
+
+    async def _fake_run_plan_parallel(replayed_plan):
+        captured["root_task_id"] = replayed_plan.root_task_id
+        captured["task_ids"] = [task.task_id for task in replayed_plan.atomic_tasks]
+        return {"status": "done", "results": []}
+
+    monkeypatch.setattr(orchestrator.decomposer, "decompose", _unexpected)
+    monkeypatch.setattr(orchestrator, "run_plan_parallel", _fake_run_plan_parallel)
+
+    result = asyncio.run(orchestrator.run_from_plan(artifact))
+
+    assert result["status"] == "done"
+    assert calls["count"] == 0
+    assert captured["root_task_id"] == plan.root_task_id
+    assert captured["task_ids"] == [task.task_id for task in plan.atomic_tasks]
+
+
+def test_run_from_plan_rejects_missing_dependency():
+    orchestrator = _orchestrator_with_agents()
+    task = Task(TaskType.CODE, TaskInput("Implement feature"), TaskContext("demo", ".", "main"), dependencies=["missing-task"])
+    artifact = PlanArtifact(root_task_id=task.task_id, tasks=[PlanTaskArtifact(task=task)])
+
+    try:
+        asyncio.run(orchestrator.run_from_plan(artifact))
+    except ValueError as exc:
+        assert "missing dependency" in str(exc)
+    else:
+        raise AssertionError("missing dependency should fail validation")
+
+
+def test_run_from_plan_rejects_cycles():
+    orchestrator = _orchestrator_with_agents()
+    first = Task(TaskType.CODE, TaskInput("A"), TaskContext("demo", ".", "main"))
+    second = Task(TaskType.CODE, TaskInput("B"), TaskContext("demo", ".", "main"), dependencies=[first.task_id])
+    first.dependencies = [second.task_id]
+    artifact = PlanArtifact(root_task_id=first.task_id, tasks=[PlanTaskArtifact(task=first), PlanTaskArtifact(task=second)])
+
+    try:
+        asyncio.run(orchestrator.run_from_plan(artifact))
+    except ValueError as exc:
+        assert "cycle" in str(exc)
+    else:
+        raise AssertionError("cycle should fail validation")
+
+
+def test_dependency_handoff_loop_guard_suppresses_repeated_same_handoff():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+
+    source = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    source.required_capability = "code"
+    target = Task(TaskType.CODE, TaskInput("Implement branch B"), TaskContext("demo", ".", "main"), dependencies=[source.task_id])
+    target.required_capability = "code"
+    target.routing_hints = {"preferred_agent_id": "code-alt"}
+
+    source_result = AgentResult(task_id=source.task_id, agent_id="code-main", status=TaskStatus.DONE, output=ResultOutput(summary="branch A done", files_changed=["a.py"]), confidence=0.9)
+
+    assert orchestrator._dispatch_dependency_handoffs([target], {source.task_id: source_result}) == 1
+    assert orchestrator._dispatch_dependency_handoffs([target], {source.task_id: source_result}) == 1
+    assert orchestrator._dispatch_dependency_handoffs([target], {source.task_id: source_result}) == 0
+
+
+def test_agent_loop_guard_detects_repeated_failed_result_signature():
+    from core.core.agent_loop_guard import AgentLoopGuard
+
+    guard = AgentLoopGuard(max_repeats=3, signature_window=4)
+
+    assert guard.record_result(agent_id="code-main", task_id="task-1", status="failed", summary="same failure", errors=["tests failed"]) is False
+    assert guard.record_result(agent_id="code-main", task_id="task-1", status="failed", summary="same failure", errors=["tests failed"]) is False
+    assert guard.record_result(agent_id="code-main", task_id="task-1", status="failed", summary="same failure", errors=["tests failed"]) is True
+
+
+def test_parallel_code_plan_assigns_branch_execution_contracts():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput("Implement backend and frontend updates", files=["backend/app.py", "frontend/ui.tsx"], acceptance_criteria=["backend updated", "frontend updated"]),
+        TaskContext("demo", ".", "main"),
+    )
+    task.routing_hints = {"parallelize_code": True, "parallel_branches": 2}
+
+    plan = orchestrator.decomposer.decompose(task)
+    code_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.CODE]
+    review_tasks = [item for item in plan.atomic_tasks if item.type == TaskType.REVIEW]
+
+    assert all(item.branch_id for item in code_tasks)
+    assert all(item.execution_contract.get("branch_goal") for item in code_tasks)
+    assert all(item.checkpoint_policy == "batch" for item in code_tasks)
+    assert review_tasks[0].execution_contract.get("requires_branch_comparison") is True
+
+
+def test_dependency_handoff_includes_execution_contract_and_evidence():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+
+    source = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    source.required_capability = "code"
+    target = Task(
+        TaskType.CODE,
+        TaskInput("Implement branch B", acceptance_criteria=["branch b merged"], constraints=["preserve api"]),
+        TaskContext("demo", ".", "main"),
+        dependencies=[source.task_id],
+        execution_contract={"branch_goal": "Own branch B", "risk_flags": ["api_surface"]},
+    )
+    target.required_capability = "code"
+    target.routing_hints = {"preferred_agent_id": "code-alt"}
+
+    source_result = AgentResult(
+        task_id=source.task_id,
+        agent_id="code-main",
+        status=TaskStatus.DONE,
+        output=ResultOutput(summary="branch A done", files_changed=["a.py"], commands_run=["pytest -q"], test_results=[{"command": "pytest -q", "status": "passed"}]),
+        confidence=0.9,
+    )
+
+    count = orchestrator._dispatch_dependency_handoffs([target], {source.task_id: source_result})
+    time.sleep(0.2)
+    handoffs = orchestrator._consume_p2p_handoffs("code-alt", target.task_id)
+
+    assert count == 1
+    assert handoffs[0]["branch_goal"] == "Own branch B"
+    assert handoffs[0]["acceptance_criteria_delta"] == ["branch b merged"]
+    assert handoffs[0]["required_followups"] == ["preserve api"]
+    assert handoffs[0]["verification_evidence"][0]["status"] == "passed"
+    assert handoffs[0]["execution_contract"]["risk_flags"] == ["api_surface"]
+
+
+def test_preview_execution_plan_exposes_multi_agent_plan_shape():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="antigravity-cli", provider="google")
+    orchestrator.attach_local_agent("code-third", LocalCodeAgent("code-third"), model_name="mistral-large-latest", provider="mistral")
+
+    task = Task(
+        TaskType.CODE,
+        TaskInput("Implement backend and frontend changes", files=["backend/app.py", "frontend/ui.tsx"], acceptance_criteria=["backend updated", "frontend updated"]),
+        TaskContext("demo", ".", "main"),
+    )
+    task.routing_hints = {"parallelize_code": True, "parallel_branches": 3}
+
+    preview = orchestrator.preview_execution_plan(task)
+
+    assert preview["task_count"] >= 3
+    assert preview["plan_artifact"]["root_task_id"] == task.task_id
+    assert "code_fanout" in preview["parallel_groups"]
+    assert any(item["assigned_agent"] for item in preview["tasks"])
+    assert any(item["execution_contract"] for item in preview["tasks"])
+    assert preview["handoffs"]
+
+
+def test_resume_plan_from_checkpoint_replays_only_pending_tasks(monkeypatch):
+    orchestrator = _orchestrator_with_agents()
+    first = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    first.required_capability = "code"
+    second = Task(TaskType.REVIEW, TaskInput("Review branch A"), TaskContext("demo", ".", "main"), dependencies=[first.task_id])
+    second.required_capability = "review"
+    plan = ExecutionPlan(root_task_id="root-1", atomic_tasks=[first, second])
+
+    done_result = AgentResult(task_id=first.task_id, agent_id="code-main", status=TaskStatus.DONE, output=ResultOutput(summary="done A"), confidence=0.9)
+    orchestrator._save_parallel_checkpoint("sess-1", plan, {second.task_id: second}, {first.task_id}, {first.task_id: done_result}, 1, status="checkpointed")
+
+    calls = []
+
+    async def _fake_run_task_async(task):
+        calls.append(task.task_id)
+        return AgentResult(task_id=task.task_id, agent_id="reviewer-1", status=TaskStatus.DONE, output=ResultOutput(summary="review done"), confidence=0.9)
+
+    monkeypatch.setattr(orchestrator, "run_task_async", _fake_run_task_async)
+    monkeypatch.setattr(orchestrator, "_build_orchestration_report", lambda *args, **kwargs: type("_Report", (), {"quorum_verified": True, "model_dump": lambda self: {"status": "APPROVED"}})())
+
+    result = asyncio.run(orchestrator.resume_plan_from_checkpoint("sess-1", "root-1"))
+
+    assert result["status"] == "done"
+    assert calls == [second.task_id]
+    checkpoint = orchestrator.load_parallel_checkpoint("sess-1", "root-1")
+    assert checkpoint["status"] == "done"
+    assert set(checkpoint["completed_task_ids"]) == {first.task_id, second.task_id}
+
+
+def test_transient_failure_retries_same_agent_and_recovers(monkeypatch):
+    flaky = FlakyTransientAgent("code-main")
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(code_agent=flaky))
+    monkeypatch.setattr(orchestrator.quality, "analyze", lambda task, result: type("Q", (), {"score": 1.0, "passed": True, "issues": []})())
+
+    task = Task(TaskType.CODE, TaskInput("Implement with transient issue"), TaskContext("demo", ".", "main"))
+    task.required_capability = "code"
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.DONE
+    assert flaky.calls == 2
+    assert result.output.get("recovery", {}).get("action") == "recovered"
+
+
+def test_provider_failure_falls_back_to_alternate_agent(monkeypatch):
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(code_agent=ProviderTimeoutAgent("code-main")))
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="alt-model", provider="mistral")
+    monkeypatch.setattr(orchestrator.quality, "analyze", lambda task, result: type("Q", (), {"score": 1.0, "passed": True, "issues": []})())
+
+    original_apply = orchestrator._apply_model_replacement_policy
+
+    def _fake_apply(task, capability, choice, agent_id, agent_record, module_context, **kwargs):
+        failure_reason = kwargs.get("failure_reason")
+        if failure_reason in {"provider_timeout", "api_timeout", "tcp_timeout"} and agent_id == "code-main":
+            return "code-alt", orchestrator.registry.get("code-alt"), {"reason": "forced_test_fallback"}
+        return original_apply(task, capability, choice, agent_id, agent_record, module_context, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_apply_model_replacement_policy", _fake_apply)
+
+    task = Task(TaskType.CODE, TaskInput("Implement with provider outage"), TaskContext("demo", ".", "main"))
+    task.required_capability = "code"
+
+    result = orchestrator.run_task(task)
+
+    assert result.status == TaskStatus.DONE
+    assert result.agent_id == "code-alt"
+
+
+def test_quarantined_agent_is_excluded_from_parallel_preassignment():
+    orchestrator = _orchestrator_with_agents()
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"))
+    orchestrator._quarantine_agent("code-main", reason="agent_execution")
+
+    first = Task(TaskType.CODE, TaskInput("Implement branch A"), TaskContext("demo", ".", "main"))
+    first.required_capability = "code"
+    second = Task(TaskType.CODE, TaskInput("Implement branch B"), TaskContext("demo", ".", "main"))
+    second.required_capability = "code"
+
+    assignments = orchestrator._preassign_parallel_batch_agents([first, second])
+
+    assert assignments[first.task_id] == "code-alt"
+    assert assignments[second.task_id] == "code-alt"
+
+
+def test_task_run_audit_records_transient_retry_chain(monkeypatch):
+    flaky = FlakyTransientAgent("code-main")
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(code_agent=flaky))
+    monkeypatch.setattr(orchestrator.quality, "analyze", lambda task, result: type("Q", (), {"score": 1.0, "passed": True, "issues": []})())
+
+    task = Task(TaskType.CODE, TaskInput("Implement with transient audit trail"), TaskContext("demo", ".", "main"))
+    task.required_capability = "code"
+
+    result = orchestrator.run_task(task)
+
+    audit = result.output.get("run_audit", {})
+    chain = audit.get("recovery_chain", [])
+    assert result.status == TaskStatus.DONE
+    assert audit.get("event_type") == "task_run_audit"
+    assert audit.get("selected_route", {}).get("agent_id") == "code-main"
+    assert audit.get("final_route", {}).get("agent_id") == "code-main"
+    assert chain[0]["classification"] == "provider_timeout"
+    assert chain[0]["action"] == "retry_same_agent"
+
+
+def test_task_run_audit_records_provider_fallback_chain(monkeypatch):
+    orchestrator = _disable_state_persistence(_orchestrator_with_agents(code_agent=ProviderTimeoutAgent("code-main")))
+    orchestrator.attach_local_agent("code-alt", LocalCodeAgent("code-alt"), model_name="alt-model", provider="mistral")
+    monkeypatch.setattr(orchestrator.quality, "analyze", lambda task, result: type("Q", (), {"score": 1.0, "passed": True, "issues": []})())
+
+    original_apply = orchestrator._apply_model_replacement_policy
+
+    def _fake_apply(task, capability, choice, agent_id, agent_record, module_context, **kwargs):
+        failure_reason = kwargs.get("failure_reason")
+        if failure_reason in {"provider_timeout", "api_timeout", "tcp_timeout"} and agent_id == "code-main":
+            return "code-alt", orchestrator.registry.get("code-alt"), {"reason": "forced_test_fallback"}
+        return original_apply(task, capability, choice, agent_id, agent_record, module_context, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_apply_model_replacement_policy", _fake_apply)
+
+    task = Task(TaskType.CODE, TaskInput("Implement with fallback audit trail"), TaskContext("demo", ".", "main"))
+    task.required_capability = "code"
+
+    result = orchestrator.run_task(task)
+
+    audit = result.output.get("run_audit", {})
+    chain = audit.get("recovery_chain", [])
+    assert result.status == TaskStatus.DONE
+    assert audit.get("selected_route", {}).get("agent_id") == "code-main"
+    assert audit.get("final_route", {}).get("agent_id") == "code-alt"
+    assert any(step["action"] == "fallback_provider" for step in chain)
+    assert audit.get("fallback_count") >= 1

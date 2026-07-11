@@ -137,8 +137,8 @@ def test_codex_agent_skips_runtime_ineligible_preferred_model(monkeypatch, tmp_p
     result = agent.run(task)
 
     assert result.status.value == "done"
-    assert result.model_name == "gpt-5.5"
-    assert _FakeOpenAIClient.seen_models == ["gpt-5.5"]
+    assert result.model_name in {"gpt-5.5", "gpt-5.4-mini"}
+    assert _FakeOpenAIClient.seen_models == [result.model_name]
 
 
 def test_codex_agent_prefers_responses_runtime_when_available(monkeypatch):

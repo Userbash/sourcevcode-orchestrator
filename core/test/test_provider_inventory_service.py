@@ -9,6 +9,21 @@ from pathlib import Path
 from core.core.provider_inventory_service import ProviderInventoryService
 
 
+class _FakeBridge:
+    def __init__(self, status=None, ensure_result=True):
+        self._status = dict(status or {})
+        self.ensure_result = ensure_result
+        self.ensure_calls = []
+
+    @property
+    def last_bootstrap_status(self):
+        return dict(self._status)
+
+    def ensure_ready(self, model_name):
+        self.ensure_calls.append(model_name)
+        return self.ensure_result
+
+
 @pytest.fixture(autouse=True)
 def _isolate_codex_user_config(tmp_path, monkeypatch):
     codex_dir = tmp_path / 'empty_codex'
@@ -739,6 +754,7 @@ def test_provider_inventory_service_collects_local_llm_runtime(monkeypatch):
             return [type('Resident', (), {'name': 'qwen2.5:32b-instruct-q4_k_m', 'size_vram': 3221225472})()]
 
     monkeypatch.setattr('core.core.provider_inventory_service.LocalModelRuntime', _FakeRuntime)
+    monkeypatch.setattr('core.core.provider_inventory_service.LocalLLMBridge', lambda: _FakeBridge(status={"state": "ready"}))
 
     service = ProviderInventoryService()
     payload = service.collect(force_refresh=True)['local_llm']
@@ -774,6 +790,7 @@ def test_provider_inventory_service_builds_local_llm_runtime_inventory(monkeypat
             return [type('Resident', (), {'name': 'qwen2.5:0.5b', 'size_vram': 1073741824})()]
 
     monkeypatch.setattr('core.core.provider_inventory_service.LocalModelRuntime', _FakeRuntime)
+    monkeypatch.setattr('core.core.provider_inventory_service.LocalLLMBridge', lambda: _FakeBridge(status={"state": "ready"}))
 
     service = ProviderInventoryService()
     payload = service.build_provider_runtime_inventory('local_llm', force_refresh=True)
@@ -959,10 +976,19 @@ def test_provider_inventory_service_runtime_inventory_exposes_codexsale_identity
         "codex_endpoint": "https://codex.sale/backend-api/codex",
         "validated_model_count": 1,
         "fully_routable_count": 1,
+        "chat_ready_count": 1,
+        "responses_ready_count": 1,
+        "messages_ready_count": 0,
+        "messages_count_tokens_ready_count": 0,
         "fully_routable_models": ["gpt-5.4"],
+        "chat_ready_models": ["gpt-5.4"],
+        "responses_ready_models": ["gpt-5.4"],
+        "messages_ready_models": [],
+        "messages_count_tokens_ready_models": [],
         "validated_models": [{"model": "gpt-5.4", "available": True}],
         "recommended_models": {"defaults": {"best_overall": ["gpt-5.4"]}},
         "endpoint_manifest": {"provider_id": "codexsale"},
+        "endpoint_probe_summary": {"messages": {"failed_count": 1}},
         "pricing": {"gpt-5.4": {"input_usd_per_1k": 0.0015}},
         "selected_models": ["gpt-5.4"],
         "model_templates": {},
@@ -986,3 +1012,219 @@ def test_provider_inventory_service_runtime_inventory_exposes_codexsale_identity
     assert payload["endpoints"]["codex_endpoint"] == "https://codex.sale/backend-api/codex"
     assert payload["recommended_models"]["defaults"]["best_overall"] == ["gpt-5.4"]
     assert payload["pricing"]["gpt-5.4"]["input_usd_per_1k"] == 0.0015
+    assert payload["summary"]["messages_ready_models"] == 0
+    assert payload["runtime"]["messages_ready_models"] == []
+    assert payload["diagnostics"]["endpoint_probe_summary"]["messages"]["failed_count"] == 1
+
+
+def test_local_llm_force_refresh_surfaces_bridge_bootstrap(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen3:8b")
+
+    class _Health:
+        ok = False
+        status = "offline"
+        endpoint = "http://127.0.0.1:11434"
+        latency_ms = 0.0
+        attempts = 1
+        model_present = False
+        available_models = []
+        error = "connection refused"
+        status_code = None
+
+    class _Runtime:
+        def __init__(self, config):
+            self.config = config
+            self.current_endpoint = "http://127.0.0.1:11434"
+
+        def check_health_sync(self, model_name=None):
+            return _Health()
+
+        def list_resident_models_sync(self):
+            return []
+
+    bridge = _FakeBridge(status={"state": "runtime_missing", "reason": "ollama_not_installed", "container": "ai-ollama"})
+    monkeypatch.setattr("core.core.provider_inventory_service.LocalModelRuntime", _Runtime)
+    monkeypatch.setattr("core.core.provider_inventory_service.LocalLLMBridge", lambda: bridge)
+
+    service = ProviderInventoryService()
+    entry = service._local_llm_entry(force_refresh=True)
+
+    assert bridge.ensure_calls == ["qwen3:8b"]
+    assert entry.ok is False
+    assert entry.diagnostics["bootstrap"]["state"] == "runtime_missing"
+    assert entry.diagnostics["bootstrap"]["reason"] == "ollama_not_installed"
+
+
+def test_mimo_entry_reports_billing_blocked_from_live_catalog(monkeypatch):
+    monkeypatch.setenv("AI_BRIDGE_MIMO_ENABLED", "1")
+    monkeypatch.setattr(
+        "core.core.provider_inventory_service.fetch_mimo_model_catalog",
+        lambda force_refresh=False: {
+            "models": ["xiaomi/MiMo-7B-RL"],
+            "source": "live",
+            "status_code": 402,
+            "error": "Payment Required: insufficient account balance",
+        },
+    )
+    monkeypatch.setattr("core.core.provider_inventory_service.sync_mimo_native_artifacts", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr("core.core.provider_inventory_service.configured_native_mimo_models", lambda: [])
+    monkeypatch.setattr(ProviderInventoryService, "_artifact_mimo_models", lambda self: {"usable": [], "ping": []})
+    monkeypatch.setattr(ProviderInventoryService, "_generated_mimo_models", lambda self: [])
+
+    service = ProviderInventoryService()
+    entry = service._mimo_entry(force_refresh=True)
+    normalized = service._entry_to_dict(entry)
+    status = service._classify_provider_error(normalized)
+
+    assert entry.ok is False
+    assert entry.status_code == 402
+    assert entry.diagnostics["runtime_status"] == "billing_blocked"
+    assert status == "billing_blocked"
+
+
+def test_classify_provider_error_returns_runtime_missing():
+    service = ProviderInventoryService()
+
+    status = service._classify_provider_error({
+        "ok": False,
+        "error": "",
+        "diagnostics": {"bootstrap": {"state": "runtime_missing", "reason": "ollama_not_installed"}},
+    })
+
+    assert status == "runtime_missing"
+
+
+@pytest.mark.parametrize(
+    ('endpoint_name', 'status_code', 'error', 'expected_kind', 'retryable', 'model_blocked'),
+    [
+        ('messages', 503, 'Claude pool has no eligible resources', 'messages_pool_unavailable', True, False),
+        ('chat_completions', 400, 'Error from provider (Xiaomi): Unsupported model mimo-v2-omni', 'unsupported_model', False, True),
+        ('responses', 401, 'Invalid API key', 'auth_failed', False, False),
+        ('responses', 403, 'Forbidden', 'forbidden', False, False),
+        ('chat_completions', 429, 'Rate limit exceeded', 'rate_limited', True, False),
+        ('responses', 501, 'Not implemented', 'not_implemented', False, False),
+        ('chat_completions', 502, 'Bad gateway', 'upstream_unavailable', True, False),
+        ('messages_count_tokens', 400, "Model 'gpt-5.6-sol' is not available", 'model_unavailable', False, True),
+    ],
+)
+def test_provider_inventory_service_classifies_openai_probe_failures(endpoint_name, status_code, error, expected_kind, retryable, model_blocked):
+    result = ProviderInventoryService._classify_openai_probe_failure(
+        endpoint_name=endpoint_name,
+        status_code=status_code,
+        error=error,
+    )
+
+    assert result['error_kind'] == expected_kind
+    assert result['retryable'] is retryable
+    assert result['model_blocked'] is model_blocked
+    assert result['status_family'] == f'{status_code // 100}xx'
+
+
+def test_provider_inventory_service_builds_openai_endpoint_probe_summary():
+    rows = [
+        {
+            'model': 'gpt-5.6-sol',
+            'chat_completions': {'ok': True, 'endpoint_url': 'https://codex.sale/v1/chat/completions'},
+            'responses': {'ok': True, 'endpoint_url': 'https://codex.sale/v1/responses'},
+            'messages': {
+                'ok': False,
+                'skipped': False,
+                'endpoint_url': 'https://codex.sale/v1/messages',
+                'status_code': 503,
+                'error_kind': 'messages_pool_unavailable',
+                'retryable': True,
+                'model_blocked': False,
+            },
+            'messages_count_tokens': {
+                'ok': False,
+                'skipped': False,
+                'endpoint_url': 'https://codex.sale/v1/messages/count_tokens',
+                'status_code': 400,
+                'error_kind': 'model_unavailable',
+                'retryable': False,
+                'model_blocked': True,
+            },
+        },
+        {
+            'model': 'mimo-v2.5',
+            'chat_completions': {
+                'ok': False,
+                'skipped': False,
+                'endpoint_url': 'https://codex.sale/v1/chat/completions',
+                'status_code': 400,
+                'error_kind': 'unsupported_model',
+                'retryable': False,
+                'model_blocked': True,
+            },
+            'responses': {'ok': True, 'endpoint_url': 'https://codex.sale/v1/responses'},
+            'messages': {'ok': False, 'skipped': True, 'endpoint_url': '', 'error_kind': 'endpoint_not_configured'},
+            'messages_count_tokens': {'ok': False, 'skipped': True, 'endpoint_url': '', 'error_kind': 'endpoint_not_configured'},
+        },
+    ]
+    manifest = {
+        'endpoints': {
+            'chat_completions': 'https://codex.sale/v1/chat/completions',
+            'responses': 'https://codex.sale/v1/responses',
+            'messages': 'https://codex.sale/v1/messages',
+            'messages_count_tokens': 'https://codex.sale/v1/messages/count_tokens',
+        }
+    }
+
+    summary = ProviderInventoryService._build_openai_endpoint_probe_summary(rows, manifest)
+
+    assert summary['chat_completions']['configured'] is True
+    assert summary['chat_completions']['ok_count'] == 1
+    assert summary['chat_completions']['failed_count'] == 1
+    assert summary['chat_completions']['status_code_counts'] == {'400': 1}
+    assert summary['chat_completions']['error_kind_counts'] == {'unsupported_model': 1}
+    assert summary['messages']['failed_count'] == 1
+    assert summary['messages']['retryable_count'] == 1
+    assert summary['messages']['error_kind_counts'] == {'messages_pool_unavailable': 1}
+    assert summary['messages']['failed_models'] == [
+        {'model': 'gpt-5.6-sol', 'status_code': 503, 'error_kind': 'messages_pool_unavailable'}
+    ]
+    assert summary['messages_count_tokens']['model_blocked_count'] == 1
+    assert summary['messages_count_tokens']['status_code_counts'] == {'400': 1}
+    assert summary['messages_count_tokens']['skipped_count'] == 1
+
+
+def test_provider_inventory_service_openai_probe_availability_tracks_claude_surfaces():
+    row = {
+        'chat_completions': {'ok': True, 'status_code': 200, 'response_sample': 'pong'},
+        'responses': {'ok': True, 'status_code': 200, 'response_sample': 'pong'},
+        'messages': {'ok': False, 'status_code': 503, 'error': 'Claude pool has no eligible resources'},
+        'messages_count_tokens': {'ok': False, 'status_code': 400, 'error': "Model 'gpt-5.6-sol' is not available"},
+        'endpoint_failures': [
+            {'endpoint': 'messages', 'error_kind': 'messages_pool_unavailable', 'retryable': True},
+            {'endpoint': 'messages_count_tokens', 'error_kind': 'model_unavailable', 'retryable': False},
+        ],
+    }
+
+    result = ProviderInventoryService._openai_probe_availability(row)
+
+    assert result['available'] is True
+    assert result['availability'] == 'available'
+    assert result['claude_messages_ready'] is False
+    assert result['claude_count_tokens_ready'] is False
+    assert result['criteria']['messages_pool_unavailable'] is True
+    assert result['criteria']['retryable_endpoint_failure'] is True
+
+
+def test_provider_inventory_service_row_reason_maps_new_openai_error_kinds():
+    reason, remediation = ProviderInventoryService._row_reason('openai', {
+        'model': 'claude-sonnet-4-6',
+        'error_kind': 'messages_pool_unavailable',
+        'error': 'Claude pool has no eligible resources',
+        'status_code': 503,
+    })
+    assert reason == 'messages_pool_unavailable'
+    assert 'Claude messages routing disabled' in remediation
+
+    reason, remediation = ProviderInventoryService._row_reason('openai', {
+        'model': 'mimo-v2-omni',
+        'error_kind': 'unsupported_model',
+        'error': 'Error from provider (Xiaomi): Unsupported model mimo-v2-omni',
+        'status_code': 400,
+    })
+    assert reason == 'unsupported_model'
+    assert 'remove the model from this endpoint route' in remediation

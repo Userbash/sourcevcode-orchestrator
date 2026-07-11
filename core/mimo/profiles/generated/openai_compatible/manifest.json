@@ -1,5 +1,5 @@
 {
-  "generated_at": 1783493411,
+  "generated_at": 1783783915,
   "provider": "openai",
   "base_url": "https://codex.sale/v1",
   "models": [
@@ -24,12 +24,16 @@
     "mimo-v2-omni",
     "mimo-v2-pro",
     "mimo-v2.5",
-    "mimo-v2.5-pro"
+    "mimo-v2.5-pro",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra"
   ],
   "openai_family_models": [
     "gpt-5.5",
     "gpt-5.4",
-    "gpt-5.4-mini"
+    "gpt-5.4-mini",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra"
   ],
   "model_profiles": [
     "models/model__gpt-5.5.json",
@@ -53,7 +57,9 @@
     "models/model__mimo-v2-omni.json",
     "models/model__mimo-v2-pro.json",
     "models/model__mimo-v2.5.json",
-    "models/model__mimo-v2.5-pro.json"
+    "models/model__mimo-v2.5-pro.json",
+    "models/model__gpt-5.6-sol.json",
+    "models/model__gpt-5.6-terra.json"
   ],
   "combo_profiles": [
     "combinations/combo__openai__gpt-5.5.json",
@@ -77,7 +83,9 @@
     "combinations/combo__openai__mimo-v2-omni.json",
     "combinations/combo__openai__mimo-v2-pro.json",
     "combinations/combo__openai__mimo-v2.5.json",
-    "combinations/combo__openai__mimo-v2.5-pro.json"
+    "combinations/combo__openai__mimo-v2.5-pro.json",
+    "combinations/combo__openai__gpt-5.6-sol.json",
+    "combinations/combo__openai__gpt-5.6-terra.json"
   ],
   "orchestrator_templates": "orchestrator_templates.json",
   "model_template_manifest": "model_template_manifest.json",
@@ -86,7 +94,7 @@
     "provider_id": "codexsale",
     "provider_name": "Codex Sale",
     "base_url": "https://codex.sale/v1",
-    "default_model": "gpt-5.4",
+    "default_model": "gpt-5.6-sol",
     "endpoints": {
       "models": "https://codex.sale/v1/models",
       "chat_completions": "https://codex.sale/v1/chat/completions",

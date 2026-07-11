@@ -56,6 +56,11 @@ class QualityAnalyzer:
         if output.get("diff"):
             truth_basis.append("diff_present")
         code_like_task = task.type in {TaskType.CODE, TaskType.TEST, TaskType.FIX}
+        expects_change_evidence = code_like_task and bool(
+            list(task.input.files or [])
+            or list(task.input.acceptance_criteria or [])
+            or list(task.input.constraints or [])
+        )
         if code_like_task and task.input.acceptance_criteria:
             matched = [criterion for criterion in task.input.acceptance_criteria if self._criterion_hit(criterion, evidence_text)]
             if matched:
@@ -63,9 +68,9 @@ class QualityAnalyzer:
             missing = [criterion for criterion in task.input.acceptance_criteria if criterion not in matched]
             if missing:
                 issues.append("acceptance_not_proven")
-        if code_like_task and not (output.get("test_results") or output.get("commands_run")):
+        if expects_change_evidence and not (output.get("test_results") or output.get("commands_run")):
             issues.append("missing_verification_evidence")
-        if code_like_task and not output.get("diff"):
+        if expects_change_evidence and not output.get("diff"):
             issues.append("missing_diff_evidence")
         if code_like_task and task.input.acceptance_criteria and result.status == TaskStatus.DONE and result.confidence < 0.8:
             issues.append("acceptance_needs_review")

@@ -14,7 +14,7 @@ task = Task(
         files=["core/core/orchestrator.py"],
         constraints=["No automatic code changes.", "Generate advisory report only."]
     ),
-    context={"repo_path": "/var/home/sanya/Hebrew-web"}
+    context={"repo_path": "."}
 )
 
 print(f"[*] Drafting task: {task.task_id}")

@@ -1,43 +1,49 @@
 {
-  "generated_at": 1783493411,
+  "generated_at": 1783783915,
   "provider": "openai",
   "base_url": "https://codex.sale/v1",
-  "default_model": "gpt-5.4",
+  "default_model": "gpt-5.6-sol",
   "summary": {
-    "total_models": 22,
-    "routable_count": 0,
-    "discovered_count": 14,
+    "total_models": 24,
+    "routable_count": 6,
+    "discovered_count": 0,
     "blocked_count": 0,
-    "partial_count": 0,
+    "partial_count": 7,
     "non_chat_count": 0,
-    "probe_failed_count": 8
+    "probe_failed_count": 11
   },
   "status_index": {
-    "discovered": [
+    "routable": [
       "gpt-5.5",
+      "gpt-5.4",
       "gpt-5.4-mini",
-      "qwen3.5-plus",
-      "qwen3.6-plus",
-      "qwen3.7-max",
-      "qwen3.7-plus",
-      "kimi-k2.5",
-      "kimi-k2.6",
-      "glm-5",
-      "glm-5.1",
-      "mimo-v2-omni",
-      "mimo-v2-pro",
-      "mimo-v2.5",
-      "mimo-v2.5-pro"
+      "deepseek-v4-flash",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra"
     ],
     "probe_failed": [
-      "gpt-5.4",
       "claude-sonnet-4-6",
       "claude-opus-4-6",
       "claude-opus-4-7",
       "claude-opus-4-8",
       "claude-haiku-4-5",
-      "deepseek-v4-flash",
-      "deepseek-v4-pro"
+      "qwen3.7-max",
+      "qwen3.7-plus",
+      "kimi-k2.5",
+      "mimo-v2-omni",
+      "mimo-v2-pro",
+      "mimo-v2.5"
+    ],
+    "chat_only": [
+      "deepseek-v4-pro",
+      "qwen3.6-plus",
+      "glm-5",
+      "glm-5.1",
+      "mimo-v2.5-pro"
+    ],
+    "responses_only": [
+      "qwen3.5-plus",
+      "kimi-k2.6"
     ]
   },
   "models": [
@@ -45,11 +51,11 @@
       "model_name": "gpt-5.5",
       "family": "gpt",
       "tier": "frontier",
-      "status": "discovered",
+      "status": "routable",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
-      "kernel_eligible": false,
+      "kernel_eligible": true,
       "fallback_candidate": true,
       "preferred_task_types": [
         "code",
@@ -78,24 +84,48 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
-        "responses": false
+        "chat_completions": true,
+        "responses": true
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        }
       }
     },
     {
       "model_name": "gpt-5.4",
       "family": "gpt",
       "tier": "standard",
-      "status": "probe_failed",
+      "status": "routable",
       "discovered": true,
       "chat_compatible": true,
-      "default_candidate": true,
-      "kernel_eligible": false,
-      "fallback_candidate": false,
+      "default_candidate": false,
+      "kernel_eligible": true,
+      "fallback_candidate": true,
       "preferred_task_types": [
         "code",
         "review",
@@ -122,23 +152,35 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
-        "responses": false
+        "chat_completions": true,
+        "responses": true
       },
       "probe": {
         "chat_completions": {
-          "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
-          "response_sample": "",
-          "endpoint": "chat_completions"
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
         },
         "responses": {
-          "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
-          "response_sample": "",
-          "endpoint": "responses"
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
         }
       }
     },
@@ -146,11 +188,11 @@
       "model_name": "gpt-5.4-mini",
       "family": "gpt",
       "tier": "mini",
-      "status": "discovered",
+      "status": "routable",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
-      "kernel_eligible": false,
+      "kernel_eligible": true,
       "fallback_candidate": true,
       "preferred_task_types": [
         "code",
@@ -180,12 +222,36 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
-        "responses": false
+        "chat_completions": true,
+        "responses": true
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        }
       }
     },
     {
@@ -229,17 +295,29 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "chat_completions"
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         },
         "responses": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "responses"
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         }
       }
     },
@@ -285,17 +363,29 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "chat_completions"
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         },
         "responses": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "responses"
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         }
       }
     },
@@ -341,17 +431,29 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "chat_completions"
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         },
         "responses": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "responses"
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         }
       }
     },
@@ -397,17 +499,29 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "chat_completions"
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         },
         "responses": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "responses"
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         }
       }
     },
@@ -456,17 +570,29 @@
       "probe": {
         "chat_completions": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "chat_completions"
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         },
         "responses": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 503,
+          "error": "\u0421\u0435\u0440\u0432\u0438\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043f\u0435\u0440\u0435\u0433\u0440\u0443\u0436\u0435\u043d. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0440\u043e\u0441 \u0447\u0435\u0440\u0435\u0437 \u043c\u0438\u043d\u0443\u0442\u0443.",
           "response_sample": "",
-          "endpoint": "responses"
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "upstream_unavailable",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "5xx"
         }
       }
     },
@@ -474,12 +600,12 @@
       "model_name": "deepseek-v4-flash",
       "family": "deepseek",
       "tier": "economy",
-      "status": "probe_failed",
+      "status": "routable",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
-      "kernel_eligible": false,
-      "fallback_candidate": false,
+      "kernel_eligible": true,
+      "fallback_candidate": true,
       "preferred_task_types": [
         "code",
         "test",
@@ -506,23 +632,35 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
-        "responses": false
+        "chat_completions": true,
+        "responses": true
       },
       "probe": {
         "chat_completions": {
-          "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
-          "response_sample": "",
-          "endpoint": "chat_completions"
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
         },
         "responses": {
-          "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
-          "response_sample": "",
-          "endpoint": "responses"
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
         }
       }
     },
@@ -530,12 +668,12 @@
       "model_name": "deepseek-v4-pro",
       "family": "deepseek",
       "tier": "frontier",
-      "status": "probe_failed",
+      "status": "chat_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": false,
+      "fallback_candidate": true,
       "preferred_task_types": [
         "code",
         "test",
@@ -564,23 +702,35 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
+        "chat_completions": true,
         "responses": false
       },
       "probe": {
         "chat_completions": {
-          "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
-          "response_sample": "",
-          "endpoint": "chat_completions"
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
         },
         "responses": {
           "ok": false,
-          "status_code": null,
-          "error": "cannot schedule new futures after interpreter shutdown",
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
           "response_sample": "",
-          "endpoint": "responses"
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
         }
       }
     },
@@ -588,12 +738,12 @@
       "model_name": "qwen3.5-plus",
       "family": "qwen",
       "tier": "standard",
-      "status": "discovered",
+      "status": "responses_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "test",
@@ -621,18 +771,42 @@
       "endpoint_capabilities": {
         "models": true,
         "chat_completions": false,
-        "responses": false
+        "responses": true
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        }
       }
     },
     {
       "model_name": "qwen3.6-plus",
       "family": "qwen",
       "tier": "standard",
-      "status": "discovered",
+      "status": "chat_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
@@ -664,24 +838,48 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
+        "chat_completions": true,
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "qwen3.7-max",
       "family": "qwen",
       "tier": "frontier",
-      "status": "discovered",
+      "status": "probe_failed",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "test",
@@ -714,20 +912,44 @@
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "qwen3.7-plus",
       "family": "qwen",
       "tier": "standard",
-      "status": "discovered",
+      "status": "probe_failed",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "test",
@@ -758,20 +980,44 @@
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "kimi-k2.5",
       "family": "kimi",
       "tier": "standard",
-      "status": "discovered",
+      "status": "probe_failed",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "review",
@@ -800,20 +1046,44 @@
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "kimi-k2.6",
       "family": "kimi",
       "tier": "standard",
-      "status": "discovered",
+      "status": "responses_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "review",
@@ -839,18 +1109,42 @@
       "endpoint_capabilities": {
         "models": true,
         "chat_completions": false,
-        "responses": false
+        "responses": true
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        }
       }
     },
     {
       "model_name": "glm-5",
       "family": "glm",
       "tier": "standard",
-      "status": "discovered",
+      "status": "chat_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
@@ -880,19 +1174,43 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
+        "chat_completions": true,
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "glm-5.1",
       "family": "glm",
       "tier": "standard",
-      "status": "discovered",
+      "status": "chat_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
@@ -922,24 +1240,48 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
+        "chat_completions": true,
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "mimo-v2-omni",
       "family": "mimo",
       "tier": "standard",
-      "status": "discovered",
+      "status": "probe_failed",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "review",
@@ -968,20 +1310,44 @@
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 400,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043d\u0435\u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "invalid_request",
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "mimo-v2-pro",
       "family": "mimo",
       "tier": "frontier",
-      "status": "discovered",
+      "status": "probe_failed",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "review",
@@ -1011,20 +1377,44 @@
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 400,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u0442 \u043d\u0435\u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0435 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "invalid_request",
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "mimo-v2.5",
       "family": "mimo",
       "tier": "standard",
-      "status": "discovered",
+      "status": "probe_failed",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
       "kernel_eligible": false,
-      "fallback_candidate": true,
+      "fallback_candidate": false,
       "preferred_task_types": [
         "code",
         "review",
@@ -1053,15 +1443,39 @@
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
       }
     },
     {
       "model_name": "mimo-v2.5-pro",
       "family": "mimo",
       "tier": "frontier",
-      "status": "discovered",
+      "status": "chat_only",
       "discovered": true,
       "chat_compatible": true,
       "default_candidate": false,
@@ -1092,12 +1506,172 @@
       },
       "endpoint_capabilities": {
         "models": true,
-        "chat_completions": false,
+        "chat_completions": true,
         "responses": false
       },
       "probe": {
-        "chat_completions": {},
-        "responses": {}
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": false,
+          "status_code": 429,
+          "error": "\u0417\u0430\u043f\u0440\u043e\u0441 \u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0432\u044b\u043f\u043e\u043b\u043d\u0438\u0442\u044c. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u0437\u0436\u0435.",
+          "response_sample": "",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": "rate_limited",
+          "retryable": true,
+          "model_blocked": false,
+          "status_family": "4xx"
+        }
+      }
+    },
+    {
+      "model_name": "gpt-5.6-sol",
+      "family": "gpt",
+      "tier": "standard",
+      "status": "routable",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": true,
+      "kernel_eligible": true,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "docs",
+        "test"
+      ],
+      "strengths": [
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "code_parallel",
+        "research_primary",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.98,
+        "review_primary": 0.96,
+        "plan_primary": 0.94,
+        "test_primary": 0.9,
+        "docs_primary": 0.94,
+        "research_primary": 0.96
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": true,
+        "responses": true
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        }
+      }
+    },
+    {
+      "model_name": "gpt-5.6-terra",
+      "family": "gpt",
+      "tier": "standard",
+      "status": "routable",
+      "discovered": true,
+      "chat_compatible": true,
+      "default_candidate": false,
+      "kernel_eligible": true,
+      "fallback_candidate": true,
+      "preferred_task_types": [
+        "code",
+        "review",
+        "plan",
+        "docs",
+        "test"
+      ],
+      "strengths": [
+        "coding",
+        "review"
+      ],
+      "recommended_roles": [
+        "code_parallel",
+        "research_primary",
+        "review_primary"
+      ],
+      "role_scores": {
+        "code_parallel": 0.98,
+        "review_primary": 0.96,
+        "plan_primary": 0.94,
+        "test_primary": 0.9,
+        "docs_primary": 0.94,
+        "research_primary": 0.96
+      },
+      "endpoint_capabilities": {
+        "models": true,
+        "chat_completions": true,
+        "responses": true
+      },
+      "probe": {
+        "chat_completions": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "chat_completions",
+          "endpoint_url": "https://codex.sale/v1/chat/completions",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        },
+        "responses": {
+          "ok": true,
+          "status_code": 200,
+          "error": null,
+          "response_sample": "ok",
+          "endpoint": "responses",
+          "endpoint_url": "https://codex.sale/v1/responses",
+          "skipped": false,
+          "error_kind": null,
+          "retryable": false,
+          "model_blocked": false,
+          "status_family": "2xx"
+        }
       }
     }
   ]

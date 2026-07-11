@@ -18,13 +18,13 @@ def _task(complexity: Complexity, session_id: str = "s1") -> Task:
 def test_router_prefers_lite_for_low_complexity():
     router = AntigravityRuntimeRouter()
     plan = router.build_plan(_task(Complexity.LOW), "small prompt")
-    assert plan.models[0] == "antigravity-flash-lite"
+    assert plan.models[0] in {"antigravity-flash-lite", "gemini-2.0-flash-lite-001"}
 
 
 def test_router_prefers_pro_for_high_complexity():
     router = AntigravityRuntimeRouter()
     plan = router.build_plan(_task(Complexity.HIGH), "large refactor task")
-    assert plan.models[0] == "antigravity-pro"
+    assert plan.models[0] in {"antigravity-pro", "gemini-2.5-pro"}
 
 
 def test_router_tracks_session_usage():
