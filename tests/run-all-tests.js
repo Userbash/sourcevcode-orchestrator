@@ -94,10 +94,10 @@ class MasterTestRunner {
         this.log('\nVerifying project paths...', 'cyan');
 
         const pathsToCheck = [
-            { path: `${this.projectRoot}/core`, type: 'dir', name: 'Core directory' },
-            { path: `${this.projectRoot}/core/Dockerfile`, type: 'file', name: 'Core Dockerfile' },
+            { path: `${this.projectRoot}/go-core`, type: 'dir', name: 'Go core directory' },
+            { path: `${this.projectRoot}/go-core/Dockerfile`, type: 'file', name: 'Go core Dockerfile' },
             { path: `${this.projectRoot}/docker-compose.ai.yml`, type: 'file', name: 'AI compose file' },
-            { path: `${this.projectRoot}/scripts/bootstrap_ai_stack.sh`, type: 'file', name: 'Bootstrap script' },
+            { path: `${this.projectRoot}/go-core/cmd/orchestrator/main.go`, type: 'file', name: 'Go bootstrap CLI entrypoint' },
             { path: `${this.projectRoot}/tests/run-all-tests.js`, type: 'file', name: 'Master test runner' },
             { path: `${this.projectRoot}/.env`, type: 'file', name: '.env file' },
             { path: `${this.projectRoot}/.env.bridge`, type: 'file', name: '.env.bridge file' },
@@ -131,7 +131,7 @@ class MasterTestRunner {
         this.log('\nChecking build files...', 'cyan');
 
         const files = [
-            { path: `${this.projectRoot}/core/Dockerfile`, name: 'Core Dockerfile', required: ['FROM', 'RUN', 'CMD'] },
+            { path: `${this.projectRoot}/go-core/Dockerfile`, name: 'Go core Dockerfile', required: ['FROM', 'RUN', 'ENTRYPOINT'] },
             { path: `${this.projectRoot}/docker-compose.ai.yml`, name: 'AI compose file', required: ['services:', 'orchestrator:', 'rabbitmq:', 'db:'] }
         ];
 

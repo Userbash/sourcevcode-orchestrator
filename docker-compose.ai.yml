@@ -9,114 +9,37 @@ x-default-logging: &default-logging
 
 services:
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: ai_bridge_db
     environment:
-      ORCHESTRATOR_PORT: "8000"
       POSTGRES_USER: ${AI_BRIDGE_POSTGRES_USER:?set AI_BRIDGE_POSTGRES_USER in .env or .env.*}
       POSTGRES_PASSWORD: ${AI_BRIDGE_POSTGRES_PASSWORD:?set AI_BRIDGE_POSTGRES_PASSWORD in .env or .env.*}
       POSTGRES_DB: ${AI_BRIDGE_POSTGRES_DB:-ai_bridge}
-    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=200", "-c", "effective_cache_size=768MB", "-c", "work_mem=16MB"]
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=200
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - wal_level=logical
+      - -c
+      - track_commit_timestamp=on
     ports:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-  orchestrator:
-    build:
-      context: .
-      dockerfile: ./core/Dockerfile
-    env_file:
-      - ./.env
-      - ./.env.gemini.local
-      - ./.env.bridge
-    container_name: hebrew_ai_orchestrator
-    environment:
-      ORCHESTRATOR_PORT: "8000"
-      PYTHONPATH: /app
-      PATH: ${HOME}/.npm-packages/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app/.local/bin
-      TESTING: "false"
-      AI_BRIDGE_AUTOSTART_LOCAL_LLM: "false"
-      AI_BRIDGE_AUTOSTART_EASY_DIFFUSION: ${AI_BRIDGE_AUTOSTART_EASY_DIFFUSION:-true}
-      AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION: "false"
-      AI_BRIDGE_LOCAL_LLM_ENDPOINT: http://host.containers.internal:11434
-      AI_BRIDGE_LOCAL_LLM_PORT: "11434"
-      AI_BRIDGE_LOCAL_LLM_MODEL: ${AI_BRIDGE_LOCAL_LLM_MODEL:-qwen2.5:32b-instruct-q4_k_m}
-      AI_KERNEL_ENABLED: ${AI_KERNEL_ENABLED:-true}
-      AI_KERNEL_BASE_URL: ${AI_KERNEL_BASE_URL:-http://host.containers.internal:8012/v1}
-      AI_KERNEL_API_KEY: ${AI_KERNEL_API_KEY:?set AI_KERNEL_API_KEY in .env or .env.*}
-      AI_KERNEL_MODEL_ALIAS: ${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}
-      AI_KERNEL_TCP_PROBE_HOSTS: ${AI_KERNEL_TCP_PROBE_HOSTS:-host.containers.internal:8012}
-      AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE: ${AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE:-true}
-      AI_BRIDGE_HOST_WORKSPACE_ROOT: ${AI_BRIDGE_HOST_WORKSPACE_ROOT:-.}
-      AI_KERNEL_HOST_HOME: ${AI_KERNEL_HOST_HOME:-${HOME}}
-      AI_BRIDGE_WORKSPACE_ROOT: ${AI_BRIDGE_WORKSPACE_ROOT:-/workspace}
-      AI_BRIDGE_EASY_DIFFUSION_START_ENABLED: ${AI_BRIDGE_EASY_DIFFUSION_START_ENABLED:-true}
-      AI_BRIDGE_EASY_DIFFUSION_URL: ${AI_BRIDGE_EASY_DIFFUSION_URL:-http://host.containers.internal:9000}
-      AI_BRIDGE_EASY_DIFFUSION_COMPOSE_FILE: ${AI_BRIDGE_EASY_DIFFUSION_COMPOSE_FILE:-./docker-compose.easy-diffusion.yml}
-      AI_BRIDGE_EASY_DIFFUSION_SERVICE_NAME: ${AI_BRIDGE_EASY_DIFFUSION_SERVICE_NAME:-easy-diffusion}
-      AI_BRIDGE_EASY_DIFFUSION_MODELS: ${AI_BRIDGE_EASY_DIFFUSION_MODELS:-}
-      AI_BRIDGE_EASY_DIFFUSION_DEFAULT_MODEL: ${AI_BRIDGE_EASY_DIFFUSION_DEFAULT_MODEL:-}
-      AI_BRIDGE_MEMORY_ENABLED: "true"
-      AI_BRIDGE_MEMORY_DATABASE_URL: postgresql+psycopg2://${AI_BRIDGE_POSTGRES_USER:?set AI_BRIDGE_POSTGRES_USER in .env or .env.*}:${AI_BRIDGE_POSTGRES_PASSWORD:?set AI_BRIDGE_POSTGRES_PASSWORD in .env or .env.*}@db:5432/${AI_BRIDGE_POSTGRES_DB:-ai_bridge}
-      AI_BRIDGE_RABBITMQ_URL: amqp://${AI_BRIDGE_RABBITMQ_USER:?set AI_BRIDGE_RABBITMQ_USER in .env or .env.*}:${AI_BRIDGE_RABBITMQ_PASSWORD:?set AI_BRIDGE_RABBITMQ_PASSWORD in .env or .env.*}@rabbitmq:5672/
-      AI_BRIDGE_MESSAGE_BUS_BACKEND: rabbitmq
-      AI_BRIDGE_MEMORY_STORE_DIR: /app/memory_store
-      AI_BRIDGE_LIVE_MODEL_PROBE: ${AI_BRIDGE_LIVE_MODEL_PROBE:-false}
-      AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS: ${AI_BRIDGE_REQUIRE_EXTERNAL_SCANNERS:-false}
-      AI_BRIDGE_DISABLE_SOURCECRAFT: ${AI_BRIDGE_DISABLE_SOURCECRAFT:-false}
-      AI_BRIDGE_OPENAI_AUTO_MODEL: ${AI_BRIDGE_OPENAI_AUTO_MODEL:-true}
-      AI_BRIDGE_ENABLE_VOICE: "false"
-      AI_BRIDGE_AUTO_APPROVE: "true"
-      AI_BRIDGE_CONFIRMATION_POLICY: "full_auto"
-      OPENAI_SESSION_TOKEN_BUDGET: ${OPENAI_SESSION_TOKEN_BUDGET:-120000}
-      AI_BRIDGE_ANTIGRAVITY_PROXY_URL: ${AI_BRIDGE_ANTIGRAVITY_PROXY_URL:-http://host.containers.internal:8765}
-      NODE_PATH: ${HOME}/.npm-packages/lib/node_modules
-    command:
-      - sh
-      - -lc
-      - |
-        export PATH=${HOME}/.npm-packages/bin:$$PATH:/app/.local/bin
-        export NODE_PATH=${HOME}/.npm-packages/lib/node_modules$${NODE_PATH:+:$$NODE_PATH}
-        export PYTHONPATH=/app
-        export AI_BRIDGE_MEMORY_ENABLED=true
-        export AI_BRIDGE_MEMORY_DATABASE_URL=postgresql+psycopg2://${AI_BRIDGE_POSTGRES_USER:?set AI_BRIDGE_POSTGRES_USER in .env or .env.*}:${AI_BRIDGE_POSTGRES_PASSWORD:?set AI_BRIDGE_POSTGRES_PASSWORD in .env or .env.*}@db:5432/${AI_BRIDGE_POSTGRES_DB:-ai_bridge}
-        export AI_BRIDGE_RABBITMQ_URL=amqp://${AI_BRIDGE_RABBITMQ_USER:?set AI_BRIDGE_RABBITMQ_USER in .env or .env.*}:${AI_BRIDGE_RABBITMQ_PASSWORD:?set AI_BRIDGE_RABBITMQ_PASSWORD in .env or .env.*}@rabbitmq:5672/
-        export AI_BRIDGE_MESSAGE_BUS_BACKEND=rabbitmq
-
-
-        if [ -f /app/scripts/migrate_themes_to_pg.py ]; then
-          python3 /app/scripts/migrate_themes_to_pg.py || echo "Migration failed or unnecessary."
-        fi
-
-        exec python3 -m core.scripts.orchestrator_daemon
-    ports:
-      - "${ORCHESTRATOR_PORT:-8000}:8000"
-    volumes:
-      - core_memory:/app/memory_store
-      - ${HOME}/.gemini:/root/.gemini:z
-      - ${HOME}/.antigravity:/root/.antigravity:z
-      - ${HOME}/.npm-packages:${HOME}/.npm-packages:ro,z
-      - ./.env.bridge:/app/.env.bridge:ro,z
-      - ./scripts:/app/scripts:ro
-      - ./.tooling:/app/.tooling:ro,z
-      - .:/workspace:z
-    depends_on:
-      db:
-        condition: service_started
-      rabbitmq:
-        condition: service_healthy
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
-      interval: 15s
-      timeout: 8s
-      retries: 20
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
-    labels:
-      com.hebrew.service: "orchestrator"
-      com.hebrew.component: "ai-bridge"
-      com.hebrew.log_pipeline: "loki"
     logging: *default-logging
 
   rabbitmq:
@@ -136,8 +59,156 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
+  local_llm:
+    image: ollama/ollama:latest
+    container_name: ai_bridge_local_llm
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+    ports:
+      - "${AI_BRIDGE_LOCAL_LLM_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+    logging: *default-logging
+
+  local_llm_init:
+    image: curlimages/curl:8.8.0
+    container_name: ai_bridge_local_llm_init
+    environment:
+      LOCAL_MODEL: ${AI_BRIDGE_LOCAL_LLM_MODEL:-qwen2.5:32b-instruct-q4_k_m}
+    depends_on:
+      local_llm:
+        condition: service_healthy
+    command:
+      - sh
+      - -ec
+      - |
+        echo "Waiting for Ollama model registry..."
+        until curl -fsS http://local_llm:11434/api/tags >/dev/null; do sleep 2; done
+        if curl -fsS http://local_llm:11434/api/tags | grep -F '"name":"'"${LOCAL_MODEL}"'"' >/dev/null; then
+          echo "Model ${LOCAL_MODEL} already present"
+        else
+          echo "Pulling ${LOCAL_MODEL}"
+          curl -fsS http://local_llm:11434/api/pull -d '{"name":"'"${LOCAL_MODEL}"'","stream":false}' >/tmp/local_llm_pull.json
+        fi
+        echo "Warming ${LOCAL_MODEL}"
+        curl -fsS http://local_llm:11434/api/generate -d '{"model":"'"${LOCAL_MODEL}"'","prompt":"","stream":false,"keep_alive":900}' >/tmp/local_llm_warm.json
+    restart: "no"
+    logging: *default-logging
+
+  ai_kernel:
+    build:
+      context: .
+      dockerfile: docker/ai-kernel/Dockerfile
+    container_name: ai_bridge_ai_kernel
+    environment:
+      AI_KERNEL_PORT: "8012"
+      AI_KERNEL_HOST: 0.0.0.0
+      AI_KERNEL_MODEL_ALIAS: ${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}
+      AI_KERNEL_N_CTX: ${AI_KERNEL_N_CTX:-8192}
+      AI_KERNEL_N_THREADS: ${AI_KERNEL_N_THREADS:-16}
+      AI_KERNEL_N_GPU_LAYERS: ${AI_KERNEL_N_GPU_LAYERS:-0}
+    ports:
+      - "${AI_KERNEL_PORT:-8012}:8012"
+    volumes:
+      - ai_kernel_models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8012/v1/models"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    logging: *default-logging
+
+  orchestrator:
+    build:
+      context: ./go-core
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+      - ./.env.gemini.local
+      - ./.env.bridge
+    container_name: hebrew_ai_orchestrator
+    environment:
+      ORCHESTRATOR_PORT: "8000"
+      GO_CORE_PROVIDER_TIMEOUT: ${GO_CORE_PROVIDER_TIMEOUT:-120s}
+      GO_CORE_DB_BACKUP_DIR: /app/db_backups
+      GO_CORE_DB_BACKUP_INTERVAL: ${GO_CORE_DB_BACKUP_INTERVAL:-10m}
+      GO_CORE_DB_GUARD_INTERVAL: ${GO_CORE_DB_GUARD_INTERVAL:-30s}
+      GO_CORE_DB_BACKUP_KEEP: ${GO_CORE_DB_BACKUP_KEEP:-48}
+      AI_BRIDGE_MEMORY_ENABLED: "true"
+      AI_BRIDGE_MEMORY_DATABASE_URL: postgresql://${AI_BRIDGE_POSTGRES_USER}:${AI_BRIDGE_POSTGRES_PASSWORD}@db:5432/${AI_BRIDGE_POSTGRES_DB:-ai_bridge}
+      AI_BRIDGE_RABBITMQ_URL: amqp://${AI_BRIDGE_RABBITMQ_USER}:${AI_BRIDGE_RABBITMQ_PASSWORD}@rabbitmq:5672/
+      AI_BRIDGE_MESSAGE_BUS_BACKEND: rabbitmq
+      AI_BRIDGE_LOCAL_LLM_ENDPOINT: http://local_llm:11434
+      AI_BRIDGE_LOCAL_LLM_MODEL: ${AI_BRIDGE_LOCAL_LLM_MODEL:-qwen2.5:32b-instruct-q4_k_m}
+      AI_KERNEL_BASE_URL: ${AI_KERNEL_BASE_URL:-http://ai_kernel:8012/v1}
+      AI_KERNEL_API_KEY: ${AI_KERNEL_API_KEY:-}
+      AI_KERNEL_MODEL_ALIAS: ${AI_KERNEL_MODEL_ALIAS:-hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m}
+    command:
+      - serve
+      - --addr
+      - 0.0.0.0:8000
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    volumes:
+      - pg_backups:/app/db_backups
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      local_llm:
+        condition: service_healthy
+      local_llm_init:
+        condition: service_completed_successfully
+      ai_kernel:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/orchestrator", "healthcheck"]
+      interval: 15s
+      timeout: 8s
+      retries: 20
+    restart: unless-stopped
+    labels:
+      com.hebrew.service: "orchestrator"
+      com.hebrew.component: "ai-bridge"
+      com.hebrew.log_pipeline: "loki"
+    logging: *default-logging
+
+  model_registry:
+    build:
+      context: .
+      dockerfile: docker/model-registry/Dockerfile
+    container_name: ai_bridge_model_registry
+    environment:
+      ORCHESTRATOR_URL: http://orchestrator:8000
+      MODEL_REGISTRY_PORT: "8090"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    ports:
+      - "${AI_BRIDGE_MODEL_REGISTRY_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    logging: *default-logging
+
 volumes:
-  core_memory:
-    name: ${AI_BRIDGE_MEMORY_VOLUME_NAME:-hebrew_core_memory}
   pg_data:
     name: ${AI_BRIDGE_PG_DATA_VOLUME_NAME:-hebrew_pg_data}
+  pg_backups:
+    name: ${AI_BRIDGE_PG_BACKUP_VOLUME_NAME:-hebrew_pg_backups}
+  ollama_data:
+    name: ${AI_BRIDGE_OLLAMA_VOLUME_NAME:-hebrew_ollama_data}
+  ai_kernel_models:
+    name: ${AI_KERNEL_MODELS_VOLUME_NAME:-hebrew_ai_kernel_models}

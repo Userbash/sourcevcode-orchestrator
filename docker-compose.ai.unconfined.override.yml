@@ -1,5 +1,16 @@
 services:
-  agent:
+  orchestrator:
     security_opt:
       - seccomp=unconfined
-      - apparmor=unconfined
+      - label=disable
+    userns_mode: host
+    privileged: true
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+
+  model_registry:
+    security_opt:
+      - seccomp=unconfined
+      - label=disable
+    userns_mode: host

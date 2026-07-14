@@ -46,6 +46,25 @@ Examples:
 
 ## 4. Required Validation Before PR
 
+## 4.1 TDD-First Policy
+
+All production changes must follow a test-first workflow:
+
+- Write or update a failing test before changing production code.
+- Reproduce every bug with an automated test before implementing the fix.
+- Prefer small unit tests first, then add integration or smoke coverage for behavior that crosses process, network, database, or filesystem boundaries.
+- Treat code without clear, maintainable tests as incomplete work.
+- Keep code strongly typed, readable, and minimal. Add short English comments only where the intent is not obvious from the code itself.
+
+Minimum expected test layers:
+
+- Unit tests for selection logic, parsing, normalization, policy, and branching behavior.
+- Integration tests for provider wiring, persistence, transport, and process boundaries.
+- Smoke or e2e tests for critical runtime paths such as bootstrap, health, provider readiness, and request execution.
+
+Before opening a PR, run the smallest relevant failing test first, then the affected package suite, then the broader validation set.
+
+
 Run these checks locally:
 
 ```bash

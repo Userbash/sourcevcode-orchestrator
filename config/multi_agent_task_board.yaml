@@ -9,7 +9,7 @@ workflow:
         - "apply_patch create/update/delete passes"
         - "targeted test runner works"
       commands:
-        - "python3 scripts/runtime/preflight_userns.py"
+        - "go run ./go-core/cmd/orchestrator runtime-preflight"
     - name: retrieval_contract
       owner: lead_ai
       parallel: false

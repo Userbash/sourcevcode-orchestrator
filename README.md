@@ -2,6 +2,9 @@
 
 SourceVCode Orchestrator is the runtime control plane for this repository. It accepts user tasks, normalizes noisy input, decides how work should be split, routes each task to the right agent or provider, and returns one merged result with trace data, validation state, and runtime diagnostics.
 
+The active daemon is `go-core`. Docker Compose and the Go bootstrap command build
+and run the binary; the remaining `core/` Python tree is migration-only.
+
 The current codebase is built around one active path: structured task orchestration for engineering work. Older descriptions that treated the repository as a general chat bridge, a mixed frontend stack, or a loose collection of experiments are no longer accurate.
 
 ## What the runtime does today
@@ -60,22 +63,25 @@ Older text also gave too much weight to compatibility paths. Compatibility suppo
 
 ## Repository layout
 
-- `core/` runtime orchestration code, agents, modules, and tests
-- `scripts/` local bootstrap, diagnostics, and operational helpers
+- `go-core/` active orchestration runtime, provider clients, transport, and tests
+- `core/` legacy Python modules still awaiting feature-complete Go ports
 - `docs/` architecture, operational notes, and release-oriented documentation
 - `docker-compose.ai.yml` local stack definition
 
 ## Start the stack
 
+For an existing plain PostgreSQL 16 container that must be switched to `pgvector/pgvector:pg16` without deleting the database volume, use `./bin/migrate-db-to-pgvector.sh`. The script creates a logical backup first, refuses unsafe cross-major in-place reuse, recreates only the `db` service, and runs `CREATE EXTENSION IF NOT EXISTS vector;`.
+
+
 ```bash
-bash scripts/bootstrap_ai_stack.sh
+./go-core/orchestrator bootstrap
 ```
 
 Optional flags:
 
 ```bash
-bash scripts/bootstrap_ai_stack.sh --agy-login
-bash scripts/bootstrap_ai_stack.sh --model qwen2.5:7b-instruct
+./go-core/orchestrator bootstrap --skip-ai-kernel
+./go-core/orchestrator bootstrap --model qwen2.5:7b-instruct
 ```
 
 ## Runtime endpoints
@@ -88,26 +94,18 @@ bash scripts/bootstrap_ai_stack.sh --model qwen2.5:7b-instruct
 
 ## Development commands
 
-Run orchestrator tests:
+Run and verify the active orchestrator:
 
-```bash
-python3 -m pytest core/test
+```sh
+cd go-core
+go test ./...
+go vet ./...
+go build ./cmd/orchestrator
 ```
 
-Run focused orchestrator regression suites:
-
-```bash
-python3 -m pytest core/test/test_orchestrator.py -q
-python3 -m pytest core/test/test_ai_bridge_orchestrator_protocol.py -q
-```
-
-Provider diagnostics:
-
-```bash
-python3 -m core.scripts.verify_openai_bridge
-python3 -m core.scripts.verify_provider_stack
-python3 -m core.scripts.verify_antigravity_keys
-```
+Live provider diagnostics are exposed at
+`GET /providers/runtime_inventory` and via `providers.runtime_inventory.get`
+on `/control/ws`.
 
 ## Documentation guide
 
