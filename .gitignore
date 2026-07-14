@@ -141,3 +141,4 @@ config/*.local.yaml
 *.credentials
 secrets/
 **/__pycache__/
+.gocache/
