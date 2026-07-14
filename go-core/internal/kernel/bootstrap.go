@@ -74,6 +74,8 @@ func registerDefaultAgents(registry *Registry, configs map[string]agents.OpenAIC
 	registerProviderAgent := func(descriptor agents.AgentDescriptor, config agents.OpenAICompatibleConfig) {
 		registry.RegisterAgent(agents.NewOpenAICompatibleAgent(descriptor, config))
 	}
+	cloudProvider := agents.PreferredCloudProvider(configs)
+	cloudConfig := configs[cloudProvider]
 
 	registerProviderAgent(agents.AgentDescriptor{
 		ID: "orchestrator", Type: "orchestration",
@@ -84,10 +86,10 @@ func registerDefaultAgents(registry *Registry, configs map[string]agents.OpenAIC
 	registerProviderAgent(agents.AgentDescriptor{ID: "planner-mistral", Type: "planning", Capabilities: []string{"plan", "review"}}, configs["mistral"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "coder-local", Type: "coding", Capabilities: []string{"code", "fix", "test"}}, configs["local"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "coder-ai-kernel", Type: "coding", Capabilities: []string{"code", "fix", "review", "test"}}, configs["ai_kernel"])
-	registerProviderAgent(agents.AgentDescriptor{ID: "coder-openai", Type: "coding", Capabilities: []string{"code", "fix", "review", "test"}}, configs["openai"])
+	registerProviderAgent(agents.AgentDescriptor{ID: "coder-openai", Type: "coding", Capabilities: []string{"code", "fix", "review", "test"}}, cloudConfig)
 	registerProviderAgent(agents.AgentDescriptor{ID: "reviewer-local", Type: "review", Capabilities: []string{"review"}}, configs["local"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "reviewer-ai-kernel", Type: "review", Capabilities: []string{"review", "security"}}, configs["ai_kernel"])
-	registerProviderAgent(agents.AgentDescriptor{ID: "reviewer-openai", Type: "review", Capabilities: []string{"review", "security"}}, configs["openai"])
+	registerProviderAgent(agents.AgentDescriptor{ID: "reviewer-openai", Type: "review", Capabilities: []string{"review", "security"}}, cloudConfig)
 	registerProviderAgent(agents.AgentDescriptor{ID: "tester-local", Type: "testing", Capabilities: []string{"test"}}, configs["local"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "tester-ai-kernel", Type: "testing", Capabilities: []string{"test"}}, configs["ai_kernel"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "docs-local", Type: "documentation", Capabilities: []string{"docs"}}, configs["local"])

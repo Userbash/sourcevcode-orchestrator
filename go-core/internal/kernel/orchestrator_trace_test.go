@@ -589,3 +589,85 @@ func assertOrderedTaskEvents(t *testing.T, got []taskEventKind, want []taskEvent
 		t.Fatalf("event sequence = %v, want subsequence %v", got, want)
 	}
 }
+
+func TestAsyncSubmissionStartsWorkerPoolForLateRegisteredAgent(t *testing.T) {
+	t.Setenv("GO_CORE_SUBMIT_MODE", "async")
+
+	orchestrator, store, registry := newBudgetTestOrchestrator(t)
+	agent := &budgetTestAgent{info: domain.AgentInfo{
+		ID:           "coder-late",
+		Type:         "coding",
+		Provider:     "local",
+		ModelName:    "qwen2.5:32b-instruct-q4_k_m",
+		Capabilities: []string{"code", "plan", "review", "test", "research", "docs"},
+		Status:       domain.AgentStatusReady,
+	}, result: domain.AgentResult{
+		Status: domain.TaskStatusCompleted,
+		Output: domain.ResultOutput{
+			Summary:   "late registration completed",
+			Artifacts: map[string]any{"trace_mode": "late_registration"},
+		},
+	}}
+	registry.RegisterAgent(agent)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	task := domain.Task{
+		ID:               "task-async-late-registration",
+		SessionID:        "session-async-late-registration",
+		Type:             domain.TaskTypeCode,
+		Priority:         domain.PriorityHigh,
+		AssignedProvider: "local",
+		AssignedModel:    "qwen2.5:32b-instruct-q4_k_m",
+		Input: domain.TaskInput{
+			Description:        "Verify async execution after late agent registration without manual worker startup.",
+			Files:              []string{"internal/kernel/orchestrator.go"},
+			AcceptanceCriteria: []string{"auto start worker pool", "complete queued task"},
+		},
+		Context:      domain.TaskContext{Branch: "main", Project: "go-core"},
+		RoutingHints: map[string]any{"preferred_agent_id": "coder-late"},
+	}
+
+	record, err := orchestrator.SubmitTask(ctx, task)
+	if err != nil {
+		t.Fatalf("SubmitTask() error = %v", err)
+	}
+	if record.Acceptance.Status != domain.TaskStatusQueued {
+		t.Fatalf("initial Acceptance.Status = %s, want %s", record.Acceptance.Status, domain.TaskStatusQueued)
+	}
+
+	terminal, err := orchestrator.WaitWorkflowTerminal(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("WaitWorkflowTerminal() error = %v", err)
+	}
+	if terminal.Acceptance.Status != domain.TaskStatusCompleted {
+		t.Fatalf("terminal status = %s, want %s", terminal.Acceptance.Status, domain.TaskStatusCompleted)
+	}
+	if terminal.Result == nil || terminal.Result.Output.Summary != "late registration completed" {
+		t.Fatalf("unexpected terminal result = %#v", terminal.Result)
+	}
+
+	persisted, ok, err := store.GetWorkflow(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetWorkflow() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("workflow %s not found", task.ID)
+	}
+	if persisted.Acceptance.Status != domain.TaskStatusCompleted {
+		t.Fatalf("persisted status = %s, want %s", persisted.Acceptance.Status, domain.TaskStatusCompleted)
+	}
+
+	kinds := eventKindsForEntity(orchestrator.RuntimeEventSnapshot("tasks"), task.ID)
+	assertOrderedTaskEvents(t, kinds, []taskEventKind{
+		taskEventQueued,
+		taskEventDequeued,
+		taskEventRunning,
+		taskEventResultReceived,
+		taskEventCompleted,
+	})
+	if len(agent.executedTasks) != 1 {
+		t.Fatalf("agent executed %d tasks, want 1", len(agent.executedTasks))
+	}
+}

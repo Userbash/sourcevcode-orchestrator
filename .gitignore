@@ -144,3 +144,6 @@ secrets/
 .gocache/
 go-core/.gomodcache/
 go-core/orchestrator
+
+/.gomodcache/
+/.runtime/

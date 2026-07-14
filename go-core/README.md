@@ -194,6 +194,7 @@ The current test layout covers:
 
 ## Extra documentation
 
+- [Host runtime](docs/host_runtime.md)
 - [P2P delivery](docs/p2p_delivery.md)
 - [Project guide](docs/project_guide.md)
 - [Current worktree changes](docs/worktree_changes.md)

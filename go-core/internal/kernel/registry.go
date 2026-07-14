@@ -11,10 +11,11 @@ import (
 )
 
 type Registry struct {
-	mu            sync.RWMutex
-	agents        map[string]agents.Agent
-	modules       map[string]modules.Module
-	runtimeStates map[string]domain.AgentRuntimeState
+	mu                 sync.RWMutex
+	agents             map[string]agents.Agent
+	modules            map[string]modules.Module
+	runtimeStates      map[string]domain.AgentRuntimeState
+	agentRegistrations []func(agents.Agent)
 }
 
 func NewRegistry() *Registry {
@@ -26,8 +27,8 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) RegisterAgent(agent agents.Agent) {
+	var listeners []func(agents.Agent)
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.agents[agent.Info().ID] = agent
 	info := agent.Info()
 	state, ok := r.runtimeStates[info.ID]
@@ -47,6 +48,22 @@ func (r *Registry) RegisterAgent(agent agents.Agent) {
 		state.UpdatedAt = time.Now().UTC()
 	}
 	r.runtimeStates[info.ID] = state
+	listeners = append(listeners, r.agentRegistrations...)
+	r.mu.Unlock()
+	for _, listener := range listeners {
+		if listener != nil {
+			listener(agent)
+		}
+	}
+}
+
+func (r *Registry) OnAgentRegistered(listener func(agents.Agent)) {
+	if listener == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agentRegistrations = append(r.agentRegistrations, listener)
 }
 
 func (r *Registry) RegisterModule(module modules.Module) {

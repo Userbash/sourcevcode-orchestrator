@@ -3,6 +3,7 @@ package kernel
 import (
 	"strings"
 
+	"sourcevcode-orchestrator/go-core/internal/agents"
 	"sourcevcode-orchestrator/go-core/internal/domain"
 )
 
@@ -26,6 +27,13 @@ type RiskEvaluation struct {
 
 type ModelSelector struct {
 	registry *ProviderModelRegistry
+}
+
+func (s *ModelSelector) preferredCloudProvider() string {
+	if s == nil || s.registry == nil {
+		return "openai"
+	}
+	return agents.PreferredCloudProvider(s.registry.configs)
 }
 
 func NewModelSelector(registry *ProviderModelRegistry) *ModelSelector {
@@ -104,7 +112,7 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 	targetModel := modelLocalSmall
 	reason := "policy_default"
 	if shouldEscalateToCloud(task, complexity, risk) {
-		targetProvider = "openai"
+		targetProvider = s.preferredCloudProvider()
 		targetModel = modelOpenAIHigh
 		choice.RequiresSecondaryReview = true
 		reason = "high_risk_or_high_complexity"
@@ -175,6 +183,7 @@ func (s *ModelSelector) resolveAvailableModel(targetProvider, targetModel string
 		{provider: "ai_kernel", model: modelQwenCoder},
 		{provider: "local", model: modelLocalSmall},
 		{provider: "mistral", model: modelMistral},
+		{provider: "codexsale", model: modelOpenAIHigh},
 		{provider: "openai", model: modelOpenAIHigh},
 		{provider: "mimo", model: ""},
 		{provider: "antigravity", model: ""},

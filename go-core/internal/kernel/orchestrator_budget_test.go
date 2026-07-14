@@ -212,6 +212,9 @@ func TestOrchestratorBudgetFailureReturnsTokenBudgetArtifact(t *testing.T) {
 	if record.Result == nil {
 		t.Fatal("Result = nil, want failed result")
 	}
+	if record.Acceptance.Status != domain.TaskStatusAccepted {
+		t.Fatalf("Acceptance.Status = %s, want accepted", record.Acceptance.Status)
+	}
 	if record.Result.Status != domain.TaskStatusFailed {
 		t.Fatalf("Result.Status = %s, want failed", record.Result.Status)
 	}
@@ -268,7 +271,7 @@ func TestSubmissionSchedulerBalancesSessionsAndPriorities(t *testing.T) {
 
 var _ agents.Agent = (*budgetTestAgent)(nil)
 
-func TestOrchestratorCacheGuardBlockedReturnsFailedResult(t *testing.T) {
+func TestOrchestratorCacheGuardBlockedReturnsRejectedResult(t *testing.T) {
 	orchestrator, _, registry := newBudgetTestOrchestrator(t)
 	ctx := context.Background()
 
@@ -297,10 +300,13 @@ func TestOrchestratorCacheGuardBlockedReturnsFailedResult(t *testing.T) {
 		t.Fatalf("agent executed %d tasks, want 0", len(agent.executedTasks))
 	}
 	if record.Result == nil {
-		t.Fatal("Result = nil, want failed cache-guard result")
+		t.Fatal("Result = nil, want rejected cache-guard result")
 	}
-	if record.Result.Status != domain.TaskStatusFailed {
-		t.Fatalf("Result.Status = %s, want failed", record.Result.Status)
+	if record.Acceptance.Status != domain.TaskStatusRejected {
+		t.Fatalf("Acceptance.Status = %s, want rejected", record.Acceptance.Status)
+	}
+	if record.Result.Status != domain.TaskStatusRejected {
+		t.Fatalf("Result.Status = %s, want rejected", record.Result.Status)
 	}
 	if !strings.Contains(record.Result.Output.Summary, "cache guard") {
 		t.Fatalf("Result.Output.Summary = %q, want cache guard summary", record.Result.Output.Summary)

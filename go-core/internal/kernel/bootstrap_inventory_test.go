@@ -34,3 +34,55 @@ func TestRegisterDefaultAgentsIncludesOptionalProvidersWhenConfigured(t *testing
 		t.Fatalf("reviewer-antigravity provider=%q want %q", providers["reviewer-antigravity"], "antigravity")
 	}
 }
+
+func TestRegisterDefaultAgentsPrefersCodexSaleAsCloudProvider(t *testing.T) {
+	t.Setenv("AI_BRIDGE_CLOUD_PROVIDER", "codexsale")
+	t.Setenv("GO_CORE_CLOUD_PROVIDER", "")
+
+	registry := NewRegistry()
+	configs := map[string]agents.OpenAICompatibleConfig{
+		"local":     {Provider: "local", DefaultModel: "local-model", BaseURL: "http://127.0.0.1:11434/v1"},
+		"openai":    {Provider: "openai", DefaultModel: "gpt-5.5", BaseURL: "https://api.openai.com/v1", APIKey: "secret", RequireKey: true},
+		"codexsale": {Provider: "codexsale", DefaultModel: "gpt-5.6-sol", BaseURL: "https://codex.sale/v1", APIKey: "secret", RequireKey: true},
+	}
+
+	registerDefaultAgents(registry, configs)
+
+	providers := map[string]string{}
+	for _, agent := range registry.AgentInfos() {
+		providers[agent.ID] = agent.Provider
+	}
+
+	if providers["coder-openai"] != "codexsale" {
+		t.Fatalf("coder-openai provider=%q want %q", providers["coder-openai"], "codexsale")
+	}
+	if providers["reviewer-openai"] != "codexsale" {
+		t.Fatalf("reviewer-openai provider=%q want %q", providers["reviewer-openai"], "codexsale")
+	}
+}
+
+func TestRegisterDefaultAgentsCanPreferOpenAICloudProvider(t *testing.T) {
+	t.Setenv("AI_BRIDGE_CLOUD_PROVIDER", "openai")
+	t.Setenv("GO_CORE_CLOUD_PROVIDER", "")
+
+	registry := NewRegistry()
+	configs := map[string]agents.OpenAICompatibleConfig{
+		"local":     {Provider: "local", DefaultModel: "local-model", BaseURL: "http://127.0.0.1:11434/v1"},
+		"openai":    {Provider: "openai", DefaultModel: "gpt-5.5", BaseURL: "https://api.openai.com/v1", APIKey: "secret", RequireKey: true},
+		"codexsale": {Provider: "codexsale", DefaultModel: "gpt-5.6-sol", BaseURL: "https://codex.sale/v1", APIKey: "secret", RequireKey: true},
+	}
+
+	registerDefaultAgents(registry, configs)
+
+	providers := map[string]string{}
+	for _, agent := range registry.AgentInfos() {
+		providers[agent.ID] = agent.Provider
+	}
+
+	if providers["coder-openai"] != "openai" {
+		t.Fatalf("coder-openai provider=%q want %q", providers["coder-openai"], "openai")
+	}
+	if providers["reviewer-openai"] != "openai" {
+		t.Fatalf("reviewer-openai provider=%q want %q", providers["reviewer-openai"], "openai")
+	}
+}

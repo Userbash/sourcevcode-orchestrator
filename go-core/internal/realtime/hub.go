@@ -21,8 +21,34 @@ func (s *Subscription) Close() {
 }
 
 type subscriber struct {
-	topic string
-	ch    chan domain.StreamEvent
+	mu     sync.Mutex
+	topic  string
+	ch     chan domain.StreamEvent
+	closed bool
+}
+
+func (s *subscriber) publish(event domain.StreamEvent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- event:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *subscriber) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.ch)
 }
 
 type Hub struct {
@@ -30,7 +56,7 @@ type Hub struct {
 	name        string
 	historySize int
 	nextID      uint64
-	subscribers map[uint64]subscriber
+	subscribers map[uint64]*subscriber
 	history     map[string][]domain.StreamEvent
 	dropped     uint64
 }
@@ -42,7 +68,7 @@ func NewHub(name string, historySize int) *Hub {
 	return &Hub{
 		name:        name,
 		historySize: historySize,
-		subscribers: map[uint64]subscriber{},
+		subscribers: map[uint64]*subscriber{},
 		history:     map[string][]domain.StreamEvent{},
 	}
 }
@@ -63,7 +89,7 @@ func (h *Hub) Publish(topic string, kind string, entityID string, payload map[st
 		Payload:   cloneMap(payload),
 	}
 	h.history[topic] = appendBounded(h.history[topic], event, h.historySize)
-	subscribers := make([]subscriber, 0, len(h.subscribers))
+	subscribers := make([]*subscriber, 0, len(h.subscribers))
 	for _, sub := range h.subscribers {
 		subscribers = append(subscribers, sub)
 	}
@@ -73,9 +99,7 @@ func (h *Hub) Publish(topic string, kind string, entityID string, payload map[st
 		if sub.topic != "all" && sub.topic != topic {
 			continue
 		}
-		select {
-		case sub.ch <- event:
-		default:
+		if !sub.publish(event) {
 			h.mu.Lock()
 			h.dropped++
 			h.mu.Unlock()
@@ -89,22 +113,24 @@ func (h *Hub) Subscribe(topic string) *Subscription {
 		topic = "all"
 	}
 	ch := make(chan domain.StreamEvent, 32)
+	sub := &subscriber{topic: topic, ch: ch}
 	h.mu.Lock()
 	h.nextID++
 	id := h.nextID
-	h.subscribers[id] = subscriber{topic: topic, ch: ch}
+	h.subscribers[id] = sub
 	h.mu.Unlock()
 	return &Subscription{
 		Events: ch,
 		close: func() {
 			h.mu.Lock()
-			defer h.mu.Unlock()
-			sub, ok := h.subscribers[id]
-			if !ok {
-				return
+			stored, ok := h.subscribers[id]
+			if ok {
+				delete(h.subscribers, id)
 			}
-			delete(h.subscribers, id)
-			close(sub.ch)
+			h.mu.Unlock()
+			if ok {
+				stored.close()
+			}
 		},
 	}
 }

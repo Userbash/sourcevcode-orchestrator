@@ -112,6 +112,83 @@ func (c OpenAICompatibleConfig) CodexURL() string {
 	return ""
 }
 
+func looksLikeCodexSaleEndpoint(value string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	return trimmed != "" && strings.Contains(trimmed, "codex.sale")
+}
+
+func LooksLikeCodexSaleAlias(cfg OpenAICompatibleConfig) bool {
+	if strings.EqualFold(strings.TrimSpace(cfg.ProviderID), "codexsale") {
+		return true
+	}
+	for _, endpoint := range []string{
+		cfg.BaseURL,
+		cfg.ModelsEndpoint,
+		cfg.ChatCompletionsEndpoint,
+		cfg.ResponsesEndpoint,
+		cfg.MessagesEndpoint,
+		cfg.MessagesCountTokensEndpoint,
+		cfg.CodexEndpoint,
+	} {
+		if looksLikeCodexSaleEndpoint(endpoint) {
+			return true
+		}
+	}
+	return false
+}
+
+func CloudProviderPreference() string {
+	preference := strings.ToLower(strings.TrimSpace(firstEnv("AI_BRIDGE_CLOUD_PROVIDER", "GO_CORE_CLOUD_PROVIDER")))
+	switch preference {
+	case "", "auto":
+		return "auto"
+	case "openai", "codexsale":
+		return preference
+	default:
+		return "auto"
+	}
+}
+
+func SelectCloudProvider(configs map[string]OpenAICompatibleConfig, preference string) string {
+	preference = strings.ToLower(strings.TrimSpace(preference))
+	openaiCfg, openaiOK := configs["openai"]
+	codexCfg, codexOK := configs["codexsale"]
+	openaiReady := openaiOK && openaiCfg.Configured()
+	codexReady := codexOK && codexCfg.Configured()
+
+	switch preference {
+	case "openai":
+		if openaiReady {
+			return "openai"
+		}
+		if codexReady {
+			return "codexsale"
+		}
+	case "codexsale":
+		if codexReady {
+			return "codexsale"
+		}
+		if openaiReady {
+			return "openai"
+		}
+	}
+
+	if codexReady && (!openaiReady || LooksLikeCodexSaleAlias(openaiCfg)) {
+		return "codexsale"
+	}
+	if openaiReady {
+		return "openai"
+	}
+	if codexReady {
+		return "codexsale"
+	}
+	return "openai"
+}
+
+func PreferredCloudProvider(configs map[string]OpenAICompatibleConfig) string {
+	return SelectCloudProvider(configs, CloudProviderPreference())
+}
+
 type HealthReporter interface {
 	Probe(context.Context) domain.ProviderHealth
 }
@@ -705,16 +782,29 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			RequireKey:              envBool("AI_KERNEL_REQUIRE_API_KEY", true),
 		}),
 		"openai": withDefaults("openai", OpenAICompatibleConfig{
-			ProviderID:                  firstEnv("AI_BRIDGE_OPENAI_PROVIDER_ID", "CODEX_SALE_PROVIDER_ID"),
-			BaseURL:                     firstEnvDefault("https://api.openai.com/v1", "OPENAI_BASE_URL", "AI_BRIDGE_OPENAI_BASE_URL", "CODEX_SALE_BASE_URL"),
-			APIKey:                      firstEnv("OPENAI_API_KEY", "CODEX_SALE_API_KEY"),
-			DefaultModel:                firstEnvDefault("gpt-5.5", "CODEX_OPENAI_MODEL", "OPENAI_DEFAULT_MODEL"),
-			ModelsEndpoint:              firstEnv("AI_BRIDGE_OPENAI_MODELS_ENDPOINT", "CODEX_SALE_MODELS_ENDPOINT"),
-			ChatCompletionsEndpoint:     firstEnv("AI_BRIDGE_OPENAI_CHAT_COMPLETIONS_ENDPOINT", "CODEX_SALE_CHAT_COMPLETIONS_ENDPOINT"),
-			ResponsesEndpoint:           firstEnv("AI_BRIDGE_OPENAI_RESPONSES_ENDPOINT", "CODEX_SALE_RESPONSES_ENDPOINT"),
-			MessagesEndpoint:            firstEnv("AI_BRIDGE_OPENAI_MESSAGES_ENDPOINT", "CODEX_SALE_MESSAGES_ENDPOINT"),
-			MessagesCountTokensEndpoint: firstEnv("AI_BRIDGE_OPENAI_MESSAGES_COUNT_TOKENS_ENDPOINT", "CODEX_SALE_MESSAGES_COUNT_TOKENS_ENDPOINT"),
-			CodexEndpoint:               firstEnv("AI_BRIDGE_OPENAI_CODEX_ENDPOINT", "CODEX_SALE_CODEX_ENDPOINT"),
+			ProviderID:                  firstEnv("AI_BRIDGE_OPENAI_PROVIDER_ID"),
+			BaseURL:                     firstEnvDefault("https://api.openai.com/v1", "OPENAI_BASE_URL", "AI_BRIDGE_OPENAI_BASE_URL"),
+			APIKey:                      firstEnv("OPENAI_API_KEY"),
+			DefaultModel:                firstEnvDefault("gpt-5.5", "OPENAI_DEFAULT_MODEL"),
+			ModelsEndpoint:              firstEnv("AI_BRIDGE_OPENAI_MODELS_ENDPOINT"),
+			ChatCompletionsEndpoint:     firstEnv("AI_BRIDGE_OPENAI_CHAT_COMPLETIONS_ENDPOINT"),
+			ResponsesEndpoint:           firstEnv("AI_BRIDGE_OPENAI_RESPONSES_ENDPOINT"),
+			MessagesEndpoint:            firstEnv("AI_BRIDGE_OPENAI_MESSAGES_ENDPOINT"),
+			MessagesCountTokensEndpoint: firstEnv("AI_BRIDGE_OPENAI_MESSAGES_COUNT_TOKENS_ENDPOINT"),
+			CodexEndpoint:               firstEnv("AI_BRIDGE_OPENAI_CODEX_ENDPOINT"),
+			RequireKey:                  true,
+		}),
+		"codexsale": withDefaults("codexsale", OpenAICompatibleConfig{
+			ProviderID:                  firstEnvDefault("codexsale", "CODEX_SALE_PROVIDER_ID"),
+			BaseURL:                     firstEnvDefault("https://codex.sale/v1", "CODEX_SALE_BASE_URL"),
+			APIKey:                      firstEnv("CODEX_SALE_API_KEY"),
+			DefaultModel:                firstEnvDefault("gpt-5.6-sol", "CODEX_SALE_MODEL", "CODEX_OPENAI_MODEL"),
+			ModelsEndpoint:              firstEnvDefault("https://codex.sale/v1/models", "CODEX_SALE_MODELS_ENDPOINT"),
+			ChatCompletionsEndpoint:     firstEnvDefault("https://codex.sale/v1/chat/completions", "CODEX_SALE_CHAT_COMPLETIONS_ENDPOINT"),
+			ResponsesEndpoint:           firstEnvDefault("https://codex.sale/v1/responses", "CODEX_SALE_RESPONSES_ENDPOINT"),
+			MessagesEndpoint:            firstEnvDefault("https://codex.sale/v1/messages", "CODEX_SALE_MESSAGES_ENDPOINT"),
+			MessagesCountTokensEndpoint: firstEnvDefault("https://codex.sale/v1/messages/count_tokens", "CODEX_SALE_MESSAGES_COUNT_TOKENS_ENDPOINT"),
+			CodexEndpoint:               firstEnvDefault("https://codex.sale/backend-api/codex", "CODEX_SALE_CODEX_ENDPOINT"),
 			RequireKey:                  true,
 		}),
 		"mistral": withDefaults("mistral", OpenAICompatibleConfig{
@@ -748,6 +838,16 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 	for key, cfg := range configs {
 		if strings.TrimSpace(cfg.BaseURL) == "" {
 			delete(configs, key)
+		}
+	}
+	if openaiCfg, ok := configs["openai"]; ok && LooksLikeCodexSaleAlias(openaiCfg) {
+		codexCfg, hasCodex := configs["codexsale"]
+		if !hasCodex || !codexCfg.Configured() {
+			aliasCfg := openaiCfg
+			aliasCfg.ProviderID = firstNonEmpty(codexCfg.ProviderID, aliasCfg.ProviderID, "codexsale")
+			aliasCfg.DefaultModel = firstNonEmpty(codexCfg.DefaultModel, aliasCfg.DefaultModel, "gpt-5.6-sol")
+			aliasCfg.APIKey = firstNonEmpty(codexCfg.APIKey, aliasCfg.APIKey)
+			configs["codexsale"] = withDefaults("codexsale", aliasCfg)
 		}
 	}
 	return configs

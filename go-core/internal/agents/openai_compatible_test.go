@@ -228,6 +228,98 @@ func TestNormalizeV1Base(t *testing.T) {
 	}
 }
 
+func TestPreferredCloudProvider(t *testing.T) {
+	t.Setenv("AI_BRIDGE_CLOUD_PROVIDER", "")
+	t.Setenv("GO_CORE_CLOUD_PROVIDER", "")
+
+	if got := PreferredCloudProvider(map[string]OpenAICompatibleConfig{
+		"openai":    {Provider: "openai", BaseURL: "https://api.openai.com/v1", DefaultModel: "gpt-5.5", APIKey: "secret", RequireKey: true},
+		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
+	}); got != "openai" {
+		t.Fatalf("PreferredCloudProvider()=%q want %q", got, "openai")
+	}
+
+	if got := PreferredCloudProvider(map[string]OpenAICompatibleConfig{
+		"openai": {Provider: "openai", BaseURL: "https://api.openai.com/v1", DefaultModel: "gpt-5.5", APIKey: "secret", RequireKey: true},
+	}); got != "openai" {
+		t.Fatalf("PreferredCloudProvider()=%q want %q", got, "openai")
+	}
+}
+
+func TestPreferredCloudProviderRespectsOverride(t *testing.T) {
+	t.Setenv("AI_BRIDGE_CLOUD_PROVIDER", "codexsale")
+	t.Setenv("GO_CORE_CLOUD_PROVIDER", "")
+
+	if got := PreferredCloudProvider(map[string]OpenAICompatibleConfig{
+		"openai":    {Provider: "openai", BaseURL: "https://api.openai.com/v1", DefaultModel: "gpt-5.5", APIKey: "secret", RequireKey: true},
+		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
+	}); got != "codexsale" {
+		t.Fatalf("PreferredCloudProvider()=%q want %q", got, "codexsale")
+	}
+}
+
+func TestSelectCloudProvider(t *testing.T) {
+	configs := map[string]OpenAICompatibleConfig{
+		"openai":    {Provider: "openai", BaseURL: "https://api.openai.com/v1", DefaultModel: "gpt-5.5", APIKey: "secret", RequireKey: true},
+		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
+	}
+
+	if got := SelectCloudProvider(configs, "auto"); got != "openai" {
+		t.Fatalf("SelectCloudProvider(auto)=%q want %q", got, "openai")
+	}
+	if got := SelectCloudProvider(configs, "codexsale"); got != "codexsale" {
+		t.Fatalf("SelectCloudProvider(codexsale)=%q want %q", got, "codexsale")
+	}
+	if got := SelectCloudProvider(configs, "openai"); got != "openai" {
+		t.Fatalf("SelectCloudProvider(openai)=%q want %q", got, "openai")
+	}
+
+	aliasConfigs := map[string]OpenAICompatibleConfig{
+		"openai": {
+			Provider:     "openai",
+			ProviderID:   "codexsale",
+			BaseURL:      "https://codex.sale/v1",
+			DefaultModel: "gpt-5.6-sol",
+			APIKey:       "secret",
+			RequireKey:   true,
+		},
+		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
+	}
+	if got := SelectCloudProvider(aliasConfigs, "auto"); got != "codexsale" {
+		t.Fatalf("SelectCloudProvider(alias auto)=%q want %q", got, "codexsale")
+	}
+	if got := SelectCloudProvider(map[string]OpenAICompatibleConfig{
+		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
+	}, "openai"); got != "codexsale" {
+		t.Fatalf("SelectCloudProvider(openai fallback)=%q want %q", got, "codexsale")
+	}
+}
+
+func TestLoadOpenAICompatibleConfigsPreservesOpenAIAndSeedsCodexSaleAlias(t *testing.T) {
+	t.Setenv("OPENAI_BASE_URL", "https://codex.sale/v1")
+	t.Setenv("OPENAI_API_KEY", "secret")
+	t.Setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-sol")
+	t.Setenv("CODEX_SALE_BASE_URL", "")
+	t.Setenv("CODEX_SALE_API_KEY", "")
+	t.Setenv("CODEX_SALE_MODEL", "")
+
+	configs := LoadOpenAICompatibleConfigs()
+
+	if _, ok := configs["openai"]; !ok {
+		t.Fatal("expected openai config to be preserved")
+	}
+	codexCfg, ok := configs["codexsale"]
+	if !ok {
+		t.Fatal("expected codexsale config to be present")
+	}
+	if codexCfg.APIKey != "secret" {
+		t.Fatalf("codexsale api key=%q want %q", codexCfg.APIKey, "secret")
+	}
+	if codexCfg.BaseURL != "https://codex.sale/v1" {
+		t.Fatalf("codexsale base url=%q want %q", codexCfg.BaseURL, "https://codex.sale/v1")
+	}
+}
+
 func TestOpenAICompatibleAgentUsesCustomChatEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/custom/chat" {

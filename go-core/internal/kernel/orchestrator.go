@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +22,9 @@ import (
 )
 
 type Orchestrator struct {
+	executionProfile executionProfile
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
 	registry         *Registry
 	planner          *Planner
 	router           *Router
@@ -46,6 +48,7 @@ type Orchestrator struct {
 	resultMu         sync.Mutex
 	resultWaiters    map[string][]chan domain.WorkflowRecord
 	workerPools      []*delivery.WorkerPool
+	workerPoolsMu    sync.Mutex
 	schedulerMu      sync.Mutex
 	submissionQueue  *submissionScheduler
 }
@@ -65,8 +68,13 @@ func NewOrchestrator(
 	if inventoryHub == nil {
 		inventoryHub = realtime.NewHub("inventory", 64)
 	}
-	cpuCount := runtime.NumCPU()
+	profile := detectExecutionProfile()
+	parallelism := profile.UsableParallelism
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	o := &Orchestrator{
+		executionProfile: profile,
+		backgroundCtx:    backgroundCtx,
+		backgroundCancel: backgroundCancel,
 		registry:         registry,
 		planner:          planner,
 		router:           router,
@@ -78,14 +86,14 @@ func NewOrchestrator(
 		providerRegistry: providerRegistry,
 		agentSlots:       map[string]chan struct{}{},
 		modelSlots:       map[string]chan struct{}{},
-		perAgentMax:      envInt("GO_CORE_MAX_CONCURRENT_PER_AGENT", defaultPerAgentConcurrency(cpuCount)),
-		perModelMax:      envInt("GO_CORE_MAX_CONCURRENT_PER_MODEL", defaultPerModelConcurrency(cpuCount)),
+		perAgentMax:      envInt("GO_CORE_MAX_CONCURRENT_PER_AGENT", defaultPerAgentConcurrency(parallelism)),
+		perModelMax:      envInt("GO_CORE_MAX_CONCURRENT_PER_MODEL", defaultPerModelConcurrency(parallelism)),
 		resultWaiters:    map[string][]chan domain.WorkflowRecord{},
 	}
 	if vfsManager, err := vfs.NewManager(store); err == nil {
 		o.vfs = vfsManager
 	}
-	if limit := envInt("GO_CORE_MAX_CONCURRENT_TASKS", defaultGlobalConcurrency(cpuCount)); limit > 0 {
+	if limit := envInt("GO_CORE_MAX_CONCURRENT_TASKS", defaultGlobalConcurrency(parallelism)); limit > 0 {
 		o.globalSlots = make(chan struct{}, limit)
 	}
 	o.delivery = delivery.NewSupervisor(o.messageBus, 30*time.Second)
@@ -94,19 +102,34 @@ func NewOrchestrator(
 	})
 	o.adaptive = NewAdaptiveRuntime(registry, o.runtime, o.memory)
 	if o.providerRegistry != nil {
-		o.providerRegistry.Start(context.Background())
+		o.providerRegistry.Start(o.backgroundCtx)
 	}
 	if o.router != nil {
 		o.router.runtime = o.runtime
 		o.router.memory = o.memory
 	}
 	if submissionModeEnabled() {
-		o.StartSubmissionWorker(context.Background(), envInt("GO_CORE_SUBMIT_WORKERS", defaultSubmitWorkers(cpuCount)))
-		o.StartResultWorker(context.Background(), envInt("GO_CORE_RESULT_WORKERS", defaultResultWorkers(cpuCount)))
+		o.StartSubmissionWorker(o.backgroundCtx, envInt("GO_CORE_SUBMIT_WORKERS", defaultSubmitWorkers(parallelism)))
+		o.StartResultWorker(o.backgroundCtx, envInt("GO_CORE_RESULT_WORKERS", defaultResultWorkers(parallelism)))
 	}
-	o.startAgentWorkerPools(context.Background(), envInt("GO_CORE_AGENT_WORKERS", defaultAgentWorkers(cpuCount)))
-	o.publishInventorySnapshot(context.Background())
+	o.registry.OnAgentRegistered(o.ensureAgentWorkerPool)
+	o.startAgentWorkerPools(o.backgroundCtx, envInt("GO_CORE_AGENT_WORKERS", defaultAgentWorkers(parallelism)))
+	o.publishInventorySnapshot(o.backgroundCtx)
 	return o
+}
+
+func (o *Orchestrator) Close() {
+	if o == nil || o.backgroundCancel == nil {
+		return
+	}
+	o.backgroundCancel()
+}
+
+func (o *Orchestrator) ExecutionProfile() map[string]any {
+	if o == nil {
+		return map[string]any{}
+	}
+	return o.executionProfile.Metadata()
 }
 
 func defaultGlobalConcurrency(cpuCount int) int {
@@ -457,7 +480,7 @@ func (o *Orchestrator) submitTaskSync(ctx context.Context, task domain.Task) (do
 		}
 		result := &domain.AgentResult{
 			TaskID:      task.ID,
-			Status:      domain.TaskStatusFailed,
+			Status:      domain.TaskStatusRejected,
 			Errors:      []string{reason},
 			CompletedAt: time.Now().UTC(),
 			Output: domain.ResultOutput{
@@ -472,7 +495,7 @@ func (o *Orchestrator) submitTaskSync(ctx context.Context, task domain.Task) (do
 		if err := o.store.SaveWorkflow(ctx, record); err != nil {
 			return domain.WorkflowRecord{}, err
 		}
-		o.publishRuntimeEvent("tasks", "task.failed", task.ID, map[string]any{
+		o.publishRuntimeEvent("tasks", "task.rejected", task.ID, map[string]any{
 			"task":       task,
 			"acceptance": acceptance,
 			"result":     result,
@@ -632,6 +655,9 @@ func (o *Orchestrator) SubmitTaskAsync(ctx context.Context, task domain.Task) (d
 }
 
 func (o *Orchestrator) StartSubmissionWorker(ctx context.Context, concurrency int) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -663,20 +689,7 @@ func (o *Orchestrator) StartSubmissionWorker(ctx context.Context, concurrency in
 		return
 	}
 	tasks := make(chan delivery.TaskDelivery)
-	go func() {
-		defer close(tasks)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case task, ok := <-plainTasks:
-				if !ok {
-					return
-				}
-				tasks <- delivery.TaskDelivery{Task: task, Ack: func() error { return nil }, Nack: func(bool) error { return nil }}
-			}
-		}
-	}()
+	go o.forwardTaskDeliveries(ctx, plainTasks, tasks)
 	go o.fillSubmissionScheduler(ctx, scheduler, tasks)
 }
 
@@ -699,6 +712,46 @@ func (o *Orchestrator) fillSubmissionScheduler(ctx context.Context, scheduler *s
 					_ = deliveryTask.Nack(true)
 				}
 				return
+			}
+		}
+	}
+}
+
+func (o *Orchestrator) forwardTaskDeliveries(ctx context.Context, plainTasks <-chan domain.Task, tasks chan<- delivery.TaskDelivery) {
+	defer close(tasks)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case task, ok := <-plainTasks:
+			if !ok {
+				return
+			}
+			deliveryTask := delivery.TaskDelivery{Task: task, Ack: func() error { return nil }, Nack: func(bool) error { return nil }}
+			select {
+			case <-ctx.Done():
+				return
+			case tasks <- deliveryTask:
+			}
+		}
+	}
+}
+
+func (o *Orchestrator) forwardResultDeliveries(ctx context.Context, plainResults <-chan domain.TaskResultEnvelope, results chan<- delivery.ResultDelivery) {
+	defer close(results)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case result, ok := <-plainResults:
+			if !ok {
+				return
+			}
+			deliveryResult := delivery.ResultDelivery{Result: result, Ack: func() error { return nil }, Nack: func(bool) error { return nil }}
+			select {
+			case <-ctx.Done():
+				return
+			case results <- deliveryResult:
 			}
 		}
 	}
@@ -885,6 +938,9 @@ func (o *Orchestrator) preparePeerDelivery(ctx context.Context, envelope domain.
 }
 
 func (o *Orchestrator) StartResultWorker(ctx context.Context, concurrency int) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if concurrency <= 0 {
 		concurrency = 1
 	}
@@ -910,20 +966,7 @@ func (o *Orchestrator) StartResultWorker(ctx context.Context, concurrency int) {
 	for workerID := 0; workerID < concurrency; workerID++ {
 		go o.runResultWorker(ctx, workerID, results)
 	}
-	go func() {
-		defer close(results)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case result, ok := <-plainResults:
-				if !ok {
-					return
-				}
-				results <- delivery.ResultDelivery{Result: result, Ack: func() error { return nil }, Nack: func(bool) error { return nil }}
-			}
-		}
-	}()
+	go o.forwardResultDeliveries(ctx, plainResults, results)
 }
 
 func (o *Orchestrator) startAgentWorkerPools(ctx context.Context, concurrency int) {
@@ -935,14 +978,46 @@ func (o *Orchestrator) startAgentWorkerPools(ctx context.Context, concurrency in
 		if !ok {
 			continue
 		}
-		pool := delivery.NewWorkerPool(o.delivery, info.ID, concurrency, 250*time.Millisecond, func(workerCtx context.Context, envelope domain.TaskEnvelope) error {
-			return o.handleAgentEnvelope(workerCtx, agent, envelope)
-		}, func(workerCtx context.Context, envelope domain.TaskEnvelope, reason string) error {
-			return o.publishEnvelopeDeadLetter(workerCtx, envelope, reason)
-		})
-		o.workerPools = append(o.workerPools, pool)
-		go pool.Start(ctx)
+		o.ensureAgentWorkerPoolWithConcurrency(ctx, agent, concurrency)
 	}
+}
+
+func (o *Orchestrator) ensureAgentWorkerPool(agent agents.Agent) {
+	if o == nil {
+		return
+	}
+	o.ensureAgentWorkerPoolWithConcurrency(o.backgroundCtx, agent, envInt("GO_CORE_AGENT_WORKERS", defaultAgentWorkers(o.executionProfile.UsableParallelism)))
+}
+
+func (o *Orchestrator) ensureAgentWorkerPoolWithConcurrency(ctx context.Context, agent agents.Agent, concurrency int) {
+	if o == nil || agent == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	agentID := agent.Info().ID
+	o.workerPoolsMu.Lock()
+	for _, pool := range o.workerPools {
+		if pool != nil {
+			snapshot := pool.Snapshot()
+			if snapshot["agent_id"] == agentID {
+				o.workerPoolsMu.Unlock()
+				return
+			}
+		}
+	}
+	pool := delivery.NewWorkerPool(o.delivery, agentID, concurrency, agentPollInterval(), func(workerCtx context.Context, envelope domain.TaskEnvelope) error {
+		return o.handleAgentEnvelope(workerCtx, agent, envelope)
+	}, func(workerCtx context.Context, envelope domain.TaskEnvelope, reason string) error {
+		return o.publishEnvelopeDeadLetter(workerCtx, envelope, reason)
+	})
+	o.workerPools = append(o.workerPools, pool)
+	o.workerPoolsMu.Unlock()
+	go pool.Start(ctx)
 }
 
 func (o *Orchestrator) runResultWorker(ctx context.Context, workerID int, results <-chan delivery.ResultDelivery) {
@@ -1015,8 +1090,8 @@ func (o *Orchestrator) dispatchTaskAsync(ctx context.Context, task domain.Task) 
 	guard := o.memory.CacheGuardSnapshot(ctx, task.SessionID, task.Context.Branch)
 	if blocked, _ := guard["blocked"].(bool); blocked {
 		reason := firstNonEmptyString(kernelString(guard["reason"]), "cache guard blocked task execution")
-		record.Acceptance = domain.TaskAcceptance{TaskID: task.ID, Status: domain.TaskStatusFailed, Complexity: domain.ComplexityLow, Reason: reason, AcceptedAt: time.Now().UTC()}
-		record.Result = &domain.AgentResult{TaskID: task.ID, Status: domain.TaskStatusFailed, Errors: []string{reason}, CompletedAt: time.Now().UTC(), Output: domain.ResultOutput{Summary: reason, Artifacts: map[string]any{"cache_guard": guard}}}
+		record.Acceptance = domain.TaskAcceptance{TaskID: task.ID, Status: domain.TaskStatusRejected, Complexity: domain.ComplexityLow, Reason: reason, AcceptedAt: time.Now().UTC()}
+		record.Result = &domain.AgentResult{TaskID: task.ID, Status: domain.TaskStatusRejected, Errors: []string{reason}, CompletedAt: time.Now().UTC(), Output: domain.ResultOutput{Summary: reason, Artifacts: map[string]any{"cache_guard": guard}}}
 		record.UpdatedAt = time.Now().UTC()
 		if err := o.store.SaveWorkflow(ctx, record); err != nil {
 			return domain.WorkflowRecord{}, err
@@ -1611,7 +1686,7 @@ func (o *Orchestrator) SubscribeInventoryEvents(topic string) *realtime.Subscrip
 
 func (o *Orchestrator) AttachLocalModelManager(manager *localmodels.Manager) {
 	o.localModels = manager
-	o.publishInventorySnapshot(context.Background())
+	o.publishInventorySnapshot(o.backgroundCtx)
 }
 
 func (o *Orchestrator) LocalModelManager() *localmodels.Manager {
@@ -1709,7 +1784,7 @@ func (o *Orchestrator) SuppressLane(agentID string, reason string, seconds int) 
 	}
 	state, ok := o.runtime.SuppressLane(agentID, reason, seconds)
 	if ok {
-		o.publishInventorySnapshot(context.Background())
+		o.publishInventorySnapshot(o.backgroundCtx)
 	}
 	return state, ok
 }
@@ -1720,7 +1795,7 @@ func (o *Orchestrator) RecoverLane(agentID string) (domain.AgentRuntimeState, bo
 	}
 	state, ok := o.runtime.RecoverLane(agentID)
 	if ok {
-		o.publishInventorySnapshot(context.Background())
+		o.publishInventorySnapshot(o.backgroundCtx)
 	}
 	return state, ok
 }
@@ -1918,7 +1993,7 @@ func (o *Orchestrator) enforceModelBudgetPolicy(ctx context.Context, task domain
 }
 
 func budgetFallbackProviders(currentProvider string) []string {
-	providers := []string{currentProvider, "local", "mistral", "openai"}
+	providers := []string{currentProvider, "local", "mistral", "codexsale", "openai"}
 	ordered := make([]string, 0, len(providers))
 	seen := map[string]struct{}{}
 	for _, provider := range providers {

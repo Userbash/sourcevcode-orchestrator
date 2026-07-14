@@ -192,7 +192,7 @@ func (r *Router) policyScore(info domain.AgentInfo, task domain.Task, capability
 		score += 120
 	}
 	if complexity == domain.ComplexityHigh || complexity == domain.ComplexityCritical || risk.HighRisk {
-		if strings.EqualFold(info.Provider, "openai") {
+		if strings.EqualFold(info.Provider, "openai") || strings.EqualFold(info.Provider, "codexsale") {
 			score += 40
 		}
 		if strings.Contains(strings.ToLower(info.Type), "review") {
@@ -204,7 +204,7 @@ func (r *Router) policyScore(info domain.AgentInfo, task domain.Task, capability
 			score += 25
 		case "mistral", "antigravity", "mimo":
 			score += 15
-		case "openai":
+		case "openai", "codexsale":
 			score -= 20
 		}
 	}

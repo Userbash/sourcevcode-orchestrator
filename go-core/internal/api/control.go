@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"sourcevcode-orchestrator/go-core/internal/agents"
 	"sourcevcode-orchestrator/go-core/internal/domain"
 	"sourcevcode-orchestrator/go-core/internal/transport"
 )
@@ -40,8 +41,13 @@ func (s *Server) buildDispatcher() *transport.Dispatcher {
 		return map[string]any{"status": "ok", "data": inventory[provider]}, nil
 	})
 	dispatcher.RegisterSingle("providers.openai.runtime_inventory.get", false, func(_ context.Context, _ transport.Envelope) (map[string]any, error) {
-		inventory := s.providerInventory("openai", true)
-		return map[string]any{"status": "ok", "data": inventory["openai"]}, nil
+		provider := agents.PreferredCloudProvider(agents.LoadOpenAICompatibleConfigs())
+		inventory := s.providerInventory(provider, true)
+		return map[string]any{"status": "ok", "data": inventory[provider]}, nil
+	})
+	dispatcher.RegisterSingle("providers.codexsale.runtime_inventory.get", false, func(_ context.Context, _ transport.Envelope) (map[string]any, error) {
+		inventory := s.providerInventory("codexsale", true)
+		return map[string]any{"status": "ok", "data": inventory["codexsale"]}, nil
 	})
 	dispatcher.RegisterSingle("providers.models.index.get", false, func(_ context.Context, _ transport.Envelope) (map[string]any, error) {
 		return map[string]any{"status": "ok", "data": s.modelIndex()}, nil
@@ -337,6 +343,7 @@ func (s *Server) buildDispatcher() *transport.Dispatcher {
 	registerEventStream("providers.runtime_inventory.subscribe", "inventory", true)
 	registerEventStream("providers.runtime_inventory.provider.subscribe", "inventory", true)
 	registerEventStream("providers.openai.runtime_inventory.subscribe", "inventory", true)
+	registerEventStream("providers.codexsale.runtime_inventory.subscribe", "inventory", true)
 	registerEventStream("providers.models.index.subscribe", "inventory", true)
 	registerEventStream("diagnostics.subscribe", "runtime", false)
 	registerEventStream("socraticode.context_compaction.status.subscribe", "runtime", false)

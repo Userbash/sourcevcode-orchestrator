@@ -115,6 +115,79 @@ func TestRequiredDaemonRoutesAreRegistered(t *testing.T) {
 	}
 }
 
+func TestProviderInventoryExposesClaudeResourcePoolForCodexSale(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-sonnet-4-6"}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"id":"test-completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	t.Setenv("AI_BRIDGE_MODEL_VALIDATE_MODELS", "false")
+	t.Setenv("AI_BRIDGE_LOCAL_LLM_ENDPOINT", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("CODEX_SALE_PROVIDER_ID", "codexsale")
+	t.Setenv("CODEX_SALE_BASE_URL", provider.URL+"/v1")
+	t.Setenv("CODEX_SALE_MODELS_ENDPOINT", provider.URL+"/v1/models")
+	t.Setenv("CODEX_SALE_API_KEY", "secret")
+	t.Setenv("CODEX_SALE_MODEL", "claude-sonnet-4-6")
+	t.Setenv("AI_KERNEL_API_KEY", "")
+	t.Setenv("MISTRAL_API_KEY", "")
+
+	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	orchestrator := kernel.NewWithStore(store)
+	server := NewServer(orchestrator, app.DefaultRequiredHTTPEndpoints)
+
+	request := httptest.NewRequest(http.MethodGet, "/providers/inventory", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var payload struct {
+		Data map[string]map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	codexInventory := payload.Data["codexsale"]
+	if codexInventory == nil {
+		t.Fatalf("codexsale inventory missing: %#v", payload.Data)
+	}
+	rawPools, ok := codexInventory["resource_pools"].([]any)
+	if !ok {
+		t.Fatalf("resource_pools missing: %#v", codexInventory)
+	}
+	for _, item := range rawPools {
+		pool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if pool["pool"] != "claude" {
+			continue
+		}
+		if pool["eligible"] != true {
+			t.Fatalf("claude pool should be eligible: %#v", pool)
+		}
+		eligibleModels, ok := pool["eligible_models"].([]any)
+		if !ok || len(eligibleModels) != 1 || eligibleModels[0] != "claude-sonnet-4-6" {
+			t.Fatalf("unexpected eligible models: %#v", pool)
+		}
+		return
+	}
+	t.Fatalf("claude pool not found: %#v", rawPools)
+}
+
 func TestCompatibilityRouteAdvertisesControlWebSocket(t *testing.T) {
 	server := newTestServer(t)
 	request := httptest.NewRequest(http.MethodGet, "/providers/inventory", nil)

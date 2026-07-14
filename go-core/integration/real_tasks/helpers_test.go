@@ -57,7 +57,7 @@ func (a *fakeAgent) Execute(_ context.Context, task domain.Task) domain.AgentRes
 	return result
 }
 
-func newIntegrationOrchestrator(t *testing.T) (*kernel.Orchestrator, state.Store, *kernel.Registry) {
+func newIntegrationOrchestrator(t *testing.T, preRegisteredAgents ...agents.Agent) (*kernel.Orchestrator, state.Store, *kernel.Registry) {
 	t.Helper()
 	t.Setenv("GO_CORE_MESSAGE_BUS_BACKEND", "memory")
 	if strings.TrimSpace(os.Getenv("GO_CORE_SUBMIT_MODE")) == "" {
@@ -69,13 +69,16 @@ func newIntegrationOrchestrator(t *testing.T) (*kernel.Orchestrator, state.Store
 	t.Setenv("GO_CORE_MAX_CONCURRENT_TASKS", "16")
 	t.Setenv("GO_CORE_MAX_CONCURRENT_PER_AGENT", "8")
 	t.Setenv("GO_CORE_MAX_CONCURRENT_PER_MODEL", "8")
-	t.Setenv("GO_CORE_AGENT_POLL_INTERVAL_MS", "500")
+	t.Setenv("GO_CORE_AGENT_POLL_INTERVAL_MS", "50")
 
 	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatalf("NewFileStore() error = %v", err)
 	}
 	registry := kernel.NewRegistry()
+	for _, agent := range preRegisteredAgents {
+		registry.RegisterAgent(agent)
+	}
 	selector := kernel.NewModelSelector(nil)
 	planner := kernel.NewPlanner(selector)
 	router := kernel.NewRouter(registry, selector)
