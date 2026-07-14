@@ -298,3 +298,67 @@ func TestLoadOpenAICompatibleConfigsKeepsContainerAliasInContainer(t *testing.T)
 		t.Fatalf("ai_kernel BaseURL=%q want %q", got, "http://host.containers.internal:8012/v1")
 	}
 }
+
+func TestLoadOpenAICompatibleConfigsSkipsOptionalProvidersWithoutEndpoint(t *testing.T) {
+	t.Setenv("MIMO_BASE_URL", "")
+	t.Setenv("AI_BRIDGE_MIMO_BASE_URL", "")
+	t.Setenv("ANTIGRAVITY_BASE_URL", "")
+	t.Setenv("AI_BRIDGE_ANTIGRAVITY_BASE_URL", "")
+	t.Setenv("MIMO_MODEL", "")
+	t.Setenv("AI_BRIDGE_MIMO_MODEL", "")
+	t.Setenv("ANTIGRAVITY_MODEL", "")
+	t.Setenv("AI_BRIDGE_ANTIGRAVITY_MODEL", "")
+	t.Setenv("MIMO_API_KEY", "")
+	t.Setenv("AI_BRIDGE_MIMO_API_KEY", "")
+	t.Setenv("ANTIGRAVITY_API_KEY", "")
+	t.Setenv("AI_BRIDGE_ANTIGRAVITY_API_KEY", "")
+
+	configs := LoadOpenAICompatibleConfigs()
+
+	if _, ok := configs["mimo"]; ok {
+		t.Fatalf("mimo should be absent without explicit endpoint: %#v", configs["mimo"])
+	}
+	if _, ok := configs["antigravity"]; ok {
+		t.Fatalf("antigravity should be absent without explicit endpoint: %#v", configs["antigravity"])
+	}
+}
+
+func TestLoadOpenAICompatibleConfigsIncludesOptionalProvidersWhenConfigured(t *testing.T) {
+	t.Setenv("MIMO_BASE_URL", "https://mimo.example.test/api")
+	t.Setenv("MIMO_MODEL", "mimo-reasoner")
+	t.Setenv("AI_BRIDGE_MIMO_ENABLED", "true")
+	t.Setenv("MIMO_API_KEY", "mimo-secret")
+	t.Setenv("ANTIGRAVITY_BASE_URL", "https://antigravity.example.test/inference")
+	t.Setenv("ANTIGRAVITY_MODEL", "antigravity-coder")
+	t.Setenv("ANTIGRAVITY_API_KEY", "anti-secret")
+
+	configs := LoadOpenAICompatibleConfigs()
+
+	mimo, ok := configs["mimo"]
+	if !ok {
+		t.Fatal("mimo config missing")
+	}
+	if !mimo.Configured() {
+		t.Fatalf("mimo should be configured: %#v", mimo)
+	}
+	if mimo.BaseURL != "https://mimo.example.test/api/v1" {
+		t.Fatalf("mimo BaseURL=%q want %q", mimo.BaseURL, "https://mimo.example.test/api/v1")
+	}
+	if mimo.ModelsURL() != "https://mimo.example.test/api/v1/models" {
+		t.Fatalf("mimo ModelsURL=%q want %q", mimo.ModelsURL(), "https://mimo.example.test/api/v1/models")
+	}
+
+	antigravity, ok := configs["antigravity"]
+	if !ok {
+		t.Fatal("antigravity config missing")
+	}
+	if !antigravity.Configured() {
+		t.Fatalf("antigravity should be configured: %#v", antigravity)
+	}
+	if antigravity.BaseURL != "https://antigravity.example.test/inference/v1" {
+		t.Fatalf("antigravity BaseURL=%q want %q", antigravity.BaseURL, "https://antigravity.example.test/inference/v1")
+	}
+	if antigravity.ModelsURL() != "https://antigravity.example.test/inference/v1/models" {
+		t.Fatalf("antigravity ModelsURL=%q want %q", antigravity.ModelsURL(), "https://antigravity.example.test/inference/v1/models")
+	}
+}

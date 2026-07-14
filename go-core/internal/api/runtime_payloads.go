@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/domain"
+	"sourcevcode-orchestrator/go-core/internal/kernel"
 )
 
 func (s *Server) providerInventory(providerFilter string, forceProbe ...bool) map[string]any {
@@ -194,12 +195,28 @@ func (s *Server) sourcecraftStatus() map[string]any {
 			}
 		}
 	}
+	status := "degraded"
+	if len(agents) > 0 {
+		status = "ok"
+	}
 	return map[string]any{
-		"status":      "ok",
-		"enabled":     len(agents) > 0,
-		"agent_count": len(agents),
-		"agents":      agents,
-		"runtime":     "go-core",
+		"status":                    status,
+		"enabled":                   len(agents) > 0,
+		"agent_count":               len(agents),
+		"agents":                    agents,
+		"runtime":                   "go-core",
+		"runtime_mode":              "semantic-routing",
+		"planning_supported":        true,
+		"delegation_supported":      true,
+		"mutation_supported":        false,
+		"runtime_bridge_configured": false,
+		"task_families":             kernel.SourcecraftTaskFamilies(),
+		"safe_actions":              kernel.SourcecraftSafeActions(),
+		"limitations": []string{
+			"repo mutations are not implemented in go-core",
+			"git, gh, and src runtime readiness checks are not available",
+			"protected-branch and preview-token workflows are not available",
+		},
 	}
 }
 

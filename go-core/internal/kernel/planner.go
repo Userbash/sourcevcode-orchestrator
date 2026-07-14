@@ -33,6 +33,12 @@ func (p *Planner) Prepare(task domain.Task) (domain.Task, domain.ExecutionPlan) 
 	task.RoutingHints["sourcecraft_work"] = isSourcecraftWork(task)
 	task.RoutingHints["selected_provider"] = task.AssignedProvider
 	task.RoutingHints["selected_model"] = task.AssignedModel
+	if isSourcecraftWork(task) {
+		task.RoutingHints["sourcecraft_task_family"] = SourcecraftTaskFamily(task)
+		task.RoutingHints["sourcecraft_recommended_actions"] = SourcecraftRecommendedActions(task)
+		task.RoutingHints["sourcecraft_runtime_mode"] = "planning_only"
+		task.RoutingHints["sourcecraft_mutation_supported"] = false
+	}
 	plan := p.buildPlan(task, selection)
 	return task, plan
 }
@@ -59,6 +65,9 @@ func (p *Planner) defaultSteps(task domain.Task) []domain.PlanStep {
 		Capability: "plan",
 		Files:      files,
 	}}
+	if isSourcecraftWork(task) {
+		return append(steps, p.sourcecraftSteps(task, analyzeID)...)
+	}
 
 	switch task.Type {
 	case domain.TaskTypeCode, domain.TaskTypeFix:
@@ -91,6 +100,45 @@ func (p *Planner) defaultSteps(task domain.Task) []domain.PlanStep {
 		)
 	}
 
+	return steps
+}
+
+func (p *Planner) sourcecraftSteps(task domain.Task, analyzeID string) []domain.PlanStep {
+	files := compactStrings(task.Input.Files)
+	family := SourcecraftTaskFamily(task)
+	draftCapability := "plan"
+	switch task.Type {
+	case domain.TaskTypeDocs:
+		draftCapability = "docs"
+	case domain.TaskTypeResearch:
+		draftCapability = "research"
+	case domain.TaskTypeCode, domain.TaskTypeFix:
+		draftCapability = "code"
+	case domain.TaskTypeReview:
+		draftCapability = "review"
+	case domain.TaskTypeTest:
+		draftCapability = "test"
+	}
+
+	contextID := task.ID + "-repo-context"
+	policyID := task.ID + "-workflow-policy"
+	draftID := task.ID + "-draft-sourcecraft"
+	reviewID := task.ID + "-review-sourcecraft"
+	steps := []domain.PlanStep{
+		{ID: contextID, Title: "inspect repository workflow context", Capability: "research", Dependencies: []string{analyzeID}, Files: files},
+		{ID: policyID, Title: "map sourcecraft repo policy and guardrails", Capability: "plan", Dependencies: []string{contextID}, Files: files},
+		{ID: draftID, Title: "draft " + family + " delegation plan", Capability: draftCapability, Dependencies: []string{policyID}, Files: files},
+		{ID: reviewID, Title: "review recommended repo actions", Capability: "review", Dependencies: []string{draftID}, Files: files},
+	}
+	if task.Type == domain.TaskTypeCode || task.Type == domain.TaskTypeFix || task.Type == domain.TaskTypeTest {
+		steps = append(steps, domain.PlanStep{
+			ID:           task.ID + "-validate-sourcecraft",
+			Title:        "validate workflow handoff and execution readiness",
+			Capability:   "test",
+			Dependencies: []string{reviewID},
+			Files:        files,
+		})
+	}
 	return steps
 }
 

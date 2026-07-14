@@ -50,7 +50,7 @@ func (o *Orchestrator) PreviewExecutionPlan(ctx context.Context, task domain.Tas
 		CompletedTaskIDs: []string{},
 		ResultsByTaskID:  map[string]any{},
 		BatchNo:          1,
-		Status:           "planned",
+		Status:           domain.ParallelPlanStatusPlanned,
 		UpdatedAt:        time.Now().UTC(),
 	}
 	if err := o.saveParallelCheckpoint(ctx, checkpoint); err != nil {
@@ -217,7 +217,7 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 		checkpoint.BatchNo = 1
 	}
 	startedAt := time.Now().UTC()
-	if checkpoint.Status == "completed" {
+	if checkpoint.Status == domain.ParallelPlanStatusCompleted {
 		return domain.ExecutionPlanRun{
 			Task:         checkpoint.RootTask,
 			Plan:         checkpoint.Plan,
@@ -227,7 +227,7 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 			CompletedAt:  checkpoint.UpdatedAt,
 		}, nil
 	}
-	checkpoint.Status = "running"
+	checkpoint.Status = domain.ParallelPlanStatusRunning
 	checkpoint.UpdatedAt = startedAt
 	if err := o.saveParallelCheckpoint(ctx, checkpoint); err != nil {
 		return domain.ExecutionPlanRun{}, err
@@ -242,7 +242,7 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 	for len(checkpoint.PendingTaskIDs) > 0 {
 		ready := readyPlanArtifacts(checkpoint.PlanArtifact.Tasks, checkpoint.PendingTaskIDs, checkpoint.CompletedTaskIDs)
 		if len(ready) == 0 {
-			checkpoint.Status = "blocked"
+			checkpoint.Status = domain.ParallelPlanStatusBlocked
 			checkpoint.UpdatedAt = time.Now().UTC()
 			_ = o.saveParallelCheckpoint(ctx, checkpoint)
 			return domain.ExecutionPlanRun{}, fmt.Errorf("parallel plan %s is blocked by unresolved dependencies", checkpoint.RootTaskID)
@@ -260,6 +260,13 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 					taskErrors[idx] = err
 					return
 				}
+				if !isTerminalTaskStatus(record.Acceptance.Status) {
+					record, err = o.WaitWorkflowTerminal(ctx, record.Task.ID)
+					if err != nil {
+						taskErrors[idx] = err
+						return
+					}
+				}
 				batchResults[idx] = record
 			}(index, artifact)
 		}
@@ -272,7 +279,7 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 					"status":  "failed",
 					"error":   err.Error(),
 				}
-				checkpoint.Status = "failed"
+				checkpoint.Status = domain.ParallelPlanStatusFailed
 				checkpoint.UpdatedAt = time.Now().UTC()
 				_ = o.saveParallelCheckpoint(ctx, checkpoint)
 				return domain.ExecutionPlanRun{}, err
@@ -289,7 +296,7 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 			return domain.ExecutionPlanRun{}, err
 		}
 	}
-	checkpoint.Status = "completed"
+	checkpoint.Status = domain.ParallelPlanStatusCompleted
 	checkpoint.UpdatedAt = time.Now().UTC()
 	if err := o.saveParallelCheckpoint(ctx, checkpoint); err != nil {
 		return domain.ExecutionPlanRun{}, err
@@ -300,6 +307,8 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 }
 
 func buildPlanArtifact(task domain.Task, plan domain.ExecutionPlan) domain.PlanArtifact {
+	effectiveProvider := firstNonEmptyString(task.AssignedProvider, plan.Selection.Provider)
+	effectiveModel := firstNonEmptyString(task.AssignedModel, plan.Selection.ModelName)
 	tasks := make([]domain.PlanTaskArtifact, 0, len(plan.Steps))
 	parallelGroups := parallelGroups(plan.Steps)
 	handoffs := make([]map[string]any, 0, len(plan.Steps))
@@ -308,8 +317,8 @@ func buildPlanArtifact(task domain.Task, plan domain.ExecutionPlan) domain.PlanA
 			TaskID:        step.ID,
 			Title:         step.Title,
 			Capability:    step.Capability,
-			Provider:      plan.Selection.Provider,
-			ModelName:     plan.Selection.ModelName,
+			Provider:      effectiveProvider,
+			ModelName:     effectiveModel,
 			Files:         append([]string(nil), step.Files...),
 			Dependencies:  append([]string(nil), step.Dependencies...),
 			BranchID:      step.ID,
@@ -320,8 +329,8 @@ func buildPlanArtifact(task domain.Task, plan domain.ExecutionPlan) domain.PlanA
 				"session_id":          task.SessionID,
 				"step_id":             step.ID,
 				"required_capability": step.Capability,
-				"selected_provider":   plan.Selection.Provider,
-				"selected_model":      plan.Selection.ModelName,
+				"selected_provider":   effectiveProvider,
+				"selected_model":      effectiveModel,
 				"review_depth":        task.ReviewDepth,
 				"checkpoint_policy":   firstNonEmptyString(task.CheckpointPolicy, "on_plan_preview"),
 				"resume_token":        firstNonEmptyString(task.ResumeToken, step.ID),

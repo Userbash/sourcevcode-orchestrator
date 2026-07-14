@@ -529,7 +529,7 @@ func (s *Server) routeManifest() []map[string]any {
 
 func (s *Server) compatibilityGaps() []string {
 	return []string{
-		"mimo, antigravity, voice/audio and ML integrations still live in the legacy python tree",
+		"voice/audio and ML-specific integrations still live in the legacy python tree",
 		"advanced trained memory and validation still require more Go ports",
 		"socraticode runtime and ai_kernel ensure remain on compatibility stubs in go-core",
 	}

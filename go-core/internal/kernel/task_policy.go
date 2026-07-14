@@ -17,6 +17,22 @@ var sourcecraftCapabilities = map[string]struct{}{
 	"branch_governance": {},
 }
 
+var sourcecraftTaskFamilies = []string{
+	"repo_ops",
+	"pr_flow",
+	"release_flow",
+	"issue_flow",
+	"branch_governance",
+}
+
+var sourcecraftSafeActionsByFamily = map[string][]string{
+	"repo_ops":          {"repo_summary", "status", "current_branch"},
+	"pr_flow":           {"repo_summary", "status", "pr_checks"},
+	"release_flow":      {"repo_summary", "status", "repo_governance_report"},
+	"issue_flow":        {"repo_summary", "status"},
+	"branch_governance": {"current_branch", "status", "repo_governance_report"},
+}
+
 var sourcecraftRoutableTaskTypes = map[domain.TaskType]struct{}{
 	domain.TaskTypePlan:     {},
 	domain.TaskTypeDocs:     {},
@@ -48,6 +64,49 @@ func inferCapability(task domain.Task) string {
 
 func resolvedCapability(task domain.Task) string {
 	return inferCapability(task)
+}
+
+func SourcecraftTaskFamilies() []string {
+	return append([]string(nil), sourcecraftTaskFamilies...)
+}
+
+func SourcecraftSafeActions() []string {
+	return []string{
+		"repo_summary",
+		"status",
+		"current_branch",
+		"pr_checks",
+		"repo_governance_report",
+	}
+}
+
+func SourcecraftTaskFamily(task domain.Task) string {
+	capability := strings.TrimSpace(strings.ToLower(task.RequiredCapability))
+	if _, ok := sourcecraftCapabilities[capability]; ok && capability != "" && capability != "sourcecraft" {
+		return capability
+	}
+	text := taskText(task)
+	switch {
+	case strings.Contains(text, "pull request") || strings.Contains(text, " pr") || strings.Contains(text, "pr "):
+		return "pr_flow"
+	case strings.Contains(text, "release") || strings.Contains(text, "tag") || strings.Contains(text, "changelog"):
+		return "release_flow"
+	case strings.Contains(text, "issue"):
+		return "issue_flow"
+	case strings.Contains(text, "branch"):
+		return "branch_governance"
+	default:
+		return "repo_ops"
+	}
+}
+
+func SourcecraftRecommendedActions(task domain.Task) []string {
+	family := SourcecraftTaskFamily(task)
+	actions := sourcecraftSafeActionsByFamily[family]
+	if len(actions) == 0 {
+		actions = sourcecraftSafeActionsByFamily["repo_ops"]
+	}
+	return append([]string(nil), actions...)
 }
 
 func isSourcecraftWork(task domain.Task) bool {

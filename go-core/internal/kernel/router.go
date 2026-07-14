@@ -25,32 +25,52 @@ func NewRouter(registry *Registry, selector *ModelSelector) *Router {
 }
 
 func (r *Router) Route(task domain.Task, plan domain.ExecutionPlan) (domain.TaskAcceptance, agents.Agent, bool) {
+	return r.route(task, plan, nil)
+}
+
+func (r *Router) RouteExcluding(task domain.Task, plan domain.ExecutionPlan, exclude map[string]struct{}) (domain.TaskAcceptance, agents.Agent, bool) {
+	return r.route(task, plan, exclude)
+}
+
+func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[string]struct{}) (domain.TaskAcceptance, agents.Agent, bool) {
 	capability := plan.PrimaryCapability
 	if capability == "" {
 		capability = resolvedCapability(task)
 	}
 	complexity := plan.Complexity
+	if exclude == nil {
+		exclude = map[string]struct{}{}
+	}
 	preferredAgentID := preferredAgentID(task.RoutingHints)
 	if preferredAgentID != "" {
-		if preferred, ok := r.agentByID(preferredAgentID); ok {
-			info := preferred.Info()
-			if r.canRouteAgent(task, preferred, capability) {
-				return accepted(task, plan, info, capability, "preferred agent routing"), preferred, true
+		if _, blocked := exclude[preferredAgentID]; !blocked {
+			if preferred, ok := r.agentByID(preferredAgentID); ok {
+				info := preferred.Info()
+				if r.canRouteAgent(task, preferred, capability) {
+					return accepted(task, plan, info, capability, "preferred agent routing"), preferred, true
+				}
 			}
 		}
 	}
 	if routeModeOrchestrator(task.RoutingHints) {
-		if agent, ok := r.agentByID("orchestrator"); ok && r.canRouteAgent(task, agent, capability) {
-			return accepted(task, plan, agent.Info(), capability, "orchestrator route override"), agent, true
+		if _, blocked := exclude["orchestrator"]; !blocked {
+			if agent, ok := r.agentByID("orchestrator"); ok && r.canRouteAgent(task, agent, capability) {
+				return accepted(task, plan, agent.Info(), capability, "orchestrator route override"), agent, true
+			}
 		}
 	}
 	if isSourcecraftWork(task) {
-		if agent, ok := r.agentByID("orchestrator"); ok && r.canRouteAgent(task, agent, capability) {
-			return accepted(task, plan, agent.Info(), capability, "sourcecraft route"), agent, true
+		if _, blocked := exclude["orchestrator"]; !blocked {
+			if agent, ok := r.agentByID("orchestrator"); ok && r.canRouteAgent(task, agent, capability) {
+				return accepted(task, plan, agent.Info(), capability, "sourcecraft route"), agent, true
+			}
 		}
 	}
 	candidates := make([]agents.Agent, 0)
 	for _, agent := range r.registry.Agents() {
+		if _, blocked := exclude[agent.Info().ID]; blocked {
+			continue
+		}
 		if !r.canRouteAgent(task, agent, capability) {
 			continue
 		}

@@ -58,7 +58,6 @@ func (s *Supervisor) Dispatch(_ context.Context, envelope domain.TaskEnvelope) m
 	if envelope.CreatedAt.IsZero() {
 		envelope.CreatedAt = s.nowFn()
 	}
-	s.messageBus.SendEnvelope(envelope)
 
 	now := s.nowFn()
 	record := &DeliveryRecord{
@@ -70,9 +69,31 @@ func (s *Supervisor) Dispatch(_ context.Context, envelope domain.TaskEnvelope) m
 		HandshakeState:  "syn",
 		PayloadChecksum: payloadChecksum(envelope),
 	}
+
 	s.mu.Lock()
 	s.records[envelope.TaskID] = record
 	s.mu.Unlock()
+
+	ack := s.messageBus.SendEnvelope(envelope)
+
+	s.mu.Lock()
+	record.Status = ack.AckStatus
+	record.LastProgressAt = s.nowFn()
+	if ack.Reason != "" {
+		record.LastReason = ack.Reason
+	}
+	if isTerminalStatus(ack.AckStatus) {
+		completed := s.nowFn()
+		record.CompletedAt = &completed
+		switch ack.AckStatus {
+		case domain.AckStatusDeadLettered:
+			record.HandshakeState = "dead_letter"
+		case domain.AckStatusFailed:
+			record.HandshakeState = "failed"
+		}
+	}
+	s.mu.Unlock()
+
 	s.audit("delivery.sent", record, nil)
 	return s.Refresh(context.Background(), envelope.TaskID)
 }
@@ -119,8 +140,8 @@ func (s *Supervisor) FetchAgentMailbox(_ context.Context, agentID string, limit 
 		now := s.nowFn()
 		history := s.messageBus.AckHistory(envelope.TaskID)
 		s.mu.Lock()
-		record, ok := s.records[envelope.TaskID]
-		if ok {
+		record, tracked := s.records[envelope.TaskID]
+		if tracked {
 			record.ReceivedBy = agentID
 			record.ReceivedAt = &now
 			record.LastProgressAt = now
@@ -152,10 +173,10 @@ func (s *Supervisor) ConfirmPayload(taskID, agentID string, envelope domain.Task
 	}
 	record.PayloadValidated = true
 	record.HandshakeState = "ack_valid"
-	snapshot := s.snapshotLocked(record, s.messageBus.AckHistory(taskID))
+	record.LastProgressAt = s.nowFn()
 	s.mu.Unlock()
-	s.audit("delivery.payload_validated", record, snapshot)
-	_ = agentID
+	s.Ack(taskID, domain.AckStatusValidated, agentID, "payload_checksum_ok")
+	s.audit("delivery.payload_validated", record, s.Snapshot(taskID))
 	return true
 }
 
@@ -169,7 +190,8 @@ func (s *Supervisor) Ack(taskID string, status domain.AckStatus, receivedBy stri
 		record.ReceivedBy = receivedBy
 		record.LastReason = reason
 		record.LastProgressAt = now
-		if status == domain.AckStatusReceived {
+		switch status {
+		case domain.AckStatusReceived:
 			if record.ReceivedAt == nil {
 				received := now
 				record.ReceivedAt = &received
@@ -177,8 +199,15 @@ func (s *Supervisor) Ack(taskID string, status domain.AckStatus, receivedBy stri
 			if record.HandshakeState == "syn" {
 				record.HandshakeState = "syn_ack"
 			}
+		case domain.AckStatusValidated:
+			record.PayloadValidated = true
+			record.HandshakeState = "ack_valid"
+		case domain.AckStatusRetrying:
+			record.HandshakeState = "retrying"
+		case domain.AckStatusDeadLettered:
+			record.HandshakeState = "dead_letter"
 		}
-		if status == domain.AckStatusAccepted || status == domain.AckStatusFailed {
+		if isTerminalStatus(status) {
 			completed := now
 			record.CompletedAt = &completed
 		}
@@ -210,7 +239,7 @@ func (s *Supervisor) EstablishDelivery(taskID, agentID string) domain.MessageAck
 		s.Refresh(context.Background(), taskID)
 		return ack
 	}
-	ack := s.messageBus.Ack(taskID, domain.AckStatusReceived, agentID, "")
+	ack := s.messageBus.Ack(taskID, domain.AckStatusReceived, agentID, "delivery_established")
 	s.mu.Lock()
 	record.HandshakeState = "established"
 	record.LastProgressAt = s.nowFn()
@@ -229,7 +258,7 @@ func (s *Supervisor) MailboxSnapshot(agentID string) map[string]any {
 		if record.Envelope.TargetAgent != agentID {
 			continue
 		}
-		if record.Status == domain.AckStatusAccepted || record.Status == domain.AckStatusFailed {
+		if isTerminalStatus(record.Status) {
 			continue
 		}
 		tracked = append(tracked, taskID)
@@ -244,6 +273,8 @@ func (s *Supervisor) MailboxSnapshot(agentID string) map[string]any {
 func (s *Supervisor) InspectTimeouts(_ context.Context) map[string]any {
 	retried := 0
 	deadLettered := 0
+	overdue := 0
+	brokerManaged := false
 	now := s.nowFn()
 	s.mu.Lock()
 	records := make([]*DeliveryRecord, 0, len(s.records))
@@ -252,17 +283,32 @@ func (s *Supervisor) InspectTimeouts(_ context.Context) map[string]any {
 	}
 	s.mu.Unlock()
 
+	if managed, ok := s.messageBus.(BrokerManagedBus); ok && managed.BrokerManaged() {
+		brokerManaged = true
+	}
+
 	for _, record := range records {
-		if record.Status == domain.AckStatusAccepted || record.Status == domain.AckStatusFailed {
+		if isTerminalStatus(record.Status) {
 			continue
 		}
 		if now.Sub(record.LastProgressAt) < s.ackTimeout {
+			continue
+		}
+		overdue++
+		if brokerManaged {
+			s.mu.Lock()
+			record.LastProgressAt = now
+			record.HandshakeState = "broker_managed_timeout"
+			s.mu.Unlock()
+			s.audit("delivery.timeout_observed", record, s.Snapshot(record.Envelope.TaskID))
 			continue
 		}
 		if record.RetryCount < maxRetries(record.Envelope) {
 			record.Envelope.RetryCount++
 			record.RetryCount = record.Envelope.RetryCount
 			record.LastProgressAt = now
+			record.HandshakeState = "retrying"
+			s.Ack(record.Envelope.TaskID, domain.AckStatusRetrying, record.Envelope.TargetAgent, "ack_timeout")
 			s.messageBus.SendEnvelope(record.Envelope)
 			s.audit("delivery.retry", record, s.Snapshot(record.Envelope.TaskID))
 			retried++
@@ -270,7 +316,7 @@ func (s *Supervisor) InspectTimeouts(_ context.Context) map[string]any {
 		}
 		s.messageBus.MarkDeadLetterEnvelope(record.Envelope, "ack_timeout")
 		s.mu.Lock()
-		record.Status = domain.AckStatusFailed
+		record.Status = domain.AckStatusDeadLettered
 		record.LastReason = "ack_timeout"
 		record.HandshakeState = "dead_letter"
 		completed := now
@@ -281,8 +327,10 @@ func (s *Supervisor) InspectTimeouts(_ context.Context) map[string]any {
 		deadLettered++
 	}
 	return map[string]any{
-		"retried":       retried,
-		"dead_lettered": deadLettered,
+		"broker_managed": brokerManaged,
+		"overdue":        overdue,
+		"retried":        retried,
+		"dead_lettered":  deadLettered,
 	}
 }
 
@@ -294,6 +342,7 @@ func (s *Supervisor) DeliveryHealthSnapshot() map[string]any {
 	pending := 0
 	accepted := 0
 	failed := 0
+	deadLettered := 0
 	maxLag := 0.0
 	now := s.nowFn()
 	for _, record := range s.records {
@@ -303,6 +352,8 @@ func (s *Supervisor) DeliveryHealthSnapshot() map[string]any {
 			accepted++
 		case domain.AckStatusFailed:
 			failed++
+		case domain.AckStatusDeadLettered:
+			deadLettered++
 		default:
 			pending++
 			lag := now.Sub(record.LastProgressAt).Seconds()
@@ -313,10 +364,11 @@ func (s *Supervisor) DeliveryHealthSnapshot() map[string]any {
 		agentID := record.Envelope.TargetAgent
 		if _, ok := byAgent[agentID]; !ok {
 			byAgent[agentID] = map[string]any{
-				"queue_depth": s.messageBus.Depth(AgentTopic(agentID)),
-				"pending":     0,
-				"accepted":    0,
-				"failed":      0,
+				"queue_depth":   s.messageBus.Depth(AgentTopic(agentID)),
+				"pending":       0,
+				"accepted":      0,
+				"failed":        0,
+				"dead_lettered": 0,
 			}
 		}
 		metrics := byAgent[agentID]
@@ -325,17 +377,20 @@ func (s *Supervisor) DeliveryHealthSnapshot() map[string]any {
 			metrics["accepted"] = metrics["accepted"].(int) + 1
 		case domain.AckStatusFailed:
 			metrics["failed"] = metrics["failed"].(int) + 1
+		case domain.AckStatusDeadLettered:
+			metrics["dead_lettered"] = metrics["dead_lettered"].(int) + 1
 		default:
 			metrics["pending"] = metrics["pending"].(int) + 1
 		}
 	}
 	return map[string]any{
-		"tracked":     tracked,
-		"pending":     pending,
-		"accepted":    accepted,
-		"failed":      failed,
-		"max_lag_sec": maxLag,
-		"by_agent":    byAgent,
+		"tracked":       tracked,
+		"pending":       pending,
+		"accepted":      accepted,
+		"failed":        failed,
+		"dead_lettered": deadLettered,
+		"max_lag_sec":   maxLag,
+		"by_agent":      byAgent,
 	}
 }
 
@@ -359,6 +414,8 @@ func (s *Supervisor) applyHistory(record *DeliveryRecord, history []domain.Messa
 		switch ack.AckStatus {
 		case domain.AckStatusSent:
 			record.Status = domain.AckStatusSent
+		case domain.AckStatusQueued:
+			record.Status = domain.AckStatusQueued
 		case domain.AckStatusReceived:
 			record.Status = domain.AckStatusReceived
 			record.ReceivedBy = ack.ReceivedBy
@@ -370,6 +427,19 @@ func (s *Supervisor) applyHistory(record *DeliveryRecord, history []domain.Messa
 			if record.HandshakeState == "syn" {
 				record.HandshakeState = "syn_ack"
 			}
+		case domain.AckStatusValidated:
+			record.Status = domain.AckStatusValidated
+			record.ReceivedBy = ack.ReceivedBy
+			record.LastReason = ack.Reason
+			record.LastProgressAt = now
+			record.PayloadValidated = true
+			record.HandshakeState = "ack_valid"
+		case domain.AckStatusRetrying:
+			record.Status = domain.AckStatusRetrying
+			record.ReceivedBy = ack.ReceivedBy
+			record.LastReason = ack.Reason
+			record.LastProgressAt = now
+			record.HandshakeState = "retrying"
 		case domain.AckStatusAccepted:
 			record.Status = domain.AckStatusAccepted
 			record.ReceivedBy = ack.ReceivedBy
@@ -381,6 +451,16 @@ func (s *Supervisor) applyHistory(record *DeliveryRecord, history []domain.Messa
 			}
 			if record.PayloadValidated {
 				record.HandshakeState = "established"
+			}
+		case domain.AckStatusDeadLettered:
+			record.Status = domain.AckStatusDeadLettered
+			record.ReceivedBy = ack.ReceivedBy
+			record.LastReason = ack.Reason
+			record.LastProgressAt = now
+			record.HandshakeState = "dead_letter"
+			if record.CompletedAt == nil {
+				completed := now
+				record.CompletedAt = &completed
 			}
 		case domain.AckStatusFailed:
 			record.Status = domain.AckStatusFailed
@@ -444,4 +524,8 @@ func maxRetries(envelope domain.TaskEnvelope) int {
 		return 3
 	}
 	return envelope.MaxRetries
+}
+
+func isTerminalStatus(status domain.AckStatus) bool {
+	return status == domain.AckStatusAccepted || status == domain.AckStatusFailed || status == domain.AckStatusDeadLettered
 }

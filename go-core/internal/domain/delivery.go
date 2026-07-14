@@ -5,10 +5,14 @@ import "time"
 type AckStatus string
 
 const (
-	AckStatusSent     AckStatus = "sent"
-	AckStatusReceived AckStatus = "received"
-	AckStatusAccepted AckStatus = "accepted"
-	AckStatusFailed   AckStatus = "failed"
+	AckStatusSent         AckStatus = "sent"
+	AckStatusQueued       AckStatus = "queued"
+	AckStatusReceived     AckStatus = "received"
+	AckStatusValidated    AckStatus = "validated"
+	AckStatusRetrying     AckStatus = "retrying"
+	AckStatusAccepted     AckStatus = "accepted"
+	AckStatusDeadLettered AckStatus = "dead_lettered"
+	AckStatusFailed       AckStatus = "failed"
 )
 
 type TaskPayload struct {
@@ -43,6 +47,18 @@ type TaskEnvelope struct {
 	Payload          TaskPayload `json:"payload"`
 	IsDeadLetter     bool        `json:"is_dead_letter,omitempty"`
 	CreatedAt        time.Time   `json:"created_at,omitempty"`
+}
+
+type TaskResultEnvelope struct {
+	TaskID        string      `json:"task_id"`
+	ParentTaskID  string      `json:"parent_task_id,omitempty"`
+	TraceID       string      `json:"trace_id,omitempty"`
+	CorrelationID string      `json:"correlation_id,omitempty"`
+	SourceAgent   string      `json:"source_agent,omitempty"`
+	TargetAgent   string      `json:"target_agent,omitempty"`
+	Status        TaskStatus  `json:"status"`
+	Result        AgentResult `json:"result"`
+	CreatedAt     time.Time   `json:"created_at,omitempty"`
 }
 
 type MessageAck struct {

@@ -3,12 +3,14 @@ package kernel
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/agents"
+	"sourcevcode-orchestrator/go-core/internal/delivery"
 	"sourcevcode-orchestrator/go-core/internal/domain"
 	"sourcevcode-orchestrator/go-core/internal/realtime"
 	"sourcevcode-orchestrator/go-core/internal/state"
@@ -49,6 +51,10 @@ func (a *budgetTestAgent) Execute(_ context.Context, task domain.Task) domain.Ag
 
 func newBudgetTestOrchestrator(t *testing.T) (*Orchestrator, state.Store, *Registry) {
 	t.Helper()
+	t.Setenv("GO_CORE_MESSAGE_BUS_BACKEND", "memory")
+	if strings.TrimSpace(os.Getenv("GO_CORE_SUBMIT_MODE")) == "" {
+		t.Setenv("GO_CORE_SUBMIT_MODE", "sync")
+	}
 	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatalf("NewFileStore() error = %v", err)
@@ -59,6 +65,62 @@ func newBudgetTestOrchestrator(t *testing.T) (*Orchestrator, state.Store, *Regis
 	router := NewRouter(registry, selector)
 	orchestrator := NewOrchestrator(registry, planner, router, store, realtime.NewHub("runtime", 32), realtime.NewHub("inventory", 16), nil)
 	return orchestrator, store, registry
+}
+
+func TestOrchestratorPeerFailoverRoutesToNextAgent(t *testing.T) {
+	orchestrator, _, registry := newBudgetTestOrchestrator(t)
+	ctx := context.Background()
+
+	failingAgent := &budgetTestAgent{info: domain.AgentInfo{
+		ID: "coder-openai", Type: "coding", Provider: "openai", ModelName: "gpt-5.5",
+		Capabilities: []string{"code", "fix", "test"}, Status: domain.AgentStatusReady,
+	}, result: domain.AgentResult{Status: domain.TaskStatusFailed, Errors: []string{"provider timeout"}, Output: domain.ResultOutput{Summary: "provider timeout"}}}
+	successAgent := &budgetTestAgent{info: domain.AgentInfo{
+		ID: "coder-local", Type: "coding", Provider: "local", ModelName: "qwen2.5:32b-instruct-q4_k_m",
+		Capabilities: []string{"code", "fix", "test"}, Status: domain.AgentStatusReady,
+	}, result: domain.AgentResult{Output: domain.ResultOutput{Summary: "local recovered", Artifacts: map[string]any{
+		"usage": map[string]any{"total_tokens": 21},
+	}}}}
+	registry.RegisterAgent(failingAgent)
+	registry.RegisterAgent(successAgent)
+
+	record, err := orchestrator.SubmitTask(ctx, domain.Task{
+		ID:               "task-peer-failover",
+		SessionID:        "session-peer-failover",
+		Type:             domain.TaskTypeCode,
+		AssignedProvider: "openai",
+		AssignedModel:    "gpt-5.5",
+		Input:            domain.TaskInput{Description: "Implement failover when the preferred agent crashes.", AcceptanceCriteria: []string{"fallback succeeds"}},
+		Context:          domain.TaskContext{Branch: "main", Project: "demo"},
+	})
+	if err != nil {
+		t.Fatalf("SubmitTask() error = %v", err)
+	}
+	if record.Result == nil {
+		t.Fatal("Result = nil, want completed result")
+	}
+	if record.Result.Status != domain.TaskStatusDone {
+		t.Fatalf("Result.Status = %s, want done", record.Result.Status)
+	}
+	if record.Acceptance.AgentID != "coder-local" {
+		t.Fatalf("Acceptance.AgentID = %s, want coder-local", record.Acceptance.AgentID)
+	}
+	if len(failingAgent.executedTasks) != 1 {
+		t.Fatalf("failing agent executed %d tasks, want 1", len(failingAgent.executedTasks))
+	}
+	if len(successAgent.executedTasks) != 1 {
+		t.Fatalf("success agent executed %d tasks, want 1", len(successAgent.executedTasks))
+	}
+	if successAgent.executedTasks[0].RoutingHints["p2p_attempt"] != 2 {
+		t.Fatalf("p2p_attempt = %v, want 2", successAgent.executedTasks[0].RoutingHints["p2p_attempt"])
+	}
+	failures, ok := successAgent.executedTasks[0].RoutingHints["peer_failures"].([]map[string]any)
+	if !ok || len(failures) != 1 {
+		t.Fatalf("peer_failures = %#v, want one failure context", successAgent.executedTasks[0].RoutingHints["peer_failures"])
+	}
+	if failures[0]["agent_id"] != "coder-openai" {
+		t.Fatalf("peer_failures[0].agent_id = %v, want coder-openai", failures[0]["agent_id"])
+	}
 }
 
 func TestOrchestratorBudgetFallbackRoutesToNextProvider(t *testing.T) {
@@ -155,6 +217,52 @@ func TestOrchestratorBudgetFailureReturnsTokenBudgetArtifact(t *testing.T) {
 	}
 	if _, ok := record.Result.Output.Artifacts["token_budget"]; !ok {
 		t.Fatalf("token_budget artifact missing: %#v", record.Result.Output.Artifacts)
+	}
+}
+
+func TestSubmissionSchedulerBalancesSessionsAndPriorities(t *testing.T) {
+	scheduler := newSubmissionScheduler(16, 1)
+	ctx := context.Background()
+	now := time.Now().Add(-2 * time.Second)
+	mustEnqueue := func(task domain.Task) {
+		t.Helper()
+		if err := scheduler.enqueue(ctx, scheduledSubmission{
+			delivery: delivery.TaskDelivery{Task: task},
+			groupKey: submissionGroupKey(task),
+			enqueued: now,
+		}); err != nil {
+			t.Fatalf("enqueue(%s) error = %v", task.ID, err)
+		}
+	}
+
+	mustEnqueue(domain.Task{ID: "a-1", SessionID: "session-a", Priority: domain.PriorityNormal, Complexity: domain.ComplexityHigh})
+	mustEnqueue(domain.Task{ID: "a-2", SessionID: "session-a", Priority: domain.PriorityNormal, Complexity: domain.ComplexityHigh})
+	mustEnqueue(domain.Task{ID: "b-1", SessionID: "session-b", Priority: domain.PriorityHigh, Complexity: domain.ComplexityLow})
+	mustEnqueue(domain.Task{ID: "c-1", SessionID: "session-c", Priority: domain.PriorityLow, Complexity: domain.ComplexityLow})
+
+	first, ok, err := scheduler.next(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first next error = %v ok = %v", err, ok)
+	}
+	if first.delivery.Task.ID != "b-1" {
+		t.Fatalf("first task = %s, want b-1", first.delivery.Task.ID)
+	}
+
+	second, ok, err := scheduler.next(ctx)
+	if err != nil || !ok {
+		t.Fatalf("second next error = %v ok = %v", err, ok)
+	}
+	if second.delivery.Task.ID == "a-2" {
+		t.Fatalf("second task = %s, want different session while session-a already in flight", second.delivery.Task.ID)
+	}
+
+	scheduler.done(first.groupKey)
+	third, ok, err := scheduler.next(ctx)
+	if err != nil || !ok {
+		t.Fatalf("third next error = %v ok = %v", err, ok)
+	}
+	if third.delivery.Task.SessionID == second.delivery.Task.SessionID {
+		t.Fatalf("third session = %s, want fair rotation away from session %s", third.delivery.Task.SessionID, second.delivery.Task.SessionID)
 	}
 }
 

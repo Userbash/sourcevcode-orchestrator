@@ -728,21 +728,21 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 		}),
 		"antigravity": withDefaults("antigravity", OpenAICompatibleConfig{
 			ProviderID:              firstEnv("AI_BRIDGE_ANTIGRAVITY_PROVIDER_ID"),
-			BaseURL:                 firstEnvDefault("https://api.antigravity.example/v1", "ANTIGRAVITY_BASE_URL", "AI_BRIDGE_ANTIGRAVITY_BASE_URL"),
+			BaseURL:                 firstEnv("ANTIGRAVITY_BASE_URL", "AI_BRIDGE_ANTIGRAVITY_BASE_URL"),
 			APIKey:                  firstEnv("ANTIGRAVITY_API_KEY", "AI_BRIDGE_ANTIGRAVITY_API_KEY"),
 			DefaultModel:            firstEnvDefault("antigravity-coder", "ANTIGRAVITY_MODEL", "AI_BRIDGE_ANTIGRAVITY_MODEL"),
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_ANTIGRAVITY_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_ANTIGRAVITY_CHAT_COMPLETIONS_ENDPOINT"),
-			RequireKey:              firstEnv("ANTIGRAVITY_API_KEY", "AI_BRIDGE_ANTIGRAVITY_API_KEY") != "",
+			RequireKey:              envBool("ANTIGRAVITY_REQUIRE_API_KEY", firstEnv("ANTIGRAVITY_API_KEY", "AI_BRIDGE_ANTIGRAVITY_API_KEY") != ""),
 		}),
 		"mimo": withDefaults("mimo", OpenAICompatibleConfig{
 			ProviderID:              firstEnv("AI_BRIDGE_MIMO_PROVIDER_ID"),
-			BaseURL:                 firstEnvDefault("https://api.mimo.example/v1", "MIMO_BASE_URL", "AI_BRIDGE_MIMO_BASE_URL"),
+			BaseURL:                 firstEnv("MIMO_BASE_URL", "AI_BRIDGE_MIMO_BASE_URL"),
 			APIKey:                  firstEnv("MIMO_API_KEY", "AI_BRIDGE_MIMO_API_KEY"),
 			DefaultModel:            firstEnvDefault("mimo-coder", "MIMO_MODEL", "AI_BRIDGE_MIMO_MODEL"),
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_MIMO_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_MIMO_CHAT_COMPLETIONS_ENDPOINT"),
-			RequireKey:              envBool("AI_BRIDGE_MIMO_ENABLED", false),
+			RequireKey:              envBool("MIMO_REQUIRE_API_KEY", envBool("AI_BRIDGE_MIMO_REQUIRE_API_KEY", envBool("AI_BRIDGE_MIMO_ENABLED", false))),
 		}),
 	}
 	for key, cfg := range configs {

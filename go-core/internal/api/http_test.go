@@ -15,6 +15,7 @@ import (
 
 	"sourcevcode-orchestrator/go-core/internal/app"
 	"sourcevcode-orchestrator/go-core/internal/kernel"
+	"sourcevcode-orchestrator/go-core/internal/state"
 )
 
 func anyString(value any) string {
@@ -79,10 +80,11 @@ func newTestServer(t *testing.T) *Server {
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("CODEX_SALE_API_KEY", "")
 	t.Setenv("MISTRAL_API_KEY", "")
-	orchestrator, err := kernel.NewDefault(filepath.Join(t.TempDir(), "state.json"))
+	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
-		t.Fatalf("NewDefault: %v", err)
+		t.Fatalf("NewFileStore: %v", err)
 	}
+	orchestrator := kernel.NewWithStore(store)
 	return NewServer(orchestrator, app.DefaultRequiredHTTPEndpoints)
 }
 
@@ -171,6 +173,35 @@ func TestSourcecraftDelegateUsesGoOrchestrator(t *testing.T) {
 	}
 	if got := responseOrigin["client_kind"]; got != "external_chat" {
 		t.Fatalf("response_origin.client_kind = %v, want external_chat", got)
+	}
+}
+
+func TestSourcecraftStatusAdvertisesPlanningOnlyRuntime(t *testing.T) {
+	server := newTestServer(t)
+	request := httptest.NewRequest(http.MethodGet, "/sourcecraft", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected ok, got %d: %s", response.Code, response.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := payload["runtime_mode"]; got != "semantic-routing" {
+		t.Fatalf("runtime_mode = %v, want semantic-routing", got)
+	}
+	if got := payload["mutation_supported"]; got != false {
+		t.Fatalf("mutation_supported = %v, want false", got)
+	}
+	families, ok := payload["task_families"].([]any)
+	if !ok || len(families) == 0 {
+		t.Fatalf("task_families = %#v, want non-empty list", payload["task_families"])
+	}
+	actions, ok := payload["safe_actions"].([]any)
+	if !ok || len(actions) == 0 {
+		t.Fatalf("safe_actions = %#v, want non-empty list", payload["safe_actions"])
 	}
 }
 

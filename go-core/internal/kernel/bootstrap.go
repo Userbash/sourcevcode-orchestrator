@@ -13,7 +13,10 @@ func NewDefault(statePath string) (*Orchestrator, error) {
 	if err != nil {
 		return nil, err
 	}
+	return NewWithStore(store), nil
+}
 
+func NewWithStore(store state.Store) *Orchestrator {
 	registry := NewRegistry()
 	configs := agents.LoadOpenAICompatibleConfigs()
 	providerRegistry := NewProviderModelRegistry(configs)
@@ -58,7 +61,12 @@ func NewDefault(statePath string) (*Orchestrator, error) {
 	registry.RegisterModule(localModelManager)
 	registry.RegisterModule(modules.NewCodeAutomationModule())
 	orchestrator.AttachLocalModelManager(localModelManager)
+	registerDefaultAgents(registry, configs)
 
+	return orchestrator
+}
+
+func registerDefaultAgents(registry *Registry, configs map[string]agents.OpenAICompatibleConfig) {
 	coordinatorConfig := configs["ai_kernel"]
 	if !coordinatorConfig.Configured() {
 		coordinatorConfig = configs["local"]
@@ -86,6 +94,6 @@ func NewDefault(statePath string) (*Orchestrator, error) {
 	registerProviderAgent(agents.AgentDescriptor{ID: "docs-ai-kernel", Type: "documentation", Capabilities: []string{"docs"}}, configs["ai_kernel"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "research-mistral", Type: "research", Capabilities: []string{"research", "docs"}}, configs["mistral"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "research-mimo", Type: "research", Capabilities: []string{"research", "docs"}}, configs["mimo"])
-
-	return orchestrator, nil
+	registerProviderAgent(agents.AgentDescriptor{ID: "coder-antigravity", Type: "coding", Capabilities: []string{"code", "fix", "review", "test"}}, configs["antigravity"])
+	registerProviderAgent(agents.AgentDescriptor{ID: "reviewer-antigravity", Type: "review", Capabilities: []string{"review", "security"}}, configs["antigravity"])
 }

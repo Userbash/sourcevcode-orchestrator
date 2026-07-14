@@ -36,10 +36,13 @@ const (
 type TaskStatus string
 
 const (
+	TaskStatusQueued       TaskStatus = "queued"
 	TaskStatusAccepted     TaskStatus = "accepted"
 	TaskStatusRejected     TaskStatus = "rejected"
 	TaskStatusWaitingInput TaskStatus = "waiting_input"
 	TaskStatusRunning      TaskStatus = "running"
+	TaskStatusCompleted    TaskStatus = "completed"
+	TaskStatusDeadLettered TaskStatus = "dead_lettered"
 	TaskStatusDone         TaskStatus = "done"
 	TaskStatusFailed       TaskStatus = "failed"
 )
@@ -160,6 +163,16 @@ type PlanArtifact struct {
 	CreatedAt         time.Time          `json:"created_at"`
 }
 
+type ParallelPlanStatus string
+
+const (
+	ParallelPlanStatusPlanned   ParallelPlanStatus = "planned"
+	ParallelPlanStatusRunning   ParallelPlanStatus = "running"
+	ParallelPlanStatusBlocked   ParallelPlanStatus = "blocked"
+	ParallelPlanStatusFailed    ParallelPlanStatus = "failed"
+	ParallelPlanStatusCompleted ParallelPlanStatus = "completed"
+)
+
 type ExecutionPlanPreview struct {
 	Task             Task          `json:"task"`
 	Plan             ExecutionPlan `json:"plan"`
@@ -170,19 +183,19 @@ type ExecutionPlanPreview struct {
 }
 
 type ParallelPlanCheckpoint struct {
-	Kind             string         `json:"kind"`
-	RootTaskID       string         `json:"root_task_id"`
-	SessionID        string         `json:"session_id"`
-	Branch           string         `json:"branch"`
-	RootTask         Task           `json:"root_task,omitempty"`
-	Plan             ExecutionPlan  `json:"plan,omitempty"`
-	PlanArtifact     PlanArtifact   `json:"plan_artifact"`
-	PendingTaskIDs   []string       `json:"pending_task_ids"`
-	CompletedTaskIDs []string       `json:"completed_task_ids,omitempty"`
-	ResultsByTaskID  map[string]any `json:"results_by_task_id,omitempty"`
-	BatchNo          int            `json:"batch_no"`
-	Status           string         `json:"status"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	Kind             string             `json:"kind"`
+	RootTaskID       string             `json:"root_task_id"`
+	SessionID        string             `json:"session_id"`
+	Branch           string             `json:"branch"`
+	RootTask         Task               `json:"root_task,omitempty"`
+	Plan             ExecutionPlan      `json:"plan,omitempty"`
+	PlanArtifact     PlanArtifact       `json:"plan_artifact"`
+	PendingTaskIDs   []string           `json:"pending_task_ids"`
+	CompletedTaskIDs []string           `json:"completed_task_ids,omitempty"`
+	ResultsByTaskID  map[string]any     `json:"results_by_task_id,omitempty"`
+	BatchNo          int                `json:"batch_no"`
+	Status           ParallelPlanStatus `json:"status"`
+	UpdatedAt        time.Time          `json:"updated_at"`
 }
 
 type ResultOutput struct {

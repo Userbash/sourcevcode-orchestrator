@@ -251,6 +251,49 @@ func (m *Manager) RecordTaskExchange(ctx context.Context, task domain.Task, resu
 	return err
 }
 
+func (m *Manager) RecordPeerExchange(ctx context.Context, envelope domain.TaskEnvelope, acceptance domain.TaskAcceptance, result *domain.AgentResult, reason string) error {
+	if m == nil || m.store == nil {
+		return nil
+	}
+	parts := []string{
+		strings.TrimSpace(envelope.Payload.Objective),
+		strings.TrimSpace(strings.Join(envelope.Payload.AcceptanceCriteria, "\n")),
+		strings.TrimSpace(reason),
+	}
+	if result != nil {
+		parts = append(parts, strings.TrimSpace(result.Output.Summary), strings.TrimSpace(strings.Join(result.Errors, "\n")))
+	}
+	text := strings.TrimSpace(strings.Join(parts, "\n\n"))
+	if text == "" {
+		return nil
+	}
+	metadata := map[string]any{
+		"task_id":             envelope.TaskID,
+		"parent_task_id":      envelope.ParentTaskID,
+		"trace_id":            envelope.TraceID,
+		"correlation_id":      envelope.CorrelationID,
+		"source_agent":        envelope.SourceAgent,
+		"target_agent":        envelope.TargetAgent,
+		"target_capability":   envelope.TargetCapability,
+		"provider":            acceptance.Provider,
+		"model_name":          acceptance.ModelName,
+		"retry_count":         envelope.RetryCount,
+		"is_dead_letter":      envelope.IsDeadLetter,
+		"source_kind":         "peer_exchange",
+		"expected_output":     envelope.Payload.ExpectedOutputFormat,
+		"envelope_artifacts":  append([]string(nil), envelope.Payload.Artifacts...),
+		"acceptance_criteria": append([]string(nil), envelope.Payload.AcceptanceCriteria...),
+	}
+	if result != nil {
+		metadata["result_status"] = result.Status
+		metadata["result_agent_id"] = result.AgentID
+		metadata["result_provider"] = result.Provider
+		metadata["result_model_name"] = result.ModelName
+	}
+	_, err := m.IngestText(ctx, firstNonEmpty(envelope.CorrelationID, envelope.TaskID), envelope.ContextScope, "peer_exchange", firstNonEmpty(envelope.TaskID, envelope.TraceID), text, metadata)
+	return err
+}
+
 func (m *Manager) IngestText(ctx context.Context, sessionID string, branch string, source string, sourceID string, text string, metadata map[string]any) ([]domain.VectorChunk, error) {
 	if m == nil || m.store == nil {
 		return nil, nil
