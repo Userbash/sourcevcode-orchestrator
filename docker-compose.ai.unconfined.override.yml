@@ -1,5 +1,0 @@
-services:
-  agent:
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
