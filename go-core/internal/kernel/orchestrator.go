@@ -822,7 +822,8 @@ func (o *Orchestrator) executeTaskP2P(ctx context.Context, task domain.Task, pla
 				excluded[agentInfo.ID] = struct{}{}
 				currentAcceptance = fallbackAcceptance
 				currentAgent = fallbackAgent
-				currentTask = o.attachRuntimeContext(ctx, o.withFailureContext(currentTask, agentInfo, result, attempt, 0), currentAcceptance, currentAgent.Info())
+				currentTask = o.rebindTaskAssignment(o.withFailureContext(currentTask, agentInfo, result, attempt, 0), currentAcceptance)
+				currentTask = o.attachRuntimeContext(ctx, currentTask, currentAcceptance, currentAgent.Info())
 				continue
 			}
 			return currentAcceptance, currentTask, result
@@ -842,7 +843,8 @@ func (o *Orchestrator) executeTaskP2P(ctx context.Context, task domain.Task, pla
 			excluded[agentInfo.ID] = struct{}{}
 			currentAcceptance = fallbackAcceptance
 			currentAgent = fallbackAgent
-			currentTask = o.attachRuntimeContext(ctx, o.withFailureContext(currentTask, agentInfo, result, attempt, latency), currentAcceptance, currentAgent.Info())
+			currentTask = o.rebindTaskAssignment(o.withFailureContext(currentTask, agentInfo, result, attempt, latency), currentAcceptance)
+			currentTask = o.attachRuntimeContext(ctx, currentTask, currentAcceptance, currentAgent.Info())
 			continue
 		}
 		return currentAcceptance, currentTask, result
@@ -1302,6 +1304,7 @@ func (o *Orchestrator) handleTaskResult(ctx context.Context, result domain.TaskR
 		if fallbackAcceptance, fallbackAgent, reroute := o.routePeerFallback(workflow.Task, workflow.Plan, excluded, failedAgentID); reroute {
 			attempt := routingHintInt(workflow.Task, "p2p_attempt", 1) + 1
 			workflow.Task = o.withFailureContext(workflow.Task, domain.AgentInfo{ID: failedAgentID, Provider: result.Result.Provider, ModelName: result.Result.ModelName}, result.Result, attempt-1, 0)
+			workflow.Task = o.rebindTaskAssignment(workflow.Task, fallbackAcceptance)
 			workflow.Task = o.annotatePeerAttempt(workflow.Task, fallbackAcceptance, attempt, excluded)
 			workflow.Task = o.attachRuntimeContext(ctx, workflow.Task, fallbackAcceptance, fallbackAgent.Info())
 			workflow.Acceptance = fallbackAcceptance
@@ -1843,6 +1846,16 @@ func (o *Orchestrator) publishInventorySnapshot(ctx context.Context) {
 	o.inventoryHub.Publish("workflows", "inventory.snapshot", "workflows", map[string]any{
 		"items": workflows,
 	})
+}
+
+func (o *Orchestrator) rebindTaskAssignment(task domain.Task, acceptance domain.TaskAcceptance) domain.Task {
+	task.AssignedProvider = acceptance.Provider
+	task.AssignedModel = acceptance.ModelName
+	hints := cloneMap(task.RoutingHints)
+	hints["selected_provider"] = acceptance.Provider
+	hints["selected_model"] = acceptance.ModelName
+	task.RoutingHints = hints
+	return task
 }
 
 func (o *Orchestrator) attachRuntimeContext(ctx context.Context, task domain.Task, acceptance domain.TaskAcceptance, agent domain.AgentInfo) domain.Task {

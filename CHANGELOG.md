@@ -1,78 +1,31 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
+## Unreleased
 
-The format follows Keep a Changelog principles and Semantic Versioning (`MAJOR.MINOR.PATCH`).
+### Documentation and repository structure
 
-## [Unreleased]
+- Moved project documentation to the repository root and consolidated detailed technical material under `docs/`.
+- Rewrote the root `README.md` as the primary publication entrypoint for architecture, runtime behavior, transport, and deployment.
+- Added dedicated documentation for architecture, API and transport, runtime routing and model selection, and deployment and publication.
+- Removed duplicated documentation from `go-core` so the repository root is the single source of truth.
 
-### Added
-- Input normalization helpers for task intake:
-  - Unicode cleanup, whitespace compaction, control-character stripping, and list normalization
-  - heuristic request quantization for intent, risk, scope, execution shape, quality, and confidence
-- Routing-profile propagation across orchestration:
-  - normalized intake profile attached to created tasks
-  - prompt optimizer context enriched with normalized reasons and execution guidance
-  - memory runtime context enriched with normalization guidance for downstream agents
-- Regression coverage for normalized payload parsing, provider preference escalation, secure routing, and normalized-profile-based decomposition
-- Delivery supervision for local agent execution:
-  - tracked delivery records and handshake states
-  - payload checksum validation before execution
-  - retry and dead-letter handling on ACK timeout
-  - delivery telemetry in KPI snapshots and mailbox health views
-- Antigravity session persistence and recovery controls:
-  - local session state store with last-success and last-failure metadata
-  - login cooldown and recent-session grace windows
-  - explicit session-control status for user-facing and orchestrator-facing flows
-- Memory event publishing:
-  - `memory.events` for stored memories and remembered commands
-  - `memory.trained.events` for trained memory storage, outcomes, and rejections
-- Targeted regression coverage for delivery supervision, memory event emission, and Antigravity session handling
-- Documentation governance baseline:
-  - architecture map (`docs/ARCHITECTURE.md`)
-  - API documentation structure (`docs/API/*`)
-  - ADR registry (`docs/ADR/*`)
-  - operations runbooks (`docs/RUNBOOKS/*`)
-  - versioning policy (`docs/VERSIONING_POLICY.md`)
-  - database migration playbook (`docs/DB_MIGRATION_PLAYBOOK.md`)
-  - RBAC matrix (`docs/RBAC_MATRIX.md`)
-  - security changelog (`docs/SECURITY_CHANGELOG.md`)
-  - test coverage map (`docs/TEST_COVERAGE_MAP.md`)
-  - release manifest template (`docs/RELEASE_MANIFEST_TEMPLATE.md`)
-- CI documentation quality checks:
-  - markdown local-link validation
-  - API route documentation coverage validation
+### Runtime routing and model selection
 
-### Changed
-- Task routing, provider prioritization, and decomposition now react to normalized intake risk, quality, and execution-shape signals instead of relying only on raw task complexity.
-- High-risk or noisy requests now prefer stronger validation lanes and stronger providers, while multi-file code requests can trigger earlier parallel fan-out.
-- Simplified the orchestrator module set by removing legacy frontend, UI-theme, websocket, API bridge, and auto-dev pipeline paths from the active runtime.
-- Routed local agent execution through delivery envelopes and mailbox handshakes instead of direct `agent.run(...)` calls.
-- Wired session memory and persistent memory to the message bus so memory activity can be observed externally.
-- Switched `docker-compose.ai.yml` to an explicit RabbitMQ-backed message bus configuration and added a RabbitMQ healthcheck dependency.
-- Trimmed repository documentation to the backend, orchestrator, and infrastructure layers that still exist in this repository.
-- Expanded root `README.md` with a documentation index and governance workflow.
-- Added root npm scripts for docs verification and route-doc synchronization checks.
-- Added pull request template with mandatory risk, migration, rollback, and traceability sections.
+- Fixed the provider mismatch between model selection and agent routing so `AssignedProvider` is preserved during routing.
+- Updated fallback handling to keep provider and model rebinding consistent during reroute scenarios.
+- Expanded model selection logic to use live inventory, complexity, risk, route history, retrieval signals, memory, and budget pressure.
+- Improved runtime model inventory handling to distinguish ready, degraded, unavailable, missing, and not-configured model states.
+- Added tests that cover provider-safe routing and model selection behavior.
 
-### Removed
-- Legacy frontend-specific agents and worker scaffolding that are no longer part of the supported release path.
-- Deprecated modules and tests for frontend generation, websocket protocol variants, JSON theme storage, API bridge, image orchestration, and related one-shot task normalization.
+### API and transport
 
-### Fixed
-- Antigravity authorization recovery now distinguishes auth failures from transient runtime faults and avoids repeated relogin loops.
-- KPI summaries now include delivery backlog, retries, dead letters, and live queue health by agent.
-- Data-plane and storage schema handling no longer reference removed `json_themes` structures.
+- Added transport audit support for WebSocket traffic and orchestration envelope tracing.
+- Exposed runtime payload and control surface updates needed for inventory and routing introspection.
+- Added relay and audit bridge scripts for interactive WebSocket validation and transport inspection.
+- Added an external chat proxy service that forwards external chat traffic to the internal orchestrator and keeps the orchestrator authoritative.
 
-## [2.0.0] - 2026-05-24
+### Packaging and deployment
 
-### Added
-- Core backend API services and deployment hardening.
-- Extended RBAC, audit, telemetry, and security guardrails.
-- AI Bridge orchestration protocol updates and routing stabilization.
-- Admin panel and observability improvements.
-
-### Fixed
-- Registration security edge cases (disposable domains, CORS origin handling).
-- Admin telemetry stability and limiter behavior.
-
+- Updated the orchestrator container packaging.
+- Added a root `docker-compose.yml` that defines the local orchestration stack and external chat gateway.
+- Rebuilt and validated the runtime container against the live `127.0.0.1:8010` health and WebSocket path.

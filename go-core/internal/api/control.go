@@ -439,6 +439,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, normali
 		}
 		envelope, err := transport.ParseEnvelope(raw, normalizeChat)
 		if err != nil {
+			s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, normalizeChat, automaticAction, raw, nil, err, "parse_error")
 			_ = send(transport.ErrorEnvelope(transport.Envelope{RequestID: handshake.SessionID}, transport.ErrorCode(err), err.Error(), nil))
 			continue
 		}
@@ -448,6 +449,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, normali
 				envelope.Ack = true
 			}
 		}
+		s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, normalizeChat, automaticAction, raw, &envelope, nil, "accepted")
 		if response, handled, controlErr := session.HandleControlFrame(connectionCtx, envelope); handled {
 			if controlErr != nil {
 				_ = send(transport.ErrorEnvelope(envelope, transport.ErrorCode(controlErr), controlErr.Error(), nil))

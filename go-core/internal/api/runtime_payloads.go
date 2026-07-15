@@ -289,6 +289,10 @@ func (s *Server) transportAudit() map[string]any {
 		"actions":              s.dispatcher.Actions(),
 		"supported_protocols":  []string{"chat.v1", "chat.json"},
 		"python_runtime_calls": 0,
+		"inbound_ws_audit": map[string]any{
+			"capacity": s.wsAudit.capacity(),
+			"entries":  s.wsAudit.snapshot(),
+		},
 	}
 }
 

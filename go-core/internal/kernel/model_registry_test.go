@@ -203,3 +203,67 @@ func findModel(models []domain.ProviderModelStatus, name string) domain.Provider
 	}
 	return domain.ProviderModelStatus{}
 }
+
+func TestProviderModelRegistryValidatesNonCodexProviders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.4"},{"id":"ghost-model"}]}`))
+		case "/v1/chat/completions":
+			var payload struct {
+				Model string `json:"model"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode chat payload: %v", err)
+			}
+			if payload.Model == "gpt-5.4" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"id":"ok"}`))
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"model is not available"}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("AI_BRIDGE_MODEL_VALIDATE_MODELS", "true")
+	t.Setenv("AI_BRIDGE_MODEL_VALIDATE_LIMIT", "12")
+
+	registry := NewProviderModelRegistry(map[string]agents.OpenAICompatibleConfig{
+		"openai": {
+			Provider:                "openai",
+			ProviderID:              "openai",
+			BaseURL:                 server.URL + "/v1",
+			ModelsEndpoint:          server.URL + "/v1/models",
+			ChatCompletionsEndpoint: server.URL + "/v1/chat/completions",
+			DefaultModel:            "gpt-5.4",
+			APIKey:                  "secret",
+			RequireKey:              true,
+			Timeout:                 time.Second,
+		},
+	})
+
+	registry.Refresh(context.Background())
+	snapshot, ok := registry.Snapshot("openai")
+	if !ok {
+		t.Fatal("expected snapshot")
+	}
+	if snapshot.Status != "degraded" {
+		t.Fatalf("unexpected provider status: %s", snapshot.Status)
+	}
+	good := findModel(snapshot.Models, "gpt-5.4")
+	if good.Status != "ready" || !good.Available {
+		t.Fatalf("expected healthy validated model, got %#v", good)
+	}
+	ghost := findModel(snapshot.Models, "ghost-model")
+	if ghost.Status != "validation_failed" {
+		t.Fatalf("unexpected ghost status: %#v", ghost)
+	}
+	if ghost.Available {
+		t.Fatalf("expected ghost model to be unavailable: %#v", ghost)
+	}
+}

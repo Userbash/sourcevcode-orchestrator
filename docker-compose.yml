@@ -1,0 +1,222 @@
+name: hebrew-stack
+
+services:
+  postgresql:
+    image: docker.io/pgvector/pgvector:pg16
+    container_name: ai_bridge_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ai_bridge
+      POSTGRES_PASSWORD: ai_bridge_password
+      POSTGRES_DB: ai_bridge
+      PGDATA: /var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=200
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - wal_level=logical
+      - -c
+      - track_commit_timestamp=on
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - hebrew_net
+
+  rabbitmq:
+    image: docker.io/library/rabbitmq:3-management
+    container_name: ai_bridge_rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DATA_DIR: /var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test:
+        - CMD
+        - rabbitmq-diagnostics
+        - -q
+        - ping
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - hebrew_net
+
+  local_llm:
+    image: docker.io/ollama/ollama:latest
+    container_name: ai_bridge_local_llm
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NVIDIA_VISIBLE_DEVICES: all
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    devices:
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/dri/card2:/dev/dri/card2
+      - /dev/dri/renderD129:/dev/dri/renderD129
+    security_opt:
+      - label=disable
+    healthcheck:
+      test:
+        - CMD
+        - /bin/ollama
+        - list
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - hebrew_net
+
+  ai_kernel:
+    image: localhost/hebrew-ai-kernel:local
+    container_name: ai_bridge_ai_kernel
+    restart: unless-stopped
+    environment:
+      AI_KERNEL_HOST: 0.0.0.0
+      AI_KERNEL_PORT: "8012"
+      AI_KERNEL_API_KEY: local
+      AI_KERNEL_MODEL_ALIAS: hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m
+      AI_KERNEL_MODEL_ID: HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive
+      AI_KERNEL_MODEL_FILE: Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
+      AI_KERNEL_MMPROJ_FILE: mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf
+      AI_KERNEL_MODEL_DIR: /models/hauhaucs-qwen36-35b-a3b-aggressive
+      AI_KERNEL_MODEL_PATH: /models/hauhaucs-qwen36-35b-a3b-aggressive/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
+      AI_KERNEL_MMPROJ_PATH: /models/hauhaucs-qwen36-35b-a3b-aggressive/mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf
+      AI_KERNEL_N_CTX: "8192"
+      AI_KERNEL_N_THREADS: "16"
+      AI_KERNEL_N_GPU_LAYERS: "999"
+      AI_KERNEL_CHAT_TEMPLATE_KWARGS: '{"enable_thinking": false}'
+    ports:
+      - "8012:8012"
+    volumes:
+      - ai_kernel_models:/models
+    depends_on:
+      - local_llm
+    networks:
+      - hebrew_net
+
+  go_core:
+    build:
+      context: ./go-core
+      dockerfile: Dockerfile
+    image: localhost/go-core:local
+    container_name: go_core
+    restart: unless-stopped
+    env_file:
+      - .env
+      - .env.bridge
+    environment:
+      GO_CORE_HOST: 0.0.0.0
+      ORCHESTRATOR_PORT: "8010"
+      AI_BRIDGE_API_HOST: 0.0.0.0
+      AI_BRIDGE_API_PORT: "8010"
+      AI_BRIDGE_POSTGRES_HOST: postgresql
+      AI_BRIDGE_POSTGRES_PORT: "5432"
+      AI_BRIDGE_POSTGRES_USER: ai_bridge
+      AI_BRIDGE_POSTGRES_PASSWORD: ai_bridge_password
+      AI_BRIDGE_POSTGRES_DB: ai_bridge
+      AI_BRIDGE_MEMORY_DATABASE_URL: postgresql://ai_bridge:ai_bridge_password@postgresql:5432/ai_bridge?sslmode=disable
+      AI_BRIDGE_RABBITMQ_HOST: rabbitmq
+      AI_BRIDGE_RABBITMQ_PORT: "5672"
+      AI_BRIDGE_RABBITMQ_USER: guest
+      AI_BRIDGE_RABBITMQ_PASSWORD: guest
+      AI_BRIDGE_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      AI_BRIDGE_LOCAL_LLM_ENDPOINT: http://local_llm:11434
+      AI_BRIDGE_LOCAL_LLM_MODELS_ENDPOINT: http://local_llm:11434/api/tags
+      AI_BRIDGE_LOCAL_LLM_CHAT_COMPLETIONS_ENDPOINT: http://local_llm:11434/v1/chat/completions
+      AI_KERNEL_BASE_URL: http://ai_kernel:8012/v1
+      AI_BRIDGE_AI_KERNEL_BASE_URL: http://ai_kernel:8012/v1
+      AI_BRIDGE_AI_KERNEL_MODELS_ENDPOINT: http://ai_kernel:8012/v1/models
+      AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT: http://ai_kernel:8012/v1/chat/completions
+      AI_KERNEL_API_KEY: local
+      AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION: "false"
+      AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE: "false"
+    ports:
+      - "8010:8010"
+    volumes:
+      - core_memory:/app/db_backups
+    depends_on:
+      - postgresql
+      - rabbitmq
+      - local_llm
+      - ai_kernel
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/orchestrator
+        - healthcheck
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - hebrew_net
+
+  chat_gateway:
+    build:
+      context: ./script/chat-proxy
+    image: localhost/chat-proxy:local
+    container_name: go_chat_gateway
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: ":80"
+      UPSTREAM_BASE_URL: "http://go_core:8010"
+    ports:
+      - "80:80"
+    depends_on:
+      - go_core
+    networks:
+      - hebrew_net
+
+networks:
+  hebrew_net:
+    name: hebrew-net
+    external: true
+
+volumes:
+  postgres_data:
+    name: hebrew_pg_data
+    external: true
+  rabbitmq_data:
+    name: f4e8a2ce6ed671173eddf888afcefc9489463ff48774ed94a56938d48b86a215
+    external: true
+  ollama_data:
+    name: hebrew_ollama_data
+    external: true
+  ai_kernel_models:
+    name: ai_kernel_models
+    external: true
+  core_memory:
+    name: hebrew_core_memory
+    external: true

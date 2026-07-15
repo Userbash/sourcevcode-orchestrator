@@ -18,6 +18,7 @@ type Server struct {
 	dispatcher     *transport.Dispatcher
 	requiredRoutes []string
 	mux            *http.ServeMux
+	wsAudit        *websocketAuditLog
 }
 
 func NewServer(orchestrator *kernel.Orchestrator, requiredRoutes []string) *Server {
@@ -25,6 +26,7 @@ func NewServer(orchestrator *kernel.Orchestrator, requiredRoutes []string) *Serv
 		orchestrator:   orchestrator,
 		requiredRoutes: append([]string(nil), requiredRoutes...),
 		mux:            http.NewServeMux(),
+		wsAudit:        newWebsocketAuditLog(100),
 	}
 	server.dispatcher = server.buildDispatcher()
 	server.routes()

@@ -66,6 +66,7 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 			}
 		}
 	}
+	relaxAssignedProvider := len(exclude) > 0
 	candidates := make([]agents.Agent, 0)
 	for _, agent := range r.registry.Agents() {
 		if _, blocked := exclude[agent.Info().ID]; blocked {
@@ -76,7 +77,11 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 		}
 		candidates = append(candidates, agent)
 	}
+	candidates = filterCandidatesByAssignedProvider(task, candidates, relaxAssignedProvider)
 	if len(candidates) == 0 {
+		if strings.TrimSpace(task.AssignedProvider) != "" {
+			return rejected(task, complexity, capability, "no available agent matched assigned provider "+task.AssignedProvider), nil, false
+		}
 		return rejected(task, complexity, capability, "no available agent for capability "+capability), nil, false
 	}
 	risk := EvaluateRiskContext(taskText(task))
@@ -161,6 +166,41 @@ func (r *Router) canRouteAgent(task domain.Task, agent agents.Agent, capability 
 		return false
 	}
 	return agent.CanAccept(task)
+}
+
+func filterCandidatesByAssignedProvider(task domain.Task, candidates []agents.Agent, relaxAssignedProvider bool) []agents.Agent {
+	assignedProvider := strings.TrimSpace(task.AssignedProvider)
+	if assignedProvider == "" || relaxAssignedProvider || shouldRelaxAssignedProvider(task) {
+		return candidates
+	}
+	filtered := make([]agents.Agent, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate.Info().Provider), assignedProvider) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func shouldRelaxAssignedProvider(task domain.Task) bool {
+	if task.RoutingHints == nil {
+		return false
+	}
+	if attempt, ok := task.RoutingHints["p2p_attempt"].(int); ok && attempt > 1 {
+		return true
+	}
+	if attempt, ok := task.RoutingHints["p2p_attempt"].(float64); ok && attempt > 1 {
+		return true
+	}
+	if rawFailures, ok := task.RoutingHints["peer_failures"]; ok {
+		switch failures := rawFailures.(type) {
+		case []map[string]any:
+			return len(failures) > 0
+		case []any:
+			return len(failures) > 0
+		}
+	}
+	return false
 }
 
 func (r *Router) scoreAgent(ctx context.Context, info domain.AgentInfo, task domain.Task, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {

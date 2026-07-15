@@ -26,6 +26,7 @@ func NewWithStore(store state.Store) *Orchestrator {
 	runtimeHub := realtime.NewHub("runtime", 128)
 	inventoryHub := realtime.NewHub("inventory", 64)
 	orchestrator := NewOrchestrator(registry, planner, router, store, runtimeHub, inventoryHub, providerRegistry)
+	selector.AttachMemoryManager(orchestrator.memory)
 
 	registerModule := func(name, kind, summary string) {
 		registry.RegisterModule(modules.NewBasicModule(name, kind, map[string]any{

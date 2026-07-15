@@ -262,6 +262,7 @@ func TestSelectCloudProvider(t *testing.T) {
 	configs := map[string]OpenAICompatibleConfig{
 		"openai":    {Provider: "openai", BaseURL: "https://api.openai.com/v1", DefaultModel: "gpt-5.5", APIKey: "secret", RequireKey: true},
 		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
+		"mistral":   {Provider: "mistral", BaseURL: "https://api.mistral.ai/v1", DefaultModel: "mistral-large-latest", APIKey: "secret", RequireKey: true},
 	}
 
 	if got := SelectCloudProvider(configs, "auto"); got != "openai" {
@@ -272,6 +273,9 @@ func TestSelectCloudProvider(t *testing.T) {
 	}
 	if got := SelectCloudProvider(configs, "openai"); got != "openai" {
 		t.Fatalf("SelectCloudProvider(openai)=%q want %q", got, "openai")
+	}
+	if got := SelectCloudProvider(configs, "mistral"); got != "mistral" {
+		t.Fatalf("SelectCloudProvider(mistral)=%q want %q", got, "mistral")
 	}
 
 	aliasConfigs := map[string]OpenAICompatibleConfig{
@@ -292,6 +296,11 @@ func TestSelectCloudProvider(t *testing.T) {
 		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
 	}, "openai"); got != "codexsale" {
 		t.Fatalf("SelectCloudProvider(openai fallback)=%q want %q", got, "codexsale")
+	}
+	if got := SelectCloudProvider(map[string]OpenAICompatibleConfig{
+		"mistral": {Provider: "mistral", BaseURL: "https://api.mistral.ai/v1", DefaultModel: "mistral-large-latest", APIKey: "secret", RequireKey: true},
+	}, "auto"); got != "mistral" {
+		t.Fatalf("SelectCloudProvider(auto non-gpt cloud)=%q want %q", got, "mistral")
 	}
 }
 

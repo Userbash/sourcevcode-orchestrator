@@ -139,40 +139,24 @@ func LooksLikeCodexSaleAlias(cfg OpenAICompatibleConfig) bool {
 
 func CloudProviderPreference() string {
 	preference := strings.ToLower(strings.TrimSpace(firstEnv("AI_BRIDGE_CLOUD_PROVIDER", "GO_CORE_CLOUD_PROVIDER")))
-	switch preference {
-	case "", "auto":
-		return "auto"
-	case "openai", "codexsale":
-		return preference
-	default:
+	if preference == "" {
 		return "auto"
 	}
+	return preference
 }
 
 func SelectCloudProvider(configs map[string]OpenAICompatibleConfig, preference string) string {
 	preference = strings.ToLower(strings.TrimSpace(preference))
+	if preference != "" && preference != "auto" {
+		if cfg, ok := configs[preference]; ok && cfg.Configured() {
+			return preference
+		}
+	}
+
 	openaiCfg, openaiOK := configs["openai"]
 	codexCfg, codexOK := configs["codexsale"]
 	openaiReady := openaiOK && openaiCfg.Configured()
 	codexReady := codexOK && codexCfg.Configured()
-
-	switch preference {
-	case "openai":
-		if openaiReady {
-			return "openai"
-		}
-		if codexReady {
-			return "codexsale"
-		}
-	case "codexsale":
-		if codexReady {
-			return "codexsale"
-		}
-		if openaiReady {
-			return "openai"
-		}
-	}
-
 	if codexReady && (!openaiReady || LooksLikeCodexSaleAlias(openaiCfg)) {
 		return "codexsale"
 	}
@@ -181,6 +165,21 @@ func SelectCloudProvider(configs map[string]OpenAICompatibleConfig, preference s
 	}
 	if codexReady {
 		return "codexsale"
+	}
+
+	orderedClouds := []string{"mistral", "mimo", "antigravity"}
+	for _, provider := range orderedClouds {
+		if cfg, ok := configs[provider]; ok && cfg.Configured() {
+			return provider
+		}
+	}
+	for provider, cfg := range configs {
+		if strings.EqualFold(provider, "local") || strings.EqualFold(provider, "ai_kernel") {
+			continue
+		}
+		if cfg.Configured() {
+			return provider
+		}
 	}
 	return "openai"
 }

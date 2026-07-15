@@ -1,10 +1,15 @@
 package kernel
 
 import (
+	"context"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/agents"
 	"sourcevcode-orchestrator/go-core/internal/domain"
+	"sourcevcode-orchestrator/go-core/internal/memory"
 )
 
 const (
@@ -27,6 +32,18 @@ type RiskEvaluation struct {
 
 type ModelSelector struct {
 	registry *ProviderModelRegistry
+	memory   *memory.Manager
+}
+
+type modelSelectionPolicy struct {
+	targetProvider          string
+	targetModel             string
+	providers               []string
+	families                []string
+	models                  []string
+	reason                  string
+	cloudRequired           bool
+	requiresSecondaryReview bool
 }
 
 func (s *ModelSelector) preferredCloudProvider() string {
@@ -38,6 +55,13 @@ func (s *ModelSelector) preferredCloudProvider() string {
 
 func NewModelSelector(registry *ProviderModelRegistry) *ModelSelector {
 	return &ModelSelector{registry: registry}
+}
+
+func (s *ModelSelector) AttachMemoryManager(manager *memory.Manager) {
+	if s == nil {
+		return
+	}
+	s.memory = manager
 }
 
 func EvaluateRiskContext(text string) RiskEvaluation {
@@ -92,6 +116,7 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 	complexity := s.Classify(task)
 	text := taskText(task)
 	risk := EvaluateRiskContext(text)
+	policy := s.selectionPolicy(task, complexity, risk)
 	choice := domain.ModelSelection{
 		Complexity:               complexity,
 		DetectedKeywords:         append([]string(nil), risk.DetectedKeywords...),
@@ -106,103 +131,519 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 			"files":               len(compactStrings(task.Input.Files)),
 			"acceptance_criteria": len(compactStrings(task.Input.AcceptanceCriteria)),
 			"constraints":         len(compactStrings(task.Input.Constraints)),
+			"live_model_criteria": []string{
+				"alive if provider inventory marks Available=true",
+				"probe_failed is treated as degraded but still alive",
+				"validation_failed, missing, disabled, or unavailable inventory entries are treated as dead",
+			},
 		},
 	}
-	targetProvider := "local"
-	targetModel := modelLocalSmall
-	reason := "policy_default"
-	if shouldEscalateToCloud(task, complexity, risk) {
-		targetProvider = s.preferredCloudProvider()
-		targetModel = modelOpenAIHigh
-		choice.RequiresSecondaryReview = true
-		reason = "high_risk_or_high_complexity"
-	} else {
-		switch task.Type {
-		case domain.TaskTypeCode, domain.TaskTypeFix, domain.TaskTypeTest:
-			targetProvider = "ai_kernel"
-			targetModel = modelQwenCoder
-			reason = "local_code_path"
-		case domain.TaskTypePlan, domain.TaskTypeReview:
-			targetProvider = "mistral"
-			targetModel = modelMistral
-			choice.RequiresSecondaryReview = task.Type == domain.TaskTypeReview
-			reason = "analysis_review_path"
-		case domain.TaskTypeDocs:
-			targetProvider = "ai_kernel"
-			targetModel = modelLocalSmall
-			reason = "local_docs_path"
-		case domain.TaskTypeResearch:
-			targetProvider = "mistral"
-			targetModel = modelMistral
-			reason = "research_path"
-		}
-	}
-	choice.Provider, choice.ModelName = s.resolveAvailableModel(targetProvider, targetModel, task, complexity, risk)
-	choice.Reason = reason
-	choice.SelectionTrace["target_provider"] = targetProvider
-	choice.SelectionTrace["target_model"] = targetModel
+	choice.RequiresSecondaryReview = policy.requiresSecondaryReview
+	choice.Provider, choice.ModelName = s.resolveAvailableModel(task, policy, choice.SelectionTrace)
+	choice.Reason = policy.reason
+	choice.SelectionTrace["target_provider"] = policy.targetProvider
+	choice.SelectionTrace["target_model"] = policy.targetModel
+	choice.SelectionTrace["provider_candidates"] = append([]string(nil), policy.providers...)
+	choice.SelectionTrace["preferred_families"] = append([]string(nil), policy.families...)
+	choice.SelectionTrace["preferred_models"] = append([]string(nil), policy.models...)
+	choice.SelectionTrace["cloud_required"] = policy.cloudRequired
 	choice.SelectionTrace["resolved_provider"] = choice.Provider
 	choice.SelectionTrace["resolved_model"] = choice.ModelName
 	return choice
 }
 
-func (s *ModelSelector) resolveAvailableModel(targetProvider, targetModel string, task domain.Task, complexity domain.Complexity, risk RiskEvaluation) (string, string) {
-	_ = task
-	_ = complexity
-	_ = risk
+func (s *ModelSelector) selectionPolicy(task domain.Task, complexity domain.Complexity, risk RiskEvaluation) modelSelectionPolicy {
+	if shouldEscalateToCloud(task, complexity, risk) {
+		return modelSelectionPolicy{
+			targetProvider:          s.preferredCloudProvider(),
+			targetModel:             modelOpenAIHigh,
+			providers:               s.providerPreference("cloud"),
+			families:                []string{"gpt", "claude", "gemini", "deepseek", "mistral", "kimi", "glm", "qwen", "llama"},
+			models:                  []string{"gpt-5.6-sol", modelOpenAIHigh, "gpt-5.4", "gpt-5.4-mini", "claude-sonnet-4-6", modelMistral},
+			reason:                  "high_risk_or_high_complexity",
+			cloudRequired:           true,
+			requiresSecondaryReview: true,
+		}
+	}
+	switch task.Type {
+	case domain.TaskTypeCode, domain.TaskTypeFix, domain.TaskTypeTest:
+		return modelSelectionPolicy{
+			targetProvider:          "ai_kernel",
+			targetModel:             modelQwenCoder,
+			providers:               s.providerPreference("code"),
+			families:                []string{"qwen", "deepseek", "llama", "glm", "gpt", "claude", "mistral", "gemini"},
+			models:                  []string{modelQwenCoder, "qwen2.5-coder-32b", "deepseek-coder", "claude-sonnet-4-6", modelOpenAIHigh},
+			reason:                  "code_specialist_path",
+			requiresSecondaryReview: task.Type == domain.TaskTypeTest,
+		}
+	case domain.TaskTypePlan, domain.TaskTypeReview:
+		return modelSelectionPolicy{
+			targetProvider:          "mistral",
+			targetModel:             modelMistral,
+			providers:               s.providerPreference("analysis"),
+			families:                []string{"claude", "gpt", "mistral", "gemini", "kimi", "qwen", "deepseek", "llama"},
+			models:                  []string{"claude-sonnet-4-6", "gpt-5.6-sol", modelOpenAIHigh, modelMistral},
+			reason:                  "analysis_review_path",
+			requiresSecondaryReview: task.Type == domain.TaskTypeReview,
+		}
+	case domain.TaskTypeDocs:
+		return modelSelectionPolicy{
+			targetProvider: "ai_kernel",
+			targetModel:    modelLocalSmall,
+			providers:      s.providerPreference("docs"),
+			families:       []string{"qwen", "llama", "mistral", "gpt", "claude", "gemini"},
+			models:         []string{modelLocalSmall, modelQwenCoder, modelMistral},
+			reason:         "docs_path",
+		}
+	case domain.TaskTypeResearch:
+		return modelSelectionPolicy{
+			targetProvider: "mistral",
+			targetModel:    modelMistral,
+			providers:      s.providerPreference("research"),
+			families:       []string{"claude", "gpt", "mistral", "gemini", "kimi", "deepseek", "qwen"},
+			models:         []string{"claude-sonnet-4-6", modelOpenAIHigh, modelMistral},
+			reason:         "research_path",
+		}
+	default:
+		return modelSelectionPolicy{
+			targetProvider: "local",
+			targetModel:    modelLocalSmall,
+			providers:      s.providerPreference("default"),
+			families:       []string{"qwen", "llama", "gpt", "claude", "mistral"},
+			models:         []string{modelLocalSmall, modelQwenCoder, modelOpenAIHigh},
+			reason:         "policy_default",
+		}
+	}
+}
+
+func (s *ModelSelector) resolveAvailableModel(task domain.Task, policy modelSelectionPolicy, trace map[string]any) (string, string) {
 	if s == nil || s.registry == nil {
-		return targetProvider, targetModel
+		return policy.targetProvider, policy.targetModel
 	}
-	tryProvider := func(provider, preferred string) (string, string, bool) {
+	signals := s.buildSelectorSignals(task)
+	providerOrder := append([]string{policy.targetProvider}, policy.providers...)
+	providerOrder = dedupeStrings(providerOrder)
+	candidates := make([]scoredHealthyModel, 0)
+	for providerIndex, provider := range providerOrder {
 		models := s.registry.HealthyModels(provider)
-		if len(models) == 0 {
-			return "", "", false
-		}
-		preferred = strings.TrimSpace(preferred)
-		if preferred != "" {
-			for _, model := range models {
-				if strings.EqualFold(model.ModelName, preferred) {
-					return provider, model.ModelName, true
-				}
-			}
-		}
 		for _, model := range models {
-			if model.IsDefault {
-				return provider, model.ModelName, true
+			base := scoreHealthyModel(model, policy)
+			if base <= 0 {
+				continue
+			}
+			history := scoreRouteHistory(model, signals.routeResults)
+			budget := scoreBudgetFit(model, signals)
+			retrieval := scoreRetrievalFit(model, policy, signals)
+			failurePenalty := scoreFailurePenalty(model, signals)
+			providerPriority := float64(len(providerOrder)-providerIndex) * 0.35
+			total := float64(base) + providerPriority + history.Total + budget + retrieval - failurePenalty
+			candidates = append(candidates, scoredHealthyModel{
+				status: model,
+				score:  total,
+				components: map[string]any{
+					"base":              base,
+					"provider_priority": providerPriority,
+					"history":           history,
+					"budget":            budget,
+					"retrieval":         retrieval,
+					"failure_penalty":   failurePenalty,
+				},
+			})
+		}
+	}
+	trace["selector_inputs"] = signals.trace()
+	if len(candidates) == 0 {
+		trace["candidate_scores"] = []map[string]any{}
+		return policy.targetProvider, policy.targetModel
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score == candidates[j].score {
+			return candidates[i].status.ModelName < candidates[j].status.ModelName
+		}
+		return candidates[i].score > candidates[j].score
+	})
+	trace["candidate_scores"] = topCandidateScores(candidates, 6)
+	return candidates[0].status.Provider, candidates[0].status.ModelName
+}
+
+type scoredHealthyModel struct {
+	status     domain.ProviderModelStatus
+	score      float64
+	components map[string]any
+}
+
+type selectorSignals struct {
+	budgetAction      string
+	tokenPressure     string
+	peerFailures      []string
+	vectorMemoryCount int
+	routeResults      []domain.RouteSearchResult
+	routeMemoryCount  int
+	validationHasRAG  bool
+	trainedMemory     bool
+}
+
+func (s selectorSignals) trace() map[string]any {
+	return map[string]any{
+		"budget_action":       s.budgetAction,
+		"token_pressure":      s.tokenPressure,
+		"peer_failures":       append([]string(nil), s.peerFailures...),
+		"vector_memory_count": s.vectorMemoryCount,
+		"route_memory_count":  s.routeMemoryCount,
+		"validation_has_rag":  s.validationHasRAG,
+		"trained_memory":      s.trainedMemory,
+	}
+}
+
+type routeHistoryScore struct {
+	Total          float64 `json:"total"`
+	SampleCount    int     `json:"sample_count"`
+	SuccessRate    float64 `json:"success_rate"`
+	ReviewPassRate float64 `json:"review_pass_rate"`
+	TestPassRate   float64 `json:"test_pass_rate"`
+	Confidence     float64 `json:"confidence"`
+	Recency        float64 `json:"recency"`
+	CostEfficiency float64 `json:"cost_efficiency"`
+}
+
+func (s *ModelSelector) buildSelectorSignals(task domain.Task) selectorSignals {
+	signals := selectorSignals{}
+	if task.RoutingHints == nil {
+		return signals
+	}
+	if budget, ok := task.RoutingHints["model_budget"].(map[string]any); ok {
+		signals.budgetAction = stringValue(budget["action"])
+	}
+	signals.tokenPressure = stringValue(task.RoutingHints["token_pressure"])
+	signals.peerFailures = stringSliceValue(task.RoutingHints["peer_failures"])
+	if validation, ok := task.RoutingHints["validation_context"].(map[string]any); ok {
+		signals.validationHasRAG = boolValue(validation["rag_required"])
+	}
+	if memoryContext, ok := task.RoutingHints["memory_context"].(map[string]any); ok {
+		signals.vectorMemoryCount = intValue(memoryContext["vector_memory_count"])
+		signals.trainedMemory = stringValue(memoryContext["trained_memory_brief"]) != ""
+	}
+	if s.memory != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer cancel()
+		if results, err := s.memory.SearchRouteMemories(ctx, task, 10); err == nil {
+			signals.routeResults = results
+			signals.routeMemoryCount = len(results)
+		}
+	}
+	return signals
+}
+
+func scoreRouteHistory(model domain.ProviderModelStatus, results []domain.RouteSearchResult) routeHistoryScore {
+	family := inferModelFamily(model.ModelName)
+	matched := make([]domain.RouteSearchResult, 0)
+	for _, result := range results {
+		record := result.Record
+		providerMatch := strings.EqualFold(record.Provider, model.Provider)
+		modelMatch := strings.EqualFold(record.ModelName, model.ModelName)
+		familyMatch := family != "" && inferModelFamily(record.ModelName) == family
+		if providerMatch && (modelMatch || familyMatch) {
+			matched = append(matched, result)
+		}
+	}
+	if len(matched) == 0 {
+		return routeHistoryScore{}
+	}
+	var success, review, tests, confidence, recency, cost float64
+	for _, result := range matched {
+		record := result.Record
+		if record.Success {
+			success += 1
+		}
+		if record.ReviewPassed {
+			review += 1
+		}
+		if record.TestsPassed {
+			tests += 1
+		}
+		confidence += clamp(result.Similarity, 0, 1) * clamp(record.Confidence, 0, 1)
+		recency += recencyScore(record.UpdatedAt)
+		cost += costEfficiencyScore(record.CostEstimate)
+	}
+	totalCount := float64(len(matched))
+	score := routeHistoryScore{
+		SampleCount:    len(matched),
+		SuccessRate:    success / totalCount,
+		ReviewPassRate: review / totalCount,
+		TestPassRate:   tests / totalCount,
+		Confidence:     confidence / totalCount,
+		Recency:        recency / totalCount,
+		CostEfficiency: cost / totalCount,
+	}
+	score.Total = score.SuccessRate*2.6 + score.ReviewPassRate*1.3 + score.TestPassRate*1.2 + score.Confidence*1.0 + score.Recency*0.7 + score.CostEfficiency*0.6
+	return score
+}
+
+func scoreBudgetFit(model domain.ProviderModelStatus, signals selectorSignals) float64 {
+	action := strings.ToLower(signals.budgetAction)
+	provider := strings.ToLower(model.Provider)
+	family := inferModelFamily(model.ModelName)
+	if action == "reduce" || action == "tighten" {
+		if provider == "ai_kernel" || provider == "local" || provider == "ollama" {
+			return 1.8
+		}
+		if strings.Contains(strings.ToLower(model.ModelName), "mini") || strings.Contains(strings.ToLower(model.ModelName), "small") {
+			return 1.0
+		}
+		if family == "gpt" || family == "claude" || family == "gemini" {
+			return -0.8
+		}
+	}
+	if action == "expand" || action == "increase" {
+		if family == "gpt" || family == "claude" || family == "gemini" {
+			return 0.8
+		}
+	}
+	return 0
+}
+
+func scoreRetrievalFit(model domain.ProviderModelStatus, policy modelSelectionPolicy, signals selectorSignals) float64 {
+	heavyRetrieval := signals.vectorMemoryCount >= 3 || signals.validationHasRAG || signals.trainedMemory
+	if !heavyRetrieval {
+		return 0
+	}
+	name := strings.ToLower(model.ModelName)
+	family := inferModelFamily(model.ModelName)
+	if strings.Contains(name, "mini") {
+		return -0.4
+	}
+	if policy.reason == "analysis_review_path" || policy.reason == "research_path" || policy.reason == "high_risk_or_high_complexity" {
+		if family == "gpt" || family == "claude" || family == "gemini" || family == "qwen" || family == "mistral" {
+			return 1.0
+		}
+	}
+	return 0.3
+}
+
+func scoreFailurePenalty(model domain.ProviderModelStatus, signals selectorSignals) float64 {
+	if len(signals.peerFailures) == 0 {
+		return 0
+	}
+	provider := strings.ToLower(model.Provider)
+	name := strings.ToLower(model.ModelName)
+	for _, failure := range signals.peerFailures {
+		value := strings.ToLower(failure)
+		if value == provider || value == name || strings.Contains(value, provider) || strings.Contains(value, name) {
+			return 2.2
+		}
+	}
+	return 0
+}
+
+func topCandidateScores(candidates []scoredHealthyModel, limit int) []map[string]any {
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	out := make([]map[string]any, 0, limit)
+	for i := 0; i < limit; i++ {
+		candidate := candidates[i]
+		out = append(out, map[string]any{
+			"provider":   candidate.status.Provider,
+			"model":      candidate.status.ModelName,
+			"score":      candidate.score,
+			"status":     candidate.status.Status,
+			"is_default": candidate.status.IsDefault,
+			"components": candidate.components,
+		})
+	}
+	return out
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return strings.TrimSpace(strconv.FormatBool(boolValue(value)))
+	}
+}
+
+func stringSliceValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if item == nil {
+				continue
+			}
+			text := stringValue(item)
+			if text != "" {
+				out = append(out, text)
 			}
 		}
-		return provider, models[0].ModelName, true
+		return out
+	default:
+		return nil
 	}
-	if provider, model, ok := tryProvider(targetProvider, targetModel); ok {
-		return provider, model
-	}
-	fallbacks := []struct {
-		provider string
-		model    string
-	}{
-		{provider: "ai_kernel", model: modelQwenCoder},
-		{provider: "local", model: modelLocalSmall},
-		{provider: "mistral", model: modelMistral},
-		{provider: "codexsale", model: modelOpenAIHigh},
-		{provider: "openai", model: modelOpenAIHigh},
-		{provider: "mimo", model: ""},
-		{provider: "antigravity", model: ""},
-	}
-	seen := map[string]struct{}{strings.ToLower(strings.TrimSpace(targetProvider)): {}}
-	for _, fallback := range fallbacks {
-		providerKey := strings.ToLower(strings.TrimSpace(fallback.provider))
-		if providerKey == "" {
-			continue
-		}
-		if _, exists := seen[providerKey]; exists {
-			continue
-		}
-		seen[providerKey] = struct{}{}
-		if provider, model, ok := tryProvider(fallback.provider, fallback.model); ok {
-			return provider, model
+}
+
+func intValue(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err == nil {
+			return parsed
 		}
 	}
-	return targetProvider, targetModel
+	return 0
+}
+
+func boolValue(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func clamp(value, minValue, maxValue float64) float64 {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func recencyScore(ts time.Time) float64 {
+	if ts.IsZero() {
+		return 0.35
+	}
+	age := time.Since(ts)
+	switch {
+	case age <= 24*time.Hour:
+		return 1
+	case age <= 7*24*time.Hour:
+		return 0.8
+	case age <= 30*24*time.Hour:
+		return 0.55
+	default:
+		return 0.3
+	}
+}
+
+func costEfficiencyScore(cost float64) float64 {
+	if cost <= 0 {
+		return 0.8
+	}
+	switch {
+	case cost <= 0.02:
+		return 1
+	case cost <= 0.08:
+		return 0.75
+	case cost <= 0.2:
+		return 0.45
+	default:
+		return 0.2
+	}
+}
+
+func scoreHealthyModel(model domain.ProviderModelStatus, policy modelSelectionPolicy) int {
+	score := 0
+	for index, preferred := range policy.models {
+		if strings.EqualFold(model.ModelName, preferred) {
+			score += 1000 - index*25
+			break
+		}
+	}
+	family := inferModelFamily(model.ModelName)
+	if metadataFamily, _ := model.Metadata["model_family"].(string); strings.TrimSpace(metadataFamily) != "" {
+		family = metadataFamily
+	}
+	for index, preferred := range policy.families {
+		if strings.EqualFold(family, preferred) {
+			score += 700 - index*20
+			break
+		}
+	}
+	switch model.Status {
+	case "ready":
+		score += 150
+	case "discovered":
+		score += 120
+	case "probe_failed":
+		score += 90
+	default:
+		score += 50
+	}
+	if model.IsDefault {
+		score += 60
+	}
+	if strings.EqualFold(model.ModelName, policy.targetModel) {
+		score += 80
+	}
+	return score
+}
+
+func (s *ModelSelector) providerPreference(path string) []string {
+	known := []string{"ai_kernel", "local", "mistral", "codexsale", "openai", "mimo", "antigravity"}
+	orderByPath := map[string][]string{
+		"cloud":    {s.preferredCloudProvider(), "codexsale", "openai", "mistral", "mimo", "antigravity", "ai_kernel", "local"},
+		"code":     {"ai_kernel", "local", "antigravity", "codexsale", "openai", "mistral", "mimo"},
+		"analysis": {"mistral", "codexsale", "openai", "mimo", "antigravity", "ai_kernel", "local"},
+		"docs":     {"ai_kernel", "local", "mistral", "mimo", "antigravity", "codexsale", "openai"},
+		"research": {"mistral", "mimo", "codexsale", "openai", "antigravity", "ai_kernel", "local"},
+		"default":  {"local", "ai_kernel", "mistral", "codexsale", "openai", "mimo", "antigravity"},
+	}
+	ordered := append([]string(nil), orderByPath[path]...)
+	if s != nil && s.registry != nil {
+		for provider := range s.registry.Configs() {
+			if strings.EqualFold(provider, "local") || strings.EqualFold(provider, "ai_kernel") {
+				continue
+			}
+			ordered = appendIfMissingPreserveOrder(ordered, provider)
+		}
+	}
+	for _, provider := range known {
+		ordered = appendIfMissingPreserveOrder(ordered, provider)
+	}
+	return ordered
+}
+
+func appendIfMissingPreserveOrder(items []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return items
+	}
+	for _, item := range items {
+		if strings.EqualFold(item, value) {
+			return items
+		}
+	}
+	return append(items, value)
+}
+
+func dedupeStrings(items []string) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = appendIfMissingPreserveOrder(out, item)
+	}
+	return out
 }
 
 func shouldEscalateToCloud(task domain.Task, complexity domain.Complexity, risk RiskEvaluation) bool {

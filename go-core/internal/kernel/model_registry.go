@@ -244,9 +244,10 @@ func (r *ProviderModelRegistry) shouldValidateProvider(cfg agents.OpenAICompatib
 	if !r.validateModels {
 		return false
 	}
-	host := strings.ToLower(cfg.BaseURL)
-	id := strings.ToLower(cfg.EffectiveProviderID())
-	return strings.Contains(host, "codex.sale") || id == "codexsale"
+	if !cfg.Configured() {
+		return false
+	}
+	return strings.TrimSpace(cfg.ChatCompletionsURL()) != ""
 }
 
 func (r *ProviderModelRegistry) validateDiscoveredModels(ctx context.Context, cfg agents.OpenAICompatibleConfig, models []domain.ProviderModelStatus) []domain.ProviderModelStatus {
