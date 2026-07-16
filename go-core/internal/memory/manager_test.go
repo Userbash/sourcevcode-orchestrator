@@ -351,7 +351,7 @@ func TestRankVectorChunksPrefersHybridFusedRelevance(t *testing.T) {
 		},
 	}
 
-	results := manager.rankVectorChunks(task, query, chunks, 3)
+	results := manager.rankVectorChunks(task, query, chunks, buildRetrievalPolicy(task, 3, query.Text))
 	if len(results) != 3 {
 		t.Fatalf("len(results) = %d, want 3", len(results))
 	}
@@ -429,7 +429,7 @@ func TestRankVectorChunksPreservesSourceDiversity(t *testing.T) {
 		},
 	}
 
-	results := manager.rankVectorChunks(task, query, chunks, 2)
+	results := manager.rankVectorChunks(task, query, chunks, buildRetrievalPolicy(task, 2, query.Text))
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2", len(results))
 	}
@@ -494,7 +494,7 @@ func TestRankVectorChunksMatchesCodeIdentifiersLexically(t *testing.T) {
 		},
 	}
 
-	results := manager.rankVectorChunks(task, query, chunks, 2)
+	results := manager.rankVectorChunks(task, query, chunks, buildRetrievalPolicy(task, 2, query.Text))
 	if len(results) == 0 {
 		t.Fatal("len(results) = 0, want lexical match for code identifier")
 	}
@@ -531,5 +531,139 @@ func TestPackVectorResultsHonorsTokenBudget(t *testing.T) {
 	}
 	if usage.TruncatedCount != 2 {
 		t.Fatalf("truncated_count = %d, want 2", usage.TruncatedCount)
+	}
+}
+
+func TestRetrievalTokenBudgetScalesWithComplexity(t *testing.T) {
+	base := retrievalTokenBudget(domain.Task{Type: domain.TaskTypeCode, Complexity: domain.ComplexityLow, Input: domain.TaskInput{Description: "small fix"}})
+	high := retrievalTokenBudget(domain.Task{Type: domain.TaskTypeCode, Complexity: domain.ComplexityCritical, Input: domain.TaskInput{Description: strings.Repeat("complex retrieval task ", 12), Files: []string{"internal/memory/manager.go", "internal/kernel/orchestrator.go"}, AcceptanceCriteria: []string{"preserve runtime behavior", "pack retrieval provenance"}}})
+	if high <= base {
+		t.Fatalf("critical retrieval budget = %d, want > base budget %d", high, base)
+	}
+}
+
+func TestManagerLoadMemoryContextIncludesRetrievalMetadata(t *testing.T) {
+	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	manager := NewManager(store)
+	ctx := context.Background()
+
+	_, err = manager.IngestText(ctx, "session-meta", "main", "rag_document", "doc-1", "Hybrid retrieval combines vector search, lexical matching, provenance tracking, and source trust.", map[string]any{"project": "demo", "scope": "session", "importance": 0.9, "confidence": 0.8})
+	if err != nil {
+		t.Fatalf("IngestText() error = %v", err)
+	}
+
+	loaded := manager.LoadMemoryContext(ctx, domain.Task{
+		ID:          "task-meta",
+		SessionID:   "session-meta",
+		Type:        domain.TaskTypeResearch,
+		Complexity:  domain.ComplexityHigh,
+		MemoryScope: "session",
+		CachePolicy: "read_write",
+		Input: domain.TaskInput{
+			Description: "Add provenance-aware hybrid retrieval",
+			Files:       []string{"internal/memory/manager.go"},
+		},
+		Context: domain.TaskContext{Project: "demo", Branch: "main"},
+	}, "agent-meta", "local", "qwen")
+
+	if loaded["retrieval_strategy"] == "" {
+		t.Fatalf("retrieval_strategy missing: %#v", loaded)
+	}
+	policy, ok := loaded["retrieval_policy"].(map[string]any)
+	if !ok || len(policy) == 0 {
+		t.Fatalf("retrieval_policy missing or empty: %T %#v", loaded["retrieval_policy"], loaded["retrieval_policy"])
+	}
+	prov, ok := loaded["retrieval_provenance"].([]map[string]any)
+	if !ok || len(prov) == 0 {
+		t.Fatalf("retrieval_provenance missing or empty: %T %#v", loaded["retrieval_provenance"], loaded["retrieval_provenance"])
+	}
+	quality, ok := loaded["retrieval_quality"].(map[string]any)
+	if !ok || quality["tier"] == "" {
+		t.Fatalf("retrieval_quality missing or invalid: %T %#v", loaded["retrieval_quality"], loaded["retrieval_quality"])
+	}
+	guidance, ok := loaded["prompt_guidance"].([]string)
+	if !ok || len(guidance) == 0 {
+		t.Fatalf("prompt_guidance missing or empty: %T %#v", loaded["prompt_guidance"], loaded["prompt_guidance"])
+	}
+}
+
+func TestPackVectorResultsTracksCoverageAndLatencyHint(t *testing.T) {
+	results := []domain.VectorSearchResult{
+		{Chunk: domain.VectorChunk{ChunkID: "1", Source: "rag_document", ChunkIndex: 0, Text: strings.Repeat("alpha ", 32)}, Score: 0.91},
+		{Chunk: domain.VectorChunk{ChunkID: "2", Source: "rag_document", ChunkIndex: 1, Text: strings.Repeat("beta ", 28)}, Score: 0.83},
+		{Chunk: domain.VectorChunk{ChunkID: "3", Source: "rag_document", ChunkIndex: 2, Text: strings.Repeat("gamma ", 18)}, Score: 0.79},
+	}
+
+	packed, usage := packVectorResults(results, 72)
+	if len(packed) == 0 {
+		t.Fatal("len(packed) = 0, want at least one packed result")
+	}
+	if usage.PackedCount != len(packed) {
+		t.Fatalf("packed_count = %d, want %d", usage.PackedCount, len(packed))
+	}
+	if usage.CandidateCount != len(results) {
+		t.Fatalf("candidate_count = %d, want %d", usage.CandidateCount, len(results))
+	}
+	if usage.CoverageRatio <= 0 {
+		t.Fatalf("coverage_ratio = %v, want > 0", usage.CoverageRatio)
+	}
+	if usage.ApproxLatencyHint == "" {
+		t.Fatal("approx_latency_hint empty, want populated hint")
+	}
+}
+
+func TestManagerRetrieveBuildsKPIAndMemoryDomains(t *testing.T) {
+	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	manager := NewManager(store)
+	ctx := context.Background()
+	if err := store.UpsertVectorChunks(ctx, []domain.VectorChunk{{
+		ChunkID:   "kb-1",
+		Source:    "docs/spec.md",
+		Text:      "retrieval pipeline for research and routing with model selection evidence",
+		Embedding: []float64{0.91, 0.12, 0.07},
+		Metadata:  map[string]any{"importance": 0.8, "trust": 0.9},
+		CreatedAt: time.Now().UTC(),
+	}}); err != nil {
+		t.Fatalf("put vector chunk: %v", err)
+	}
+	task := domain.Task{
+		ID:        "task-retrieve",
+		SessionID: "session-retrieve",
+		Type:      domain.TaskTypeResearch,
+		Priority:  domain.PriorityHigh,
+		Input:     domain.TaskInput{Description: "Find retrieval evidence for model routing"},
+	}
+	snapshot, err := manager.Retrieve(ctx, task, 4)
+	if err != nil {
+		t.Fatalf("retrieve: %v", err)
+	}
+	if snapshot.Policy.Reranker.Strategy == "" {
+		t.Fatal("expected reranker strategy")
+	}
+	if snapshot.KPI.Tier == "" {
+		t.Fatalf("expected retrieval kpi tier, got %+v", snapshot.KPI)
+	}
+	if snapshot.Policy.TopK < 4 {
+		t.Fatalf("expected retrieval policy topk to respect requested minimum, got %+v", snapshot.Policy)
+	}
+	loaded := manager.LoadMemoryContext(ctx, task, "agent-a", "openai", "gpt-test")
+	if _, ok := loaded["session_memory"].(map[string]any); !ok {
+		t.Fatalf("expected session_memory map, got %#v", loaded["session_memory"])
+	}
+	if _, ok := loaded["route_memory"].(map[string]any); !ok {
+		t.Fatalf("expected route_memory map, got %#v", loaded["route_memory"])
+	}
+	knowledge, ok := loaded["knowledge_memory"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected knowledge_memory map, got %#v", loaded["knowledge_memory"])
+	}
+	if _, ok := knowledge["retrieval_kpi"].(map[string]any); !ok {
+		t.Fatalf("expected retrieval_kpi payload, got %#v", knowledge["retrieval_kpi"])
 	}
 }

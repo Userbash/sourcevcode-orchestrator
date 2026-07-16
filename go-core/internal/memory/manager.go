@@ -47,11 +47,9 @@ type Manager struct {
 	embeddings *embeddingClient
 }
 
-type retrievalUsage struct {
-	BudgetTokens   int
-	UsedTokens     int
-	TruncatedCount int
-}
+type retrievalUsage = RetrievalUsage
+
+type retrievalPolicy = RetrievalPolicy
 
 func NewManager(store state.Store) *Manager {
 	return &Manager{
@@ -185,6 +183,10 @@ func (m *Manager) LoadMemoryContext(ctx context.Context, task domain.Task, agent
 	contextValue["vector_memory_brief"] = ""
 	contextValue["vector_memory_count"] = 0
 	contextValue["vector_memory_hits"] = []map[string]any{}
+	contextValue["session_memory"] = map[string]any{}
+	contextValue["route_memory"] = map[string]any{}
+	contextValue["knowledge_memory"] = map[string]any{}
+	contextValue["retrieval_kpi"] = retrievalQualityPayload(RetrievalKPI{Tier: "empty", ApproxLatencyHint: "low"})
 	contextValue["augmented_prompt"] = ""
 	contextValue["prompt_context_blocks"] = []string{}
 
@@ -201,12 +203,122 @@ func (m *Manager) LoadMemoryContext(ctx context.Context, task domain.Task, agent
 			contextValue[key] = value
 		}
 	}
+	domains := m.LoadMemoryDomains(ctx, task, agentID, provider, modelName)
+	contextValue["session_memory"] = domains.Session
+	contextValue["route_memory"] = domains.Route
+	contextValue["knowledge_memory"] = domains.Knowledge
+
 	vectorContext := m.buildVectorPromptContext(ctx, task, agentID)
 	for key, value := range vectorContext {
 		contextValue[key] = value
 	}
+	if knowledge, ok := contextValue["knowledge_memory"].(map[string]any); ok {
+		if kpi, ok := vectorContext["retrieval_kpi"]; ok {
+			knowledge["retrieval_kpi"] = kpi
+		}
+		if brief, ok := vectorContext["vector_memory_brief"]; ok {
+			knowledge["vector_memory_brief"] = brief
+		}
+		if hits, ok := vectorContext["vector_memory_hits"]; ok {
+			knowledge["vector_memory_hits"] = hits
+		}
+	}
 	_ = m.RecordPromptInput(ctx, task, agentID)
 	return contextValue
+}
+
+func (m *Manager) LoadMemoryDomains(ctx context.Context, task domain.Task, agentID string, provider string, modelName string) MemoryDomains {
+	runtime := m.BuildRuntimeContext(ctx, task, agentID, provider, modelName)
+	session := map[string]any{
+		"session_id":          task.SessionID,
+		"branch":              task.Context.Branch,
+		"memory_scope":        runtime["memory_scope"],
+		"working_directory":   task.Context.RepoPath,
+		"provider":            provider,
+		"model":               modelName,
+		"session_state":       runtime["session_state"],
+		"current_memory":      runtime["memory"],
+		"prompt_memory_brief": runtime["prompt_memory_brief"],
+	}
+	route := map[string]any{
+		"memory_identifier":      memoryIdentifier(task, agentID),
+		"routing_memory_brief":   runtime["routing_memory_brief"],
+		"execution_memory_brief": runtime["execution_memory_brief"],
+		"route_memory_count":     0,
+	}
+	knowledge := map[string]any{
+		"trained_memory_brief":       runtime["trained_memory_brief"],
+		"reusable_task_memory_brief": runtime["reusable_task_memory_brief"],
+		"vector_memory_brief":        "",
+		"vector_memory_hits":         []map[string]any{},
+		"retrieval_kpi":              retrievalQualityPayload(RetrievalKPI{Tier: "empty", ApproxLatencyHint: "low"}),
+	}
+	if m == nil {
+		return MemoryDomains{Session: session, Route: route, Knowledge: knowledge}
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	results, err := m.SearchRouteMemories(lookupCtx, task, 3)
+	if err == nil && len(results) > 0 {
+		route["route_memory_count"] = len(results)
+		brief := make([]string, 0, len(results))
+		for _, item := range results {
+			brief = append(brief, item.Record.Summary)
+		}
+		route["routing_memory_brief"] = strings.Join(brief, "\n")
+	}
+	return MemoryDomains{Session: session, Route: route, Knowledge: knowledge}
+}
+
+func (m *Manager) Retrieve(ctx context.Context, task domain.Task, topK int) (RetrievalSnapshot, error) {
+	snapshot := RetrievalSnapshot{
+		Policy: RetrievalPolicy{
+			TopK: maxInt(1, topK),
+			Reranker: RerankerPolicy{
+				Strategy:  "balanced_rrf",
+				Diversity: true,
+				MinScore:  0.18,
+			},
+		},
+		KPI: RetrievalKPI{Tier: "empty", ApproxLatencyHint: "low"},
+	}
+	if m == nil || m.store == nil {
+		return snapshot, nil
+	}
+	queryText := m.queryText(task)
+	if strings.TrimSpace(queryText) == "" {
+		return snapshot, nil
+	}
+	policy := buildRetrievalPolicy(task, topK, queryText)
+	snapshot.Policy = policy
+	queryTerms := append([]string{}, policy.QueryTerms...)
+	queryTerms = append(queryTerms, policy.PathTerms...)
+	query := domain.VectorSearchQuery{
+		SessionID:      normalizeSessionID(firstNonEmpty(task.SessionID, task.ID)),
+		Branch:         normalizeBranch(task.Context.Branch),
+		Text:           queryText,
+		Terms:          uniqueTerms(strings.Join(queryTerms, " "), 64),
+		Embedding:      m.embedText(ctx, prepareQueryEmbeddingInput(queryText), defaultVectorDims),
+		TopK:           policy.TopK,
+		CandidateLimit: policy.CandidateLimit,
+	}
+	chunks, err := m.store.ListVectorChunks(ctx, query.SessionID, query.Branch, policy.CandidateLimit)
+	if err != nil {
+		return snapshot, err
+	}
+	if policy.UseGlobalFallback && len(chunks) < policy.TopK {
+		globalChunks, globalErr := m.store.ListVectorChunks(ctx, "", "", policy.CandidateLimit)
+		if globalErr == nil {
+			chunks = append(chunks, globalChunks...)
+		}
+	}
+	results := m.rankVectorChunks(task, query, chunks, policy)
+	packed, usage := packVectorResults(results, policy.BudgetTokens)
+	snapshot.Results = results
+	snapshot.Packed = packed
+	snapshot.Usage = usage
+	snapshot.KPI = retrievalQualitySummary(results, packed, usage)
+	return snapshot, nil
 }
 
 func (m *Manager) RecordPromptInput(ctx context.Context, task domain.Task, agentID string) error {
@@ -427,35 +539,11 @@ func (m *Manager) Remember(ctx context.Context, memory domain.RAGMemoryRecord) e
 }
 
 func (m *Manager) SearchVectorContext(ctx context.Context, task domain.Task, topK int) ([]domain.VectorSearchResult, error) {
-	if m == nil || m.store == nil {
-		return nil, nil
-	}
-	sessionID := normalizeSessionID(firstNonEmpty(task.SessionID, task.ID))
-	branch := normalizeBranch(task.Context.Branch)
-	queryText := m.queryText(task)
-	if strings.TrimSpace(queryText) == "" {
-		return nil, nil
-	}
-	query := domain.VectorSearchQuery{
-		SessionID:      sessionID,
-		Branch:         branch,
-		Text:           queryText,
-		Terms:          uniqueTerms(queryText, 40),
-		Embedding:      m.embedText(ctx, prepareQueryEmbeddingInput(queryText), defaultVectorDims),
-		TopK:           topK,
-		CandidateLimit: defaultVectorCandidateCap,
-	}
-	chunks, err := m.store.ListVectorChunks(ctx, sessionID, branch, defaultVectorCandidateCap)
+	snapshot, err := m.Retrieve(ctx, task, topK)
 	if err != nil {
 		return nil, err
 	}
-	if len(chunks) < topK {
-		globalChunks, globalErr := m.store.ListVectorChunks(ctx, "", "", defaultVectorCandidateCap)
-		if globalErr == nil {
-			chunks = append(chunks, globalChunks...)
-		}
-	}
-	return m.rankVectorChunks(task, query, chunks, topK), nil
+	return snapshot.Results, nil
 }
 
 func (m *Manager) embedText(ctx context.Context, text string, fallbackDims int) []float64 {
@@ -469,33 +557,44 @@ func (m *Manager) embedText(ctx context.Context, text string, fallbackDims int) 
 }
 
 func (m *Manager) buildVectorPromptContext(ctx context.Context, task domain.Task, agentID string) map[string]any {
-	budget := retrievalTokenBudget(task)
-	results, err := m.SearchVectorContext(ctx, task, defaultVectorTopK)
-	if err != nil || len(results) == 0 {
-		return map[string]any{
-			"vector_memory_brief":   "",
-			"vector_memory_count":   0,
-			"vector_memory_hits":    []map[string]any{},
-			"augmented_prompt":      buildAugmentedPrompt(task, ""),
-			"prompt_context_blocks": []string{"instruction", "user_prompt"},
-			"retrieval_budget": retrievalUsage{
-				BudgetTokens: budget,
-				UsedTokens:   0,
-			},
-		}
+	queryText := m.queryText(task)
+	policy := buildRetrievalPolicy(task, defaultVectorTopK, queryText)
+	emptyKPI := retrievalQualityPayload(RetrievalKPI{Tier: "empty", ApproxLatencyHint: "low"})
+	base := map[string]any{
+		"vector_memory_brief":   "",
+		"vector_memory_count":   0,
+		"vector_memory_hits":    []map[string]any{},
+		"augmented_prompt":      buildAugmentedPrompt(task, ""),
+		"prompt_context_blocks": []string{"instruction", "user_prompt"},
+		"retrieval_query":       queryText,
+		"memory_identifier":     memoryIdentifier(task, agentID),
+		"retrieval_strategy":    policy.Strategy,
+		"retrieval_policy":      retrievalPolicyPayload(policy),
+		"retrieval_sources":     []map[string]any{},
+		"retrieval_provenance":  []map[string]any{},
+		"retrieval_quality":     emptyKPI,
+		"retrieval_kpi":         emptyKPI,
+		"layered_context_brief": "",
+		"prompt_guidance":       retrievalPromptGuidance(task, nil, policy),
+		"retrieval_budget": retrievalUsage{
+			BudgetTokens:      policy.BudgetTokens,
+			UsedTokens:        0,
+			ApproxLatencyHint: "low",
+		},
 	}
-	packed, usage := packVectorResults(results, budget)
+	snapshot, err := m.Retrieve(ctx, task, defaultVectorTopK)
+	if err != nil || len(snapshot.Results) == 0 {
+		return base
+	}
+	results := snapshot.Results
+	packed := snapshot.Packed
+	usage := snapshot.Usage
+	base["retrieval_budget"] = usage
+	base["retrieval_sources"] = retrievalSourceSummary(results)
+	base["retrieval_quality"] = retrievalQualityPayload(snapshot.KPI)
+	base["retrieval_kpi"] = retrievalQualityPayload(snapshot.KPI)
 	if len(packed) == 0 {
-		return map[string]any{
-			"vector_memory_brief":   "",
-			"vector_memory_count":   0,
-			"vector_memory_hits":    []map[string]any{},
-			"augmented_prompt":      buildAugmentedPrompt(task, ""),
-			"prompt_context_blocks": []string{"instruction", "user_prompt"},
-			"retrieval_query":       m.queryText(task),
-			"memory_identifier":     memoryIdentifier(task, agentID),
-			"retrieval_budget":      usage,
-		}
+		return base
 	}
 	lines := []string{fmt.Sprintf("--- VECTOR MEMORY (Packed %d/%d) ---", len(packed), len(results))}
 	payload := make([]map[string]any, 0, len(packed))
@@ -515,19 +614,18 @@ func (m *Manager) buildVectorPromptContext(ctx context.Context, task domain.Task
 		})
 	}
 	brief := strings.Join(lines, "\n")
-	return map[string]any{
-		"vector_memory_brief":   brief,
-		"vector_memory_count":   len(packed),
-		"vector_memory_hits":    payload,
-		"augmented_prompt":      buildAugmentedPrompt(task, brief),
-		"prompt_context_blocks": []string{"instruction", "retrieved_context", "user_prompt"},
-		"retrieval_query":       m.queryText(task),
-		"memory_identifier":     memoryIdentifier(task, agentID),
-		"retrieval_budget":      usage,
-	}
+	base["vector_memory_brief"] = brief
+	base["vector_memory_count"] = len(packed)
+	base["vector_memory_hits"] = payload
+	base["augmented_prompt"] = buildAugmentedPrompt(task, brief)
+	base["prompt_context_blocks"] = []string{"instruction", "retrieved_context", "user_prompt"}
+	base["retrieval_provenance"] = retrievalProvenance(packed)
+	base["layered_context_brief"] = buildLayeredContextBrief(task, packed)
+	base["prompt_guidance"] = retrievalPromptGuidance(task, packed, policy)
+	return base
 }
 
-func (m *Manager) rankVectorChunks(task domain.Task, query domain.VectorSearchQuery, chunks []domain.VectorChunk, topK int) []domain.VectorSearchResult {
+func (m *Manager) rankVectorChunks(task domain.Task, query domain.VectorSearchQuery, chunks []domain.VectorChunk, policy retrievalPolicy) []domain.VectorSearchResult {
 	seen := map[string]struct{}{}
 	type scoredChunk struct {
 		chunk           domain.VectorChunk
@@ -606,15 +704,20 @@ func (m *Manager) rankVectorChunks(task domain.Task, query domain.VectorSearchQu
 		candidate.semanticRank = semanticRank[candidate.chunk.ChunkID]
 		candidate.lexicalRank = lexicalRank[candidate.chunk.ChunkID]
 		rrfScore := (1.0 / (defaultRRFK + float64(candidate.semanticRank))) + (1.0 / (defaultRRFK + float64(candidate.lexicalRank)))
-		score := candidate.cosine*0.30 + candidate.overlap*0.18 + candidate.importance*0.12 + candidate.recency*0.08 + candidate.scopeConfidence*0.08 + clamp01(rrfScore*defaultRRFK/2.0)*0.24
-		score += minFloat(0.04, float64(candidate.keywordHits)/20.0)
+		trust := trustScore(candidate.chunk.Metadata)
+		freshness := freshnessBoost(candidate.chunk.CreatedAt)
+		reranker := policy.Reranker
+		score := candidate.cosine*reranker.SemanticWeight + candidate.overlap*reranker.LexicalWeight + candidate.importance*reranker.ImportanceWeight + candidate.recency*reranker.RecencyWeight + candidate.scopeConfidence*reranker.ScopeWeight + clamp01(rrfScore*defaultRRFK/2.0)*0.21
+		score += minFloat(reranker.KeywordCap, float64(candidate.keywordHits)/20.0)
+		score += trust * reranker.TrustWeight
+		score += freshness * reranker.FreshnessWeight
 		if project := strings.TrimSpace(task.Context.Project); project != "" && strings.EqualFold(project, strings.TrimSpace(fmt.Sprint(candidate.chunk.Metadata["project"]))) {
 			score += 0.04
 		}
 		if strings.TrimSpace(candidate.chunk.SourceID) == strings.TrimSpace(task.ID) {
 			score -= 0.08
 		}
-		if score < 0.18 {
+		if score < policy.Reranker.MinScore {
 			continue
 		}
 		results = append(results, domain.VectorSearchResult{
@@ -633,10 +736,16 @@ func (m *Manager) rankVectorChunks(task domain.Task, query domain.VectorSearchQu
 		}
 		return results[i].Score > results[j].Score
 	})
-	if topK <= 0 {
-		topK = defaultVectorTopK
+	if policy.TopK <= 0 {
+		policy.TopK = defaultVectorTopK
 	}
-	return selectDiverseVectorResults(results, topK)
+	if policy.Reranker.Diversity {
+		return selectDiverseVectorResults(results, policy.TopK)
+	}
+	if len(results) > policy.TopK {
+		results = results[:policy.TopK]
+	}
+	return results
 }
 
 func selectDiverseVectorResults(results []domain.VectorSearchResult, topK int) []domain.VectorSearchResult {
@@ -679,6 +788,249 @@ func vectorSourceKey(chunk domain.VectorChunk) string {
 	return strings.TrimSpace(chunk.Source)
 }
 
+func buildRetrievalPolicy(task domain.Task, topK int, query string) retrievalPolicy {
+	if topK <= 0 {
+		topK = defaultVectorTopK
+	}
+	policy := retrievalPolicy{
+		Strategy:          "hybrid_rrf",
+		TopK:              maxInt(2, topK),
+		CandidateLimit:    defaultVectorCandidateCap,
+		BudgetTokens:      retrievalTokenBudget(task),
+		QueryTerms:        uniqueTerms(query, 40),
+		PathTerms:         pathStemTerms(task.Input.Files),
+		UseGlobalFallback: true,
+		MemoryScope:       normalizedMemoryScope(task.MemoryScope),
+		TaskType:          string(task.Type),
+		Reranker: RerankerPolicy{
+			Strategy:         "balanced_rrf",
+			SemanticWeight:   0.28,
+			LexicalWeight:    0.18,
+			ImportanceWeight: 0.12,
+			RecencyWeight:    0.07,
+			ScopeWeight:      0.08,
+			TrustWeight:      0.03,
+			FreshnessWeight:  0.03,
+			KeywordCap:       0.04,
+			MinScore:         0.18,
+			Diversity:        true,
+		},
+	}
+	switch task.Complexity {
+	case domain.ComplexityHigh:
+		policy.TopK += 1
+		policy.CandidateLimit += 64
+	case domain.ComplexityCritical:
+		policy.TopK += 2
+		policy.CandidateLimit += 128
+	}
+	if len(task.Input.Files) >= 4 {
+		policy.CandidateLimit += 32
+	}
+	if task.Type == domain.TaskTypeResearch || task.Type == domain.TaskTypePlan {
+		policy.Strategy = "hybrid_rrf_expanded"
+		policy.TopK += 1
+		policy.Reranker.Strategy = "expanded_analysis"
+		policy.Reranker.SemanticWeight = 0.32
+		policy.Reranker.LexicalWeight = 0.16
+		policy.Reranker.ScopeWeight = 0.10
+		policy.Reranker.MinScore = 0.16
+	}
+	if task.Type == domain.TaskTypeCode || task.Type == domain.TaskTypeFix || task.Type == domain.TaskTypeReview {
+		policy.Reranker.Strategy = "code_evidence"
+		policy.Reranker.LexicalWeight = 0.20
+		policy.Reranker.ScopeWeight = 0.10
+		policy.Reranker.TrustWeight = 0.04
+	}
+	policy.TopK = minInt(8, maxInt(2, policy.TopK))
+	policy.CandidateLimit = minInt(512, maxInt(64, policy.CandidateLimit))
+	return policy
+}
+
+func retrievalPolicyPayload(policy retrievalPolicy) map[string]any {
+	return map[string]any{
+		"strategy":            policy.Strategy,
+		"top_k":               policy.TopK,
+		"candidate_limit":     policy.CandidateLimit,
+		"budget_tokens":       policy.BudgetTokens,
+		"query_terms":         append([]string(nil), policy.QueryTerms...),
+		"path_terms":          append([]string(nil), policy.PathTerms...),
+		"use_global_fallback": policy.UseGlobalFallback,
+		"memory_scope":        policy.MemoryScope,
+		"task_type":           policy.TaskType,
+		"reranker": map[string]any{
+			"strategy":          policy.Reranker.Strategy,
+			"semantic_weight":   policy.Reranker.SemanticWeight,
+			"lexical_weight":    policy.Reranker.LexicalWeight,
+			"importance_weight": policy.Reranker.ImportanceWeight,
+			"recency_weight":    policy.Reranker.RecencyWeight,
+			"scope_weight":      policy.Reranker.ScopeWeight,
+			"trust_weight":      policy.Reranker.TrustWeight,
+			"freshness_weight":  policy.Reranker.FreshnessWeight,
+			"keyword_cap":       policy.Reranker.KeywordCap,
+			"min_score":         policy.Reranker.MinScore,
+			"diversity":         policy.Reranker.Diversity,
+		},
+	}
+}
+
+func retrievalSourceSummary(results []domain.VectorSearchResult) []map[string]any {
+	type sourceSummary struct {
+		count    int
+		best     float64
+		recency  time.Time
+		source   string
+		sourceID string
+	}
+	sources := map[string]*sourceSummary{}
+	for _, result := range results {
+		key := vectorSourceKey(result.Chunk)
+		if key == "" {
+			key = result.Chunk.ChunkID
+		}
+		current, ok := sources[key]
+		if !ok {
+			current = &sourceSummary{source: result.Chunk.Source, sourceID: result.Chunk.SourceID}
+			sources[key] = current
+		}
+		current.count++
+		if result.Score > current.best {
+			current.best = result.Score
+		}
+		if result.Chunk.CreatedAt.After(current.recency) {
+			current.recency = result.Chunk.CreatedAt
+		}
+	}
+	keys := sortedMapKeys(sources)
+	payload := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		summary := sources[key]
+		payload = append(payload, map[string]any{
+			"source_key":      key,
+			"source":          summary.source,
+			"source_id":       summary.sourceID,
+			"chunk_count":     summary.count,
+			"best_score":      round2(summary.best),
+			"last_created_at": summary.recency,
+		})
+	}
+	return payload
+}
+
+func retrievalProvenance(results []domain.VectorSearchResult) []map[string]any {
+	payload := make([]map[string]any, 0, len(results))
+	for _, result := range results {
+		payload = append(payload, map[string]any{
+			"chunk_id":      result.Chunk.ChunkID,
+			"source":        result.Chunk.Source,
+			"source_id":     result.Chunk.SourceID,
+			"chunk_index":   result.Chunk.ChunkIndex,
+			"created_at":    result.Chunk.CreatedAt,
+			"scope":         fmt.Sprint(result.Chunk.Metadata["scope"]),
+			"repo_id":       fmt.Sprint(result.Chunk.Metadata["repo_id"]),
+			"branch":        fmt.Sprint(result.Chunk.Metadata["branch"]),
+			"importance":    extractFloat(result.Chunk.Metadata["importance"]),
+			"confidence":    extractFloat(result.Chunk.Metadata["confidence"]),
+			"trust_score":   round2(trustScore(result.Chunk.Metadata)),
+			"score":         result.Score,
+			"keyword_hits":  result.KeywordHits,
+			"term_overlap":  result.TermOverlap,
+			"recency_score": result.RecencyScore,
+		})
+	}
+	return payload
+}
+
+func retrievalQualityPayload(kpi RetrievalKPI) map[string]any {
+	return map[string]any{
+		"tier":                kpi.Tier,
+		"candidate_count":     kpi.CandidateCount,
+		"packed_count":        kpi.PackedCount,
+		"best_keyword_hits":   kpi.BestKeywordHits,
+		"best_score":          kpi.BestScore,
+		"best_term_overlap":   kpi.BestTermOverlap,
+		"coverage_ratio":      kpi.CoverageRatio,
+		"truncation_ratio":    kpi.TruncationRatio,
+		"approx_latency_hint": kpi.ApproxLatencyHint,
+	}
+}
+
+func retrievalQualitySummary(results []domain.VectorSearchResult, packed []domain.VectorSearchResult, usage retrievalUsage) RetrievalKPI {
+	bestScore := 0.0
+	bestOverlap := 0.0
+	bestKeywordHits := 0
+	for _, result := range packed {
+		if result.Score > bestScore {
+			bestScore = result.Score
+		}
+		if result.TermOverlap > bestOverlap {
+			bestOverlap = result.TermOverlap
+		}
+		if result.KeywordHits > bestKeywordHits {
+			bestKeywordHits = result.KeywordHits
+		}
+	}
+	return RetrievalKPI{
+		Tier:              retrievalQualityTier(bestScore, bestOverlap, usage),
+		CandidateCount:    len(results),
+		PackedCount:       len(packed),
+		BestKeywordHits:   bestKeywordHits,
+		BestScore:         round2(bestScore),
+		BestTermOverlap:   round2(bestOverlap),
+		CoverageRatio:     round2(usage.CoverageRatio),
+		TruncationRatio:   round2(usage.TruncationRatio),
+		ApproxLatencyHint: usage.ApproxLatencyHint,
+	}
+}
+
+func retrievalQualityTier(bestScore float64, bestOverlap float64, usage retrievalUsage) string {
+	switch {
+	case bestScore >= 0.78 && bestOverlap >= 0.2 && usage.TruncationRatio < 0.35:
+		return "high"
+	case bestScore >= 0.52 && usage.PackedCount > 0:
+		return "medium"
+	case usage.PackedCount > 0:
+		return "low"
+	default:
+		return "empty"
+	}
+}
+
+func buildLayeredContextBrief(task domain.Task, packed []domain.VectorSearchResult) string {
+	if len(packed) == 0 {
+		return ""
+	}
+	sources := retrievalSourceSummary(packed)
+	parts := []string{fmt.Sprintf("retrieved %d context chunks for %s task", len(packed), firstNonEmpty(string(task.Type), "generic"))}
+	if len(task.Input.Files) > 0 {
+		parts = append(parts, "files="+strings.Join(task.Input.Files, ", "))
+	}
+	if len(sources) > 0 {
+		labels := make([]string, 0, len(sources))
+		for _, source := range sources {
+			labels = append(labels, firstNonEmpty(fmt.Sprint(source["source_id"]), fmt.Sprint(source["source"])))
+		}
+		parts = append(parts, "sources="+strings.Join(labels, ", "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func retrievalPromptGuidance(task domain.Task, packed []domain.VectorSearchResult, policy retrievalPolicy) []string {
+	guidance := []string{
+		"Use retrieved context as supporting evidence, not as a replacement for direct task instructions.",
+		"Prefer chunks that match current files, branch, and acceptance criteria.",
+	}
+	if len(task.Input.Files) > 0 {
+		guidance = append(guidance, "Bias implementation details toward the referenced files before using global memory.")
+	}
+	if len(packed) == 0 {
+		guidance = append(guidance, "No retrieval hits were packed into the prompt; proceed from task instructions only.")
+	} else if policy.UseGlobalFallback {
+		guidance = append(guidance, "If a retrieved chunk conflicts with current task scope, trust the current task scope and branch-local context.")
+	}
+	return guidance
+}
+
 func prepareDocumentEmbeddingInput(sourceRef string, content string) string {
 	normalizedContent := normalizeVectorText(content)
 	if normalizedContent == "" {
@@ -701,23 +1053,40 @@ func prepareQueryEmbeddingInput(query string) string {
 
 func retrievalTokenBudget(task domain.Task) int {
 	budget := defaultRetrievalTokenBudget
+	switch task.Complexity {
+	case domain.ComplexityMedium:
+		budget += 48
+	case domain.ComplexityHigh:
+		budget += 96
+	case domain.ComplexityCritical:
+		budget += 144
+	}
+	switch task.Type {
+	case domain.TaskTypeCode, domain.TaskTypeFix, domain.TaskTypeReview:
+		budget += 24
+	case domain.TaskTypeResearch, domain.TaskTypePlan:
+		budget += 40
+	}
 	if len(task.Input.AcceptanceCriteria) > 0 {
-		budget += minInt(48, len(task.Input.AcceptanceCriteria)*8)
+		budget += minInt(64, len(task.Input.AcceptanceCriteria)*8)
 	}
 	if len(task.Input.Files) > 0 {
-		budget += minInt(48, len(task.Input.Files)*6)
+		budget += minInt(72, len(task.Input.Files)*6)
 	}
-	return budget
+	budget += minInt(72, approximateTokenCount(task.Input.Description)/3)
+	return minInt(640, maxInt(128, budget))
 }
 
 func packVectorResults(results []domain.VectorSearchResult, budgetTokens int) ([]domain.VectorSearchResult, retrievalUsage) {
 	if budgetTokens <= 0 {
 		budgetTokens = defaultRetrievalTokenBudget
 	}
-	usage := retrievalUsage{BudgetTokens: budgetTokens}
+	usage := retrievalUsage{BudgetTokens: budgetTokens, CandidateCount: len(results), ApproxLatencyHint: "low"}
 	packed := make([]domain.VectorSearchResult, 0, len(results))
+	retrievedTokens := 0
 	for _, result := range results {
 		chunkTokens := approximateTokenCount(result.Chunk.Text) + defaultChunkTokenOverhead
+		retrievedTokens += chunkTokens
 		if chunkTokens > budgetTokens {
 			usage.TruncatedCount++
 			continue
@@ -728,6 +1097,16 @@ func packVectorResults(results []domain.VectorSearchResult, budgetTokens int) ([
 		}
 		usage.UsedTokens += chunkTokens
 		packed = append(packed, result)
+	}
+	usage.PackedCount = len(packed)
+	usage.RetrievedTokens = retrievedTokens
+	usage.CoverageRatio = safeRatio(usage.UsedTokens, usage.BudgetTokens)
+	usage.TruncationRatio = safeRatio(usage.TruncatedCount, usage.CandidateCount)
+	if usage.CandidateCount >= 8 || usage.UsedTokens > 320 {
+		usage.ApproxLatencyHint = "medium"
+	}
+	if usage.CandidateCount >= 16 || usage.UsedTokens > 480 {
+		usage.ApproxLatencyHint = "high"
 	}
 	return packed, usage
 }
@@ -1106,6 +1485,84 @@ func budgetThresholds() (float64, float64, float64) {
 		reduceBelow = errorBelow
 	}
 	return warnBelow, reduceBelow, errorBelow
+}
+
+func pathStemTerms(files []string) []string {
+	terms := make([]string, 0, len(files)*2)
+	for _, file := range files {
+		trimmed := strings.TrimSpace(file)
+		if trimmed == "" {
+			continue
+		}
+		base := trimmed
+		if idx := strings.LastIndex(trimmed, "/"); idx >= 0 && idx+1 < len(trimmed) {
+			base = trimmed[idx+1:]
+		}
+		base = strings.TrimSuffix(base, filepathExt(base))
+		terms = append(terms, uniqueTerms(strings.ReplaceAll(base, "_", " "), 8)...)
+		terms = append(terms, uniqueTerms(strings.ReplaceAll(trimmed, "/", " "), 8)...)
+	}
+	return uniqueTerms(strings.Join(terms, " "), 24)
+}
+
+func freshnessBoost(createdAt time.Time) float64 {
+	if createdAt.IsZero() {
+		return 0
+	}
+	hours := time.Since(createdAt).Hours()
+	switch {
+	case hours <= 24:
+		return 1
+	case hours <= 24*7:
+		return 0.7
+	case hours <= 24*30:
+		return 0.4
+	default:
+		return 0.15
+	}
+}
+
+func trustScore(metadata map[string]any) float64 {
+	importance := extractFloat(metadata["importance"])
+	confidence := extractFloat(metadata["confidence"])
+	if importance > 1 {
+		importance = clamp01(importance / 100.0)
+	}
+	if confidence > 1 {
+		confidence = clamp01(confidence / 100.0)
+	}
+	trust := (clamp01(importance) * 0.55) + (clamp01(confidence) * 0.45)
+	if strings.TrimSpace(fmt.Sprint(metadata["source_kind"])) == "task_input" {
+		trust += 0.08
+	}
+	if strings.TrimSpace(fmt.Sprint(metadata["scope"])) == "session" {
+		trust += 0.04
+	}
+	return clamp01(trust)
+}
+
+func safeRatio(numerator int, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func sortedMapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func filepathExt(name string) string {
+	idx := strings.LastIndex(name, ".")
+	if idx <= 0 || idx == len(name)-1 {
+		return ""
+	}
+	return name[idx:]
 }
 
 func envFloat(key string, fallback float64) float64 {

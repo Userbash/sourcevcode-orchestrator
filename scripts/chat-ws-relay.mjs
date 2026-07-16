@@ -10,9 +10,9 @@ const protocol = "chat.v1";
 
 function usage() {
   console.error("Usage:");
-  console.error('  node script/chat-ws-audit-bridge.mjs --message "text"');
-  console.error('  echo "text" | node script/chat-ws-audit-bridge.mjs');
-  console.error("  node script/chat-ws-audit-bridge.mjs --interactive");
+  console.error("  node scripts/chat-ws-relay.mjs --message \"text\"");
+  console.error("  echo \"text\" | node scripts/chat-ws-relay.mjs");
+  console.error("  node scripts/chat-ws-relay.mjs --interactive");
 }
 
 function parseArgs(argv) {
@@ -51,20 +51,6 @@ function readStdin() {
   });
 }
 
-function eventLog(event, payload = {}) {
-  console.log(
-    JSON.stringify(
-      {
-        ts: new Date().toISOString(),
-        event,
-        ...payload,
-      },
-      null,
-      2,
-    ),
-  );
-}
-
 function buildPayload(message, requestId) {
   return {
     type: "command",
@@ -82,28 +68,17 @@ function buildPayload(message, requestId) {
 function sendMessage(message) {
   return new Promise((resolve, reject) => {
     const requestId = `chat-${Date.now()}`;
-    const payload = buildPayload(message, requestId);
     const frames = [];
     const ws = new WebSocket(endpoint, protocol);
-    let settled = false;
     const timeout = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
       try {
         ws.close();
       } catch {}
-      reject(new Error(`timeout waiting for terminal frame from ${endpoint}`));
+      reject(new Error(`timeout waiting for response from ${endpoint}`));
     }, 45000);
 
-    eventLog("bridge.input", { endpoint, protocol, message });
-    eventLog("bridge.payload", { payload });
-
     ws.addEventListener("open", () => {
-      eventLog("bridge.open", { request_id: requestId });
-      ws.send(JSON.stringify(payload));
-      eventLog("bridge.sent", { request_id: requestId });
+      ws.send(JSON.stringify(buildPayload(message, requestId)));
     });
 
     ws.addEventListener("message", (event) => {
@@ -114,52 +89,33 @@ function sendMessage(message) {
         frame = { raw: event.data.toString() };
       }
       frames.push(frame);
-      eventLog("bridge.frame", { request_id: requestId, frame });
-
+      if (frame.type === "response" && frame.request_id === requestId) {
+        clearTimeout(timeout);
+        try {
+          ws.close();
+        } catch {}
+        resolve(frames);
+      }
       if (frame.type === "error") {
-        if (settled) {
-          return;
-        }
-        settled = true;
         clearTimeout(timeout);
         try {
           ws.close();
         } catch {}
         reject(new Error(JSON.stringify(frame)));
-        return;
-      }
-
-      if (frame.request_id === requestId && (frame.type === "response" || frame.type === "event")) {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timeout);
-        try {
-          ws.close();
-        } catch {}
-        resolve({ requestId, payload, frames });
-      }
-    });
-
-    ws.addEventListener("close", () => {
-      eventLog("bridge.close", { request_id: requestId });
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        resolve({ requestId, payload, frames });
       }
     });
 
     ws.addEventListener("error", () => {
-      if (settled) {
-        return;
-      }
-      settled = true;
       clearTimeout(timeout);
       reject(new Error(`websocket connection failed: ${endpoint}`));
     });
   });
+}
+
+function printFrames(frames) {
+  for (const frame of frames) {
+    console.log(JSON.stringify(frame, null, 2));
+  }
 }
 
 async function interactiveLoop() {
@@ -181,9 +137,10 @@ async function interactiveLoop() {
       return;
     }
     try {
-      await sendMessage(message);
+      const frames = await sendMessage(message);
+      printFrames(frames);
     } catch (error) {
-      eventLog("bridge.error", { error: String(error.message || error) });
+      console.error(String(error.message || error));
     }
     rl.prompt();
   });
@@ -204,10 +161,11 @@ async function main() {
     process.exit(1);
   }
 
-  await sendMessage(message);
+  const frames = await sendMessage(message);
+  printFrames(frames);
 }
 
 main().catch((error) => {
-  eventLog("bridge.error", { error: String(error.message || error) });
+  console.error(String(error.message || error));
   process.exit(1);
 });

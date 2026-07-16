@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/agents"
+	"sourcevcode-orchestrator/go-core/internal/buildinfo"
 	"sourcevcode-orchestrator/go-core/internal/domain"
 	"sourcevcode-orchestrator/go-core/internal/transport"
 )
@@ -406,6 +407,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, normali
 		ctx, cancel := context.WithTimeout(connectionCtx, session.SendTimeout())
 		defer cancel()
 		return conn.WriteJSON(ctx, frame)
+	}
+
+	if err := send(transport.Envelope{
+		Type:          "system",
+		RequestID:     handshake.SessionID,
+		CorrelationID: handshake.SessionID,
+		Action:        "kernel.version",
+		Data: map[string]any{
+			"kernel_version": buildinfo.Snapshot(),
+			"session_id":     handshake.SessionID,
+			"subprotocol":    handshake.Subprotocol,
+		},
+	}); err != nil {
+		return
 	}
 
 	go func() {

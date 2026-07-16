@@ -54,3 +54,60 @@ func planTaskIDs(tasks []domain.PlanTaskArtifact) []string {
 	}
 	return ids
 }
+
+func TestValidatePlanWorkflowRejectsNonSuccessfulAcceptanceStatus(t *testing.T) {
+	record := domain.WorkflowRecord{
+		Task: domain.Task{ID: "plan-code-api"},
+		Acceptance: domain.TaskAcceptance{
+			Status: domain.TaskStatusRejected,
+			Reason: "routing policy denied execution",
+		},
+	}
+
+	err := validatePlanWorkflow(record)
+	if err == nil {
+		t.Fatal("expected validation error for rejected workflow")
+	}
+	if got := err.Error(); got != "plan task plan-code-api finished with status rejected: routing policy denied execution" {
+		t.Fatalf("unexpected error = %q", got)
+	}
+}
+
+func TestValidatePlanWorkflowRejectsNonSuccessfulResultStatus(t *testing.T) {
+	record := domain.WorkflowRecord{
+		Task:       domain.Task{ID: "plan-test"},
+		Acceptance: domain.TaskAcceptance{Status: domain.TaskStatusCompleted},
+		Result: &domain.AgentResult{
+			Status: domain.TaskStatusFailed,
+			Output: domain.ResultOutput{Summary: "unit test execution failed"},
+		},
+	}
+
+	err := validatePlanWorkflow(record)
+	if err == nil {
+		t.Fatal("expected validation error for failed agent result")
+	}
+	if got := err.Error(); got != "plan task plan-test produced result status failed: unit test execution failed" {
+		t.Fatalf("unexpected error = %q", got)
+	}
+}
+
+func TestValidatePlanWorkflowAcceptsSuccessfulTerminalStatuses(t *testing.T) {
+	statuses := []domain.TaskStatus{domain.TaskStatusCompleted, domain.TaskStatusDone}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			record := domain.WorkflowRecord{
+				Task:       domain.Task{ID: "plan-review"},
+				Acceptance: domain.TaskAcceptance{Status: status},
+				Result: &domain.AgentResult{
+					Status: status,
+					Output: domain.ResultOutput{Summary: "ok"},
+				},
+			}
+
+			if err := validatePlanWorkflow(record); err != nil {
+				t.Fatalf("validatePlanWorkflow() error = %v", err)
+			}
+		})
+	}
+}

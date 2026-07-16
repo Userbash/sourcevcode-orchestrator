@@ -4,7 +4,9 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 GO_CORE_DIR="$ROOT_DIR/go-core"
-AI_KERNEL_PROXY_DIR="$ROOT_DIR/script/ai-kernel-proxy"
+AI_KERNEL_PROXY_DIR="$ROOT_DIR/scripts/ai-kernel-proxy"
+STATE_DIR="${STATE_DIR:-$ROOT_DIR/.runtime}"
+GO_CORE_IMAGE_STATE_FILE="$STATE_DIR/go-core-image.ref"
 
 NETWORK_NAME="${NETWORK_NAME:-hebrew-net}"
 
@@ -33,7 +35,9 @@ AI_KERNEL_UPSTREAM="${AI_KERNEL_UPSTREAM:-http://host.containers.internal:8012}"
 AI_KERNEL_UPSTREAM_CHECK="${AI_KERNEL_UPSTREAM_CHECK:-http://127.0.0.1:8012}"
 AI_KERNEL_HOST_PORT="${AI_KERNEL_HOST_PORT:-}"
 
-GO_CORE_IMAGE="${GO_CORE_IMAGE:-localhost/go-core:local}"
+GO_CORE_REPOSITORY="${GO_CORE_REPOSITORY:-localhost/go-core}"
+GO_CORE_IMAGE="${GO_CORE_IMAGE:-}"
+GO_CORE_VERSION="${GO_CORE_VERSION:-}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-docker.io/pgvector/pgvector:pg16}"
 RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-docker.io/library/rabbitmq:3-management}"
 LOCAL_LLM_IMAGE="${LOCAL_LLM_IMAGE:-docker.io/ollama/ollama:latest}"
@@ -67,6 +71,50 @@ require_cmd() {
     fi
 }
 
+ensure_state_dir() {
+    mkdir -p "$STATE_DIR"
+}
+
+git_short_commit() {
+    git -C "$ROOT_DIR" rev-parse --short=12 HEAD
+}
+
+git_full_commit() {
+    git -C "$ROOT_DIR" rev-parse HEAD
+}
+
+utc_build_time() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+default_go_core_version() {
+    commit=$(git_short_commit)
+    timestamp=$(date -u +%Y.%m.%d-%H%M%S)
+    printf '%s-%s\n' "$timestamp" "$commit"
+}
+
+write_go_core_target_image() {
+    ensure_state_dir
+    printf '%s\n' "$1" >"$GO_CORE_IMAGE_STATE_FILE"
+}
+
+read_go_core_target_image() {
+    if [ -n "$GO_CORE_IMAGE" ]; then
+        printf '%s\n' "$GO_CORE_IMAGE"
+        return
+    fi
+    if [ -f "$GO_CORE_IMAGE_STATE_FILE" ]; then
+        cat "$GO_CORE_IMAGE_STATE_FILE"
+        return
+    fi
+    printf '%s:current\n' "$GO_CORE_REPOSITORY"
+}
+
+read_go_core_target_version() {
+    image_ref=$(read_go_core_target_image)
+    printf '%s\n' "${image_ref##*:}"
+}
+
 ensure_network() {
     if ! run_podman network exists "$NETWORK_NAME"; then
         run_podman network create "$NETWORK_NAME"
@@ -91,7 +139,37 @@ remove_container_if_exists() {
 }
 
 build_go_core() {
-    run_podman build -t "$GO_CORE_IMAGE" "$GO_CORE_DIR"
+    require_cmd git
+    require_cmd date
+    version="$GO_CORE_VERSION"
+    if [ -z "$version" ]; then
+        version=$(default_go_core_version)
+    fi
+    commit=$(git_short_commit)
+    build_time=$(utc_build_time)
+    image_ref="${GO_CORE_REPOSITORY}:$version"
+    run_podman build \
+        --build-arg VERSION="$version" \
+        --build-arg COMMIT="$commit" \
+        --build-arg BUILD_TIME="$build_time" \
+        -t "$image_ref" \
+        -t "${GO_CORE_REPOSITORY}:current" \
+        "$GO_CORE_DIR"
+    write_go_core_target_image "$image_ref"
+    printf 'go_core image built: %s\n' "$image_ref"
+}
+
+prepare_go_core_image() {
+    if [ -n "$GO_CORE_IMAGE" ]; then
+        if ! run_podman image exists "$GO_CORE_IMAGE"; then
+            echo "go_core image not found: $GO_CORE_IMAGE" >&2
+            exit 1
+        fi
+        write_go_core_target_image "$GO_CORE_IMAGE"
+        printf 'go_core image selected: %s\n' "$GO_CORE_IMAGE"
+        return
+    fi
+    build_go_core
 }
 
 build_ai_kernel() {
@@ -233,6 +311,7 @@ run_ai_kernel() {
 }
 
 run_go_core() {
+    go_core_image=$(read_go_core_target_image)
     ensure_volume "$GO_CORE_VOLUME"
     remove_container_if_exists "$GO_CORE_CONTAINER"
     run_podman run -d \
@@ -257,14 +336,14 @@ run_go_core() {
         -e AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT=http://ai_kernel:8012/v1/chat/completions \
         -e AI_KERNEL_API_KEY="$AI_KERNEL_API_KEY" \
         -v "$GO_CORE_VOLUME":/app/db_backups \
-        "$GO_CORE_IMAGE"
+        "$go_core_image"
 }
 
 up() {
     require_cmd curl
     ensure_network
     build_ai_kernel
-    build_go_core
+    prepare_go_core_image
     if [ "$AI_KERNEL_MODE" = "proxy-host" ]; then
         check_ai_kernel_upstream
     fi
@@ -291,7 +370,56 @@ restart() {
 
 rebuild() {
     build_ai_kernel
-    build_go_core
+    prepare_go_core_image
+}
+
+pin_go_core_image() {
+    if [ "${2:-}" = "" ]; then
+        echo "usage: $0 pin-go-core <image-ref>" >&2
+        exit 1
+    fi
+    image_ref=$2
+    if ! run_podman image exists "$image_ref"; then
+        echo "go_core image not found: $image_ref" >&2
+        exit 1
+    fi
+    write_go_core_target_image "$image_ref"
+    printf 'go_core target image pinned: %s\n' "$image_ref"
+}
+
+print_go_core_target() {
+    printf '%s\n' "$(read_go_core_target_image)"
+}
+
+status() {
+    require_cmd curl
+    require_cmd git
+
+    desired_image=$(read_go_core_target_image)
+    desired_version=$(read_go_core_target_version)
+    git_head=$(git_full_commit)
+
+    echo "== go_core target =="
+    echo "target_image=$desired_image"
+    echo "target_version=$desired_version"
+    echo "git_head=$git_head"
+    echo
+
+    echo "== running container =="
+    if container_exists "$GO_CORE_CONTAINER"; then
+        run_podman inspect "$GO_CORE_CONTAINER" --format 'image={{.ImageName}} created={{.Created}} status={{.State.Status}} running={{.State.Running}}'
+        running_image=$(run_podman inspect "$GO_CORE_CONTAINER" --format '{{.ImageName}}')
+        run_podman image inspect "$running_image" --format 'image_id={{.Id}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}} built={{index .Config.Labels "org.opencontainers.image.created"}}'
+    else
+        echo "go_core container is absent"
+    fi
+    echo
+
+    echo "== health/full =="
+    if ! curl -fsS http://127.0.0.1:8010/health/full; then
+        echo "health/full unavailable"
+    fi
+    echo
 }
 
 logs() {
@@ -329,14 +457,24 @@ print_binary() {
 usage() {
     cat <<'USAGE'
 Usage:
-  script/run-podman-stack.sh up
-  script/run-podman-stack.sh down
-  script/run-podman-stack.sh restart
-  script/run-podman-stack.sh rebuild
-  script/run-podman-stack.sh diagnose
-  script/run-podman-stack.sh ps
-  script/run-podman-stack.sh logs <container>
-  script/run-podman-stack.sh print-binary
+  scripts/run-podman-stack.sh up
+  scripts/run-podman-stack.sh down
+  scripts/run-podman-stack.sh restart
+  scripts/run-podman-stack.sh rebuild
+  scripts/run-podman-stack.sh pin-go-core <image-ref>
+  scripts/run-podman-stack.sh print-go-core-target
+  scripts/run-podman-stack.sh status
+  scripts/run-podman-stack.sh diagnose
+  scripts/run-podman-stack.sh ps
+  scripts/run-podman-stack.sh logs <container>
+  scripts/run-podman-stack.sh print-binary
+
+Versioning:
+  By default, go_core is built as localhost/go-core:<utc timestamp>-<git sha>
+  and recorded in .runtime/go-core-image.ref.
+
+  Set GO_CORE_IMAGE=<image-ref> to deploy an existing image without rebuilding.
+  Set GO_CORE_VERSION=<version-id> to force a specific version tag during build.
 
 Containers:
   postgresql -> ai_bridge_db
@@ -361,6 +499,15 @@ case "${1:-}" in
         ;;
     rebuild)
         rebuild
+        ;;
+    pin-go-core)
+        pin_go_core_image "$@"
+        ;;
+    print-go-core-target)
+        print_go_core_target
+        ;;
+    status)
+        status
         ;;
     diagnose)
         diagnose

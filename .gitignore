@@ -147,3 +147,4 @@ go-core/orchestrator
 
 /.gomodcache/
 /.runtime/
+/.artifacts/

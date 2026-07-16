@@ -29,6 +29,7 @@ type ProviderModelRegistry struct {
 	enabled         bool
 	validateModels  bool
 	validationLimit int
+	catalog         *modelCatalog
 }
 
 type inventorySource struct {
@@ -47,6 +48,10 @@ func NewProviderModelRegistry(configs map[string]agents.OpenAICompatibleConfig) 
 	for key, cfg := range maps.Clone(configs) {
 		copyConfigs[strings.ToLower(strings.TrimSpace(key))] = cfg
 	}
+	catalog, err := loadModelCatalog(firstNonEmptyString(os.Getenv("GO_CORE_MODEL_CATALOG_PATH"), os.Getenv("AI_BRIDGE_MODEL_CATALOG_PATH")))
+	if err != nil {
+		catalog = nil
+	}
 	return &ProviderModelRegistry{
 		configs:         copyConfigs,
 		snapshots:       make(map[string]domain.ProviderCatalogSnapshot),
@@ -56,6 +61,7 @@ func NewProviderModelRegistry(configs map[string]agents.OpenAICompatibleConfig) 
 		enabled:         registryEnvBool("AI_BRIDGE_MODEL_REFRESH_ENABLED", true, "GO_CORE_MODEL_REGISTRY_ENABLED"),
 		validateModels:  registryEnvBool("AI_BRIDGE_MODEL_VALIDATE_MODELS", true),
 		validationLimit: registryEnvInt("AI_BRIDGE_MODEL_VALIDATE_LIMIT", 12),
+		catalog:         catalog,
 	}
 }
 
@@ -206,6 +212,10 @@ func (r *ProviderModelRegistry) fetchProviderSnapshot(parent context.Context, pr
 	}
 	if r.shouldValidateProvider(cfg) && len(models) > 0 {
 		models = r.validateDiscoveredModels(ctx, cfg, models)
+	}
+	if r.catalog != nil {
+		models = r.catalog.filter(provider, models)
+		_ = r.catalog.syncProvider(provider, models)
 	}
 
 	snapshot.Models = models

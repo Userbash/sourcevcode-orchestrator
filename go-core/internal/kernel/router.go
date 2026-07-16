@@ -11,10 +11,12 @@ import (
 )
 
 type Router struct {
-	registry *Registry
-	selector *ModelSelector
-	runtime  *RuntimeManager
-	memory   *memory.Manager
+	registry    *Registry
+	selector    *ModelSelector
+	runtime     *RuntimeManager
+	memory      *memory.Manager
+	routeMemory memory.RouteMemoryAgent
+	retriever   memory.RetrieverAgent
 }
 
 func NewRouter(registry *Registry, selector *ModelSelector) *Router {
@@ -22,6 +24,15 @@ func NewRouter(registry *Registry, selector *ModelSelector) *Router {
 		selector = NewModelSelector(nil)
 	}
 	return &Router{registry: registry, selector: selector}
+}
+
+func (r *Router) AttachMemoryManager(manager *memory.Manager) {
+	if r == nil {
+		return
+	}
+	r.memory = manager
+	r.routeMemory = manager
+	r.retriever = manager
 }
 
 func (r *Router) Route(task domain.Task, plan domain.ExecutionPlan) (domain.TaskAcceptance, agents.Agent, bool) {
@@ -207,7 +218,8 @@ func (r *Router) scoreAgent(ctx context.Context, info domain.AgentInfo, task dom
 	policyScore := r.policyScore(info, task, capability, complexity, risk)
 	historyScore := r.historyScore(ctx, info, task)
 	runtimeScore := r.runtimeScore(info)
-	finalScore := 0.50*policyScore + 0.30*historyScore + 0.20*runtimeScore
+	retrievalScore := r.retrievalScore(ctx, info, task, complexity)
+	finalScore := 0.45*policyScore + 0.25*historyScore + 0.15*runtimeScore + 0.15*retrievalScore
 	return finalScore * 100.0
 }
 
@@ -261,10 +273,10 @@ func (r *Router) policyScore(info domain.AgentInfo, task domain.Task, capability
 }
 
 func (r *Router) historyScore(ctx context.Context, info domain.AgentInfo, task domain.Task) float64 {
-	if r == nil || r.memory == nil {
+	if r == nil || r.routeMemory == nil {
 		return 0
 	}
-	score, _, err := r.memory.RouteHistoryScore(ctx, task, info)
+	score, _, err := r.routeMemory.RouteHistoryScore(ctx, task, info)
 	if err != nil {
 		return 0
 	}
@@ -282,6 +294,49 @@ func (r *Router) runtimeScore(info domain.AgentInfo) float64 {
 		return clampRouterScore(weight*0.50 + priority*0.30 + errorPenalty*0.20)
 	}
 	return weight
+}
+
+func (r *Router) retrievalScore(ctx context.Context, info domain.AgentInfo, task domain.Task, complexity domain.Complexity) float64 {
+	snapshot := memory.RetrievalSnapshot{}
+	if r != nil && r.retriever != nil {
+		loaded, err := r.retriever.Retrieve(ctx, task, 4)
+		if err == nil {
+			snapshot = loaded
+		}
+	}
+	heavyRetrieval := complexity == domain.ComplexityHigh || complexity == domain.ComplexityCritical || task.Type == domain.TaskTypeResearch || task.Type == domain.TaskTypeReview || snapshot.KPI.Tier == "high" || snapshot.KPI.CoverageRatio >= 0.55 || snapshot.KPI.PackedCount >= 3
+	if !heavyRetrieval {
+		return 0.5
+	}
+	name := strings.ToLower(info.ModelName)
+	provider := strings.ToLower(info.Provider)
+	agentType := strings.ToLower(info.Type)
+	score := 0.35
+	if provider == "openai" || provider == "codexsale" {
+		score += 0.25
+	}
+	if provider == "ai_kernel" || provider == "local" {
+		score += 0.08
+	}
+	if strings.Contains(agentType, "research") || strings.Contains(agentType, "review") || strings.Contains(agentType, "analysis") {
+		score += 0.18
+	}
+	if strings.Contains(name, "gpt") || strings.Contains(name, "claude") || strings.Contains(name, "gemini") || strings.Contains(name, "qwen") || strings.Contains(name, "mistral") {
+		score += 0.18
+	}
+	if strings.Contains(name, "mini") {
+		score -= 0.12
+	}
+	if snapshot.KPI.Tier == "high" {
+		score += 0.1
+	}
+	if snapshot.KPI.CoverageRatio >= 0.6 {
+		score += 0.08
+	}
+	if snapshot.KPI.TruncationRatio >= 0.35 {
+		score += 0.06
+	}
+	return clampRouterScore(score)
 }
 
 func clampPolicyScore(score float64) float64 {
