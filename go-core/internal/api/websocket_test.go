@@ -64,6 +64,22 @@ func TestControlWebSocketEndToEnd(t *testing.T) {
 		t.Fatalf("subprotocol not negotiated: %#v", headers)
 	}
 
+	welcome, err := readWebSocketJSON(reader)
+	if err != nil {
+		t.Fatalf("read kernel version frame: %v", err)
+	}
+	if welcome["type"] != "system" || welcome["action"] != "kernel.version" {
+		t.Fatalf("expected kernel.version frame, got %#v", welcome)
+	}
+	data, ok := welcome["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected kernel.version data, got %#v", welcome)
+	}
+	kernelVersion, ok := data["kernel_version"].(map[string]any)
+	if !ok || kernelVersion["version"] == "" {
+		t.Fatalf("expected kernel version payload, got %#v", welcome)
+	}
+
 	request := []byte(`{"type":"command","request_id":"req-1","action":"chat.submit","ack":true,"data":{"description":"test websocket Go runtime","type":"code","project":"tests"}}`)
 	if err := writeClientTextFrame(conn, request); err != nil {
 		t.Fatalf("write command: %v", err)

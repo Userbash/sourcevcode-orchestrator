@@ -1,0 +1,4 @@
+# provider:model
+# This file is maintained by go-core model registry and can be edited manually.
+codexsale:claude-sonnet-4-6
+local:test-model

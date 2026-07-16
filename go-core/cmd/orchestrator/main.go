@@ -17,6 +17,7 @@ import (
 
 	"sourcevcode-orchestrator/go-core/internal/api"
 	"sourcevcode-orchestrator/go-core/internal/app"
+	"sourcevcode-orchestrator/go-core/internal/buildinfo"
 	"sourcevcode-orchestrator/go-core/internal/kernel"
 	"sourcevcode-orchestrator/go-core/internal/ops"
 )
@@ -31,6 +32,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		serve(cfg, os.Args[2:])
+	case "version":
+		fmt.Println(buildinfo.String())
 	case "state":
 		dumpState(cfg, os.Args[2:])
 	case "healthcheck":
@@ -165,7 +168,7 @@ func serve(cfg app.Config, args []string) {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("go-core orchestrator listening on %s", *addr)
+		log.Printf("go-core orchestrator %s listening on %s", buildinfo.String(), *addr)
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 

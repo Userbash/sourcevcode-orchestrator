@@ -33,9 +33,9 @@ This repository also contains the supporting infrastructure needed to run the ru
 ## Repository layout
 
 - `go-core/` contains the Go runtime and orchestration engine
-- `script/chat-proxy/` contains the lightweight reverse proxy that exposes external chat traffic on port `80` and forwards it to the internal orchestrator
-- `script/chat-ws-relay.mjs` is a relay client for interactive or stdin-based WebSocket chat submission
-- `script/chat-ws-audit-bridge.mjs` is an audit-focused relay client that prints the full message exchange
+- `scripts/chat-proxy/` contains the lightweight reverse proxy that exposes external chat traffic on port `80` and forwards it to the internal orchestrator
+- `scripts/chat-ws-relay.mjs` is a relay client for interactive or stdin-based WebSocket chat submission
+- `scripts/chat-ws-audit-bridge.mjs` is an audit-focused relay client that prints the full message exchange
 - `docker-compose.yml` defines the local stack used to run the orchestrator and its dependencies
 - `memory_store/` contains local memory artifacts used by the runtime
 - `docs/` contains the publication-ready documentation for this repository
@@ -164,7 +164,13 @@ go run ./cmd/orchestrator serve
 Use the repository root compose file to run the orchestrator stack:
 
 ```sh
-docker compose up --build
+./scripts/run-podman-stack.sh restart
+```
+
+To inspect the currently targeted `go_core` image and the live kernel build metadata:
+
+```sh
+./scripts/run-podman-stack.sh status
 ```
 
 The main internal runtime endpoint is `http://127.0.0.1:8010`.

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,8 +32,10 @@ type RiskEvaluation struct {
 }
 
 type ModelSelector struct {
-	registry *ProviderModelRegistry
-	memory   *memory.Manager
+	registry    *ProviderModelRegistry
+	memory      *memory.Manager
+	routeMemory memory.RouteMemoryAgent
+	retriever   memory.RetrieverAgent
 }
 
 type modelSelectionPolicy struct {
@@ -62,6 +65,8 @@ func (s *ModelSelector) AttachMemoryManager(manager *memory.Manager) {
 		return
 	}
 	s.memory = manager
+	s.routeMemory = manager
+	s.retriever = manager
 }
 
 func EvaluateRiskContext(text string) RiskEvaluation {
@@ -273,25 +278,35 @@ type scoredHealthyModel struct {
 }
 
 type selectorSignals struct {
-	budgetAction      string
-	tokenPressure     string
-	peerFailures      []string
-	vectorMemoryCount int
-	routeResults      []domain.RouteSearchResult
-	routeMemoryCount  int
-	validationHasRAG  bool
-	trainedMemory     bool
+	budgetAction       string
+	tokenPressure      string
+	peerFailures       []string
+	vectorMemoryCount  int
+	routeResults       []domain.RouteSearchResult
+	routeMemoryCount   int
+	validationHasRAG   bool
+	trainedMemory      bool
+	retrievalTier      string
+	retrievalCoverage  float64
+	retrievalPacked    int
+	retrievalTruncated float64
+	retrievalBestScore float64
 }
 
 func (s selectorSignals) trace() map[string]any {
 	return map[string]any{
-		"budget_action":       s.budgetAction,
-		"token_pressure":      s.tokenPressure,
-		"peer_failures":       append([]string(nil), s.peerFailures...),
-		"vector_memory_count": s.vectorMemoryCount,
-		"route_memory_count":  s.routeMemoryCount,
-		"validation_has_rag":  s.validationHasRAG,
-		"trained_memory":      s.trainedMemory,
+		"budget_action":        s.budgetAction,
+		"token_pressure":       s.tokenPressure,
+		"peer_failures":        append([]string(nil), s.peerFailures...),
+		"vector_memory_count":  s.vectorMemoryCount,
+		"route_memory_count":   s.routeMemoryCount,
+		"validation_has_rag":   s.validationHasRAG,
+		"trained_memory":       s.trainedMemory,
+		"retrieval_tier":       s.retrievalTier,
+		"retrieval_coverage":   s.retrievalCoverage,
+		"retrieval_packed":     s.retrievalPacked,
+		"retrieval_truncation": s.retrievalTruncated,
+		"retrieval_best_score": s.retrievalBestScore,
 	}
 }
 
@@ -308,27 +323,45 @@ type routeHistoryScore struct {
 
 func (s *ModelSelector) buildSelectorSignals(task domain.Task) selectorSignals {
 	signals := selectorSignals{}
-	if task.RoutingHints == nil {
-		return signals
+	if task.RoutingHints != nil {
+		if budget, ok := task.RoutingHints["model_budget"].(map[string]any); ok {
+			signals.budgetAction = stringValue(budget["action"])
+		}
+		signals.tokenPressure = stringValue(task.RoutingHints["token_pressure"])
+		signals.peerFailures = stringSliceValue(task.RoutingHints["peer_failures"])
+		if validation, ok := task.RoutingHints["validation_context"].(map[string]any); ok {
+			signals.validationHasRAG = boolValue(validation["rag_required"])
+		}
+		if memoryContext, ok := task.RoutingHints["memory_context"].(map[string]any); ok {
+			signals.vectorMemoryCount = intValue(memoryContext["vector_memory_count"])
+			signals.trainedMemory = stringValue(memoryContext["trained_memory_brief"]) != ""
+			if kpi, ok := memoryContext["retrieval_kpi"].(map[string]any); ok {
+				signals.retrievalTier = stringValue(kpi["tier"])
+				signals.retrievalCoverage = float64Value(kpi["coverage_ratio"])
+				signals.retrievalPacked = intValue(kpi["packed_count"])
+				signals.retrievalTruncated = float64Value(kpi["truncation_ratio"])
+				signals.retrievalBestScore = float64Value(kpi["best_score"])
+			}
+		}
 	}
-	if budget, ok := task.RoutingHints["model_budget"].(map[string]any); ok {
-		signals.budgetAction = stringValue(budget["action"])
-	}
-	signals.tokenPressure = stringValue(task.RoutingHints["token_pressure"])
-	signals.peerFailures = stringSliceValue(task.RoutingHints["peer_failures"])
-	if validation, ok := task.RoutingHints["validation_context"].(map[string]any); ok {
-		signals.validationHasRAG = boolValue(validation["rag_required"])
-	}
-	if memoryContext, ok := task.RoutingHints["memory_context"].(map[string]any); ok {
-		signals.vectorMemoryCount = intValue(memoryContext["vector_memory_count"])
-		signals.trainedMemory = stringValue(memoryContext["trained_memory_brief"]) != ""
-	}
-	if s.memory != nil {
+	if s.routeMemory != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
-		if results, err := s.memory.SearchRouteMemories(ctx, task, 10); err == nil {
+		if results, err := s.routeMemory.SearchRouteMemories(ctx, task, 10); err == nil {
 			signals.routeResults = results
 			signals.routeMemoryCount = len(results)
+		}
+	}
+	if s.retriever != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		if snapshot, err := s.retriever.Retrieve(ctx, task, 4); err == nil {
+			signals.vectorMemoryCount = maxInt(signals.vectorMemoryCount, snapshot.KPI.PackedCount)
+			signals.retrievalTier = strongerRetrievalTier(signals.retrievalTier, snapshot.KPI.Tier)
+			signals.retrievalCoverage = maxFloat(signals.retrievalCoverage, snapshot.KPI.CoverageRatio)
+			signals.retrievalPacked = maxInt(signals.retrievalPacked, snapshot.KPI.PackedCount)
+			signals.retrievalTruncated = maxFloat(signals.retrievalTruncated, snapshot.KPI.TruncationRatio)
+			signals.retrievalBestScore = maxFloat(signals.retrievalBestScore, snapshot.KPI.BestScore)
 		}
 	}
 	return signals
@@ -403,21 +436,34 @@ func scoreBudgetFit(model domain.ProviderModelStatus, signals selectorSignals) f
 }
 
 func scoreRetrievalFit(model domain.ProviderModelStatus, policy modelSelectionPolicy, signals selectorSignals) float64 {
-	heavyRetrieval := signals.vectorMemoryCount >= 3 || signals.validationHasRAG || signals.trainedMemory
+	heavyRetrieval := signals.vectorMemoryCount >= 3 || signals.validationHasRAG || signals.trainedMemory || signals.retrievalTier == "high" || signals.retrievalCoverage >= 0.55
 	if !heavyRetrieval {
 		return 0
 	}
 	name := strings.ToLower(model.ModelName)
 	family := inferModelFamily(model.ModelName)
+	score := 0.2
 	if strings.Contains(name, "mini") {
-		return -0.4
+		score -= 0.5
 	}
 	if policy.reason == "analysis_review_path" || policy.reason == "research_path" || policy.reason == "high_risk_or_high_complexity" {
 		if family == "gpt" || family == "claude" || family == "gemini" || family == "qwen" || family == "mistral" {
-			return 1.0
+			score += 0.9
 		}
 	}
-	return 0.3
+	if signals.retrievalTier == "high" {
+		score += 0.4
+	}
+	if signals.retrievalCoverage >= 0.6 {
+		score += 0.3
+	}
+	if signals.retrievalTruncated >= 0.35 {
+		score += 0.15
+	}
+	if signals.retrievalBestScore > 0 && signals.retrievalBestScore < 0.45 {
+		score -= 0.1
+	}
+	return score
 }
 
 func scoreFailurePenalty(model domain.ProviderModelStatus, signals selectorSignals) float64 {
@@ -506,6 +552,47 @@ func intValue(value any) int {
 		}
 	}
 	return 0
+}
+
+func strongerRetrievalTier(current string, candidate string) string {
+	rank := map[string]int{"": 0, "empty": 0, "low": 1, "medium": 2, "high": 3}
+	if rank[candidate] > rank[current] {
+		return candidate
+	}
+	return current
+}
+
+func float64Value(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err == nil {
+			return parsed
+		}
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func maxFloat(left, right float64) float64 {
+	if left >= right {
+		return left
+	}
+	return right
 }
 
 func boolValue(value any) bool {

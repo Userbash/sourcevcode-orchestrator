@@ -106,14 +106,14 @@ func NewOrchestrator(
 	}
 	if o.router != nil {
 		o.router.runtime = o.runtime
-		o.router.memory = o.memory
+		o.router.AttachMemoryManager(o.memory)
 	}
 	if submissionModeEnabled() {
 		o.StartSubmissionWorker(o.backgroundCtx, envInt("GO_CORE_SUBMIT_WORKERS", defaultSubmitWorkers(parallelism)))
 		o.StartResultWorker(o.backgroundCtx, envInt("GO_CORE_RESULT_WORKERS", defaultResultWorkers(parallelism)))
+		o.registry.OnAgentRegistered(o.ensureAgentWorkerPool)
+		o.startAgentWorkerPools(o.backgroundCtx, envInt("GO_CORE_AGENT_WORKERS", defaultAgentWorkers(parallelism)))
 	}
-	o.registry.OnAgentRegistered(o.ensureAgentWorkerPool)
-	o.startAgentWorkerPools(o.backgroundCtx, envInt("GO_CORE_AGENT_WORKERS", defaultAgentWorkers(parallelism)))
 	o.publishInventorySnapshot(o.backgroundCtx)
 	return o
 }
@@ -944,7 +944,7 @@ func (o *Orchestrator) StartResultWorker(ctx context.Context, concurrency int) {
 		ctx = context.Background()
 	}
 	if concurrency <= 0 {
-		concurrency = 1
+		return
 	}
 	queue, ok := o.messageBus.(delivery.TaskResultQueue)
 	if !ok {
@@ -973,7 +973,7 @@ func (o *Orchestrator) StartResultWorker(ctx context.Context, concurrency int) {
 
 func (o *Orchestrator) startAgentWorkerPools(ctx context.Context, concurrency int) {
 	if concurrency <= 0 {
-		concurrency = 1
+		return
 	}
 	for _, info := range o.registry.AgentInfos() {
 		agent, ok := o.registry.AgentByID(info.ID)
@@ -999,7 +999,7 @@ func (o *Orchestrator) ensureAgentWorkerPoolWithConcurrency(ctx context.Context,
 		ctx = context.Background()
 	}
 	if concurrency <= 0 {
-		concurrency = 1
+		return
 	}
 	agentID := agent.Info().ID
 	o.workerPoolsMu.Lock()
@@ -2145,7 +2145,7 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed <= 0 {
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed

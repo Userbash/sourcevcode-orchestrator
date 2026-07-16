@@ -127,10 +127,7 @@ services:
       - hebrew_net
 
   go_core:
-    build:
-      context: ./go-core
-      dockerfile: Dockerfile
-    image: localhost/go-core:local
+    image: ${GO_CORE_IMAGE:-localhost/go-core:current}
     container_name: go_core
     restart: unless-stopped
     env_file:
@@ -185,7 +182,7 @@ services:
 
   chat_gateway:
     build:
-      context: ./script/chat-proxy
+      context: ./scripts/chat-proxy
     image: localhost/chat-proxy:local
     container_name: go_chat_gateway
     restart: unless-stopped

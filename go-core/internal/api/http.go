@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"sourcevcode-orchestrator/go-core/internal/buildinfo"
 	"sourcevcode-orchestrator/go-core/internal/domain"
 	"sourcevcode-orchestrator/go-core/internal/kernel"
 	"sourcevcode-orchestrator/go-core/internal/transport"
@@ -227,6 +228,7 @@ func (s *Server) handleHealthFull(w http.ResponseWriter, r *http.Request) {
 		"status":             "ok",
 		"component":          "go-core",
 		"time":               time.Now().UTC(),
+		"kernel_version":     buildinfo.Snapshot(),
 		"required_routes":    s.routeManifest(),
 		"compatibility_gaps": s.compatibilityGaps(),
 		"transport": map[string]any{

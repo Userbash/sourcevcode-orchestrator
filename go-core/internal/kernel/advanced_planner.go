@@ -285,6 +285,17 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 				return domain.ExecutionPlanRun{}, err
 			}
 			record := batchResults[index]
+			if err := validatePlanWorkflow(record); err != nil {
+				checkpoint.ResultsByTaskID[artifact.TaskID] = map[string]any{
+					"task_id": artifact.TaskID,
+					"status":  "failed",
+					"error":   err.Error(),
+				}
+				checkpoint.Status = domain.ParallelPlanStatusFailed
+				checkpoint.UpdatedAt = time.Now().UTC()
+				_ = o.saveParallelCheckpoint(ctx, checkpoint)
+				return domain.ExecutionPlanRun{}, err
+			}
 			run.Workflows = append(run.Workflows, record)
 			checkpoint.ResultsByTaskID[artifact.TaskID] = workflowSummary(record)
 			checkpoint.PendingTaskIDs = removePending(checkpoint.PendingTaskIDs, artifact.TaskID)
@@ -304,6 +315,27 @@ func (o *Orchestrator) executeParallelPlan(ctx context.Context, checkpoint domai
 	run.Checkpoint = checkpoint
 	run.CompletedAt = checkpoint.UpdatedAt
 	return run, nil
+}
+
+func validatePlanWorkflow(record domain.WorkflowRecord) error {
+	if !isSuccessfulPlanStatus(record.Acceptance.Status) {
+		reason := strings.TrimSpace(record.Acceptance.Reason)
+		if reason == "" && record.Result != nil {
+			reason = strings.TrimSpace(record.Result.Output.Summary)
+		}
+		reason = firstNonEmptyString(reason, "workflow did not reach a successful terminal status")
+		return fmt.Errorf("plan task %s finished with status %s: %s", record.Task.ID, record.Acceptance.Status, reason)
+	}
+	if record.Result != nil && !isSuccessfulPlanStatus(record.Result.Status) {
+		reason := strings.TrimSpace(record.Result.Output.Summary)
+		reason = firstNonEmptyString(reason, "agent result did not reach a successful terminal status")
+		return fmt.Errorf("plan task %s produced result status %s: %s", record.Task.ID, record.Result.Status, reason)
+	}
+	return nil
+}
+
+func isSuccessfulPlanStatus(status domain.TaskStatus) bool {
+	return status == domain.TaskStatusCompleted || status == domain.TaskStatusDone
 }
 
 func buildPlanArtifact(task domain.Task, plan domain.ExecutionPlan) domain.PlanArtifact {

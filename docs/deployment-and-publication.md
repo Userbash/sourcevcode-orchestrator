@@ -33,7 +33,7 @@ This keeps the runtime container small and focused while still providing room fo
 
 ## Chat gateway container
 
-The external proxy is built from `script/chat-proxy/Dockerfile`.
+The external proxy is built from `scripts/chat-proxy/Dockerfile`.
 
 Its job is intentionally narrow:
 

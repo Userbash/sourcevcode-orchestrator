@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 )
 
 type budgetTestAgent struct {
+	mu            sync.Mutex
 	info          domain.AgentInfo
 	executedTasks []domain.Task
 	result        domain.AgentResult
@@ -31,8 +33,10 @@ func (a *budgetTestAgent) CanAccept(domain.Task) bool {
 }
 
 func (a *budgetTestAgent) Execute(_ context.Context, task domain.Task) domain.AgentResult {
+	a.mu.Lock()
 	a.executedTasks = append(a.executedTasks, task)
 	result := a.result
+	a.mu.Unlock()
 	result.TaskID = task.ID
 	result.AgentID = a.info.ID
 	result.Provider = a.info.Provider
@@ -47,6 +51,12 @@ func (a *budgetTestAgent) Execute(_ context.Context, task domain.Task) domain.Ag
 		result.Output.Artifacts = map[string]any{}
 	}
 	return result
+}
+
+func (a *budgetTestAgent) ExecutedTasks() []domain.Task {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]domain.Task(nil), a.executedTasks...)
 }
 
 func newBudgetTestOrchestrator(t *testing.T) (*Orchestrator, state.Store, *Registry) {
@@ -105,16 +115,18 @@ func TestOrchestratorPeerFailoverRoutesToNextAgent(t *testing.T) {
 	if record.Acceptance.AgentID != "coder-local" {
 		t.Fatalf("Acceptance.AgentID = %s, want coder-local", record.Acceptance.AgentID)
 	}
-	if len(failingAgent.executedTasks) != 1 {
-		t.Fatalf("failing agent executed %d tasks, want 1", len(failingAgent.executedTasks))
+	failingExecuted := failingAgent.ExecutedTasks()
+	if len(failingExecuted) != 1 {
+		t.Fatalf("failing agent executed %d tasks, want 1", len(failingExecuted))
 	}
-	if len(successAgent.executedTasks) != 1 {
-		t.Fatalf("success agent executed %d tasks, want 1", len(successAgent.executedTasks))
+	successExecuted := successAgent.ExecutedTasks()
+	if len(successExecuted) != 1 {
+		t.Fatalf("success agent executed %d tasks, want 1", len(successExecuted))
 	}
-	if successAgent.executedTasks[0].RoutingHints["p2p_attempt"] != 2 {
-		t.Fatalf("p2p_attempt = %v, want 2", successAgent.executedTasks[0].RoutingHints["p2p_attempt"])
+	if successExecuted[0].RoutingHints["p2p_attempt"] != 2 {
+		t.Fatalf("p2p_attempt = %v, want 2", successExecuted[0].RoutingHints["p2p_attempt"])
 	}
-	failures, ok := successAgent.executedTasks[0].RoutingHints["peer_failures"].([]map[string]any)
+	failures, ok := successExecuted[0].RoutingHints["peer_failures"].([]map[string]any)
 	if !ok || len(failures) != 1 {
 		t.Fatalf("peer_failures = %#v, want one failure context", successAgent.executedTasks[0].RoutingHints["peer_failures"])
 	}
@@ -164,13 +176,15 @@ func TestOrchestratorBudgetFallbackRoutesToNextProvider(t *testing.T) {
 	if record.Acceptance.Provider != "local" {
 		t.Fatalf("Acceptance.Provider = %s, want local", record.Acceptance.Provider)
 	}
-	if len(openaiAgent.executedTasks) != 0 {
-		t.Fatalf("openai executed %d tasks, want 0", len(openaiAgent.executedTasks))
+	openaiExecuted := openaiAgent.ExecutedTasks()
+	if len(openaiExecuted) != 0 {
+		t.Fatalf("openai executed %d tasks, want 0", len(openaiExecuted))
 	}
-	if len(localAgent.executedTasks) != 1 {
-		t.Fatalf("local executed %d tasks, want 1", len(localAgent.executedTasks))
+	localExecuted := localAgent.ExecutedTasks()
+	if len(localExecuted) != 1 {
+		t.Fatalf("local executed %d tasks, want 1", len(localExecuted))
 	}
-	budget, ok := localAgent.executedTasks[0].RoutingHints["model_budget"].(map[string]any)
+	budget, ok := localExecuted[0].RoutingHints["model_budget"].(map[string]any)
 	if !ok {
 		t.Fatalf("task routing hint model_budget type = %T", localAgent.executedTasks[0].RoutingHints["model_budget"])
 	}

@@ -37,6 +37,22 @@ type Supervisor struct {
 	nowFn      func() time.Time
 }
 
+func cloneDeliveryRecord(record *DeliveryRecord) *DeliveryRecord {
+	if record == nil {
+		return nil
+	}
+	clone := *record
+	if record.ReceivedAt != nil {
+		receivedAt := *record.ReceivedAt
+		clone.ReceivedAt = &receivedAt
+	}
+	if record.CompletedAt != nil {
+		completedAt := *record.CompletedAt
+		clone.CompletedAt = &completedAt
+	}
+	return &clone
+}
+
 func NewSupervisor(messageBus Bus, ackTimeout time.Duration) *Supervisor {
 	if ackTimeout <= 0 {
 		ackTimeout = 30 * time.Second
@@ -101,30 +117,29 @@ func (s *Supervisor) Dispatch(_ context.Context, envelope domain.TaskEnvelope) m
 func (s *Supervisor) Refresh(_ context.Context, taskID string) map[string]any {
 	s.mu.Lock()
 	record, ok := s.records[taskID]
-	s.mu.Unlock()
 	if !ok {
+		s.mu.Unlock()
 		return map[string]any{}
 	}
-	history := s.messageBus.AckHistory(taskID)
-	s.mu.Lock()
-	s.applyHistory(record, history)
-	snapshot := s.snapshotLocked(record, history)
+	snapshotRecord := cloneDeliveryRecord(record)
 	s.mu.Unlock()
-	return snapshot
+	history := s.messageBus.AckHistory(taskID)
+	s.applyHistory(snapshotRecord, history)
+	return s.snapshotLocked(snapshotRecord, history)
 }
 
 func (s *Supervisor) Snapshot(taskID string) map[string]any {
 	s.mu.Lock()
 	record, ok := s.records[taskID]
-	s.mu.Unlock()
 	if !ok {
+		s.mu.Unlock()
 		return map[string]any{}
 	}
+	snapshotRecord := cloneDeliveryRecord(record)
+	s.mu.Unlock()
 	history := s.messageBus.AckHistory(taskID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.applyHistory(record, history)
-	return s.snapshotLocked(record, history)
+	s.applyHistory(snapshotRecord, history)
+	return s.snapshotLocked(snapshotRecord, history)
 }
 
 func (s *Supervisor) FetchAgentMailbox(_ context.Context, agentID string, limit int) []domain.TaskEnvelope {
@@ -222,11 +237,13 @@ func (s *Supervisor) Ack(taskID string, status domain.AckStatus, receivedBy stri
 func (s *Supervisor) EstablishDelivery(taskID, agentID string) domain.MessageAck {
 	s.mu.Lock()
 	record, ok := s.records[taskID]
-	s.mu.Unlock()
 	if !ok {
+		s.mu.Unlock()
 		return domain.MessageAck{}
 	}
-	if !record.PayloadValidated {
+	payloadValidated := record.PayloadValidated
+	s.mu.Unlock()
+	if !payloadValidated {
 		ack := s.messageBus.Ack(taskID, domain.AckStatusFailed, agentID, "payload_not_validated")
 		s.mu.Lock()
 		now := s.nowFn()
@@ -243,7 +260,8 @@ func (s *Supervisor) EstablishDelivery(taskID, agentID string) domain.MessageAck
 	s.mu.Lock()
 	record.HandshakeState = "established"
 	record.LastProgressAt = s.nowFn()
-	snapshot := s.snapshotLocked(record, s.messageBus.AckHistory(taskID))
+	snapshotRecord := cloneDeliveryRecord(record)
+	snapshot := s.snapshotLocked(snapshotRecord, s.messageBus.AckHistory(taskID))
 	s.mu.Unlock()
 	s.audit("delivery.established", record, snapshot)
 	s.Refresh(context.Background(), taskID)
@@ -336,7 +354,13 @@ func (s *Supervisor) InspectTimeouts(_ context.Context) map[string]any {
 
 func (s *Supervisor) DeliveryHealthSnapshot() map[string]any {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	records := make([]*DeliveryRecord, 0, len(s.records))
+	for _, record := range s.records {
+		records = append(records, cloneDeliveryRecord(record))
+	}
+	now := s.nowFn()
+	s.mu.Unlock()
+
 	byAgent := map[string]map[string]any{}
 	tracked := 0
 	pending := 0
@@ -344,8 +368,9 @@ func (s *Supervisor) DeliveryHealthSnapshot() map[string]any {
 	failed := 0
 	deadLettered := 0
 	maxLag := 0.0
-	now := s.nowFn()
-	for _, record := range s.records {
+	for _, record := range records {
+		history := s.messageBus.AckHistory(record.Envelope.TaskID)
+		s.applyHistory(record, history)
 		tracked++
 		switch record.Status {
 		case domain.AckStatusAccepted:

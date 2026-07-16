@@ -1,0 +1,5 @@
+# provider:model
+# This file is maintained by go-core model registry and can be edited manually.
+codexsale:alpha
+codexsale:beta
+openai:gpt-5.4

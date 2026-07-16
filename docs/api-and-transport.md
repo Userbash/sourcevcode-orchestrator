@@ -129,7 +129,7 @@ This gives operators a way to inspect the path from incoming chat or control fra
 
 The repository includes two helper scripts for working with the internal chat WebSocket.
 
-### `script/chat-ws-relay.mjs`
+### `scripts/chat-ws-relay.mjs`
 
 This script is a practical relay client for `/chat/ws`.
 
@@ -139,7 +139,7 @@ It can be used for:
 - sending stdin payloads
 - testing message flow without building a separate client
 
-### `script/chat-ws-audit-bridge.mjs`
+### `scripts/chat-ws-audit-bridge.mjs`
 
 This script is similar, but it prints more of the stage-by-stage exchange. It is intended for transport audit and lifecycle tracing.
 
@@ -147,7 +147,7 @@ It is useful when the goal is not only to send a task, but to see exactly where 
 
 ## External chat proxy
 
-The repository also contains a lightweight reverse proxy in `script/chat-proxy/main.go`.
+The repository also contains a lightweight reverse proxy in `scripts/chat-proxy/main.go`.
 
 Its purpose is simple:
 

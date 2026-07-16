@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 )
 
 func TestProviderModelRegistryMarksTransientProbeFailuresAsDegradedButAvailable(t *testing.T) {
+	t.Setenv("GO_CORE_MODEL_CATALOG_PATH", filepath.Join(t.TempDir(), "kernel-models.txt"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
@@ -87,6 +89,7 @@ func TestProviderModelRegistryMarksTransientProbeFailuresAsDegradedButAvailable(
 }
 
 func TestProviderModelRegistryMergesCodexInventoryAndBuildsDisplayVariants(t *testing.T) {
+	t.Setenv("GO_CORE_MODEL_CATALOG_PATH", filepath.Join(t.TempDir(), "kernel-models.txt"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
@@ -150,6 +153,7 @@ func TestProviderModelRegistryMergesCodexInventoryAndBuildsDisplayVariants(t *te
 }
 
 func TestProviderModelRegistryAnnotatesClaudeFamilyMetadata(t *testing.T) {
+	t.Setenv("GO_CORE_MODEL_CATALOG_PATH", filepath.Join(t.TempDir(), "kernel-models.txt"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
@@ -205,6 +209,7 @@ func findModel(models []domain.ProviderModelStatus, name string) domain.Provider
 }
 
 func TestProviderModelRegistryValidatesNonCodexProviders(t *testing.T) {
+	t.Setenv("GO_CORE_MODEL_CATALOG_PATH", filepath.Join(t.TempDir(), "kernel-models.txt"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
