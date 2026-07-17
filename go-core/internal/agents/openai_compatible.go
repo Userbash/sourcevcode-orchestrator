@@ -1,12 +1,10 @@
 package agents
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +13,7 @@ import (
 	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/domain"
+	"sourcevcode-orchestrator/go-core/internal/providerhttp"
 	"sourcevcode-orchestrator/go-core/internal/workspace"
 )
 
@@ -24,6 +23,10 @@ type Agent interface {
 	Info() domain.AgentInfo
 	CanAccept(domain.Task) bool
 	Execute(context.Context, domain.Task) domain.AgentResult
+}
+
+type AssignedModelOverrider interface {
+	SupportsAssignedModelOverride() bool
 }
 
 type AgentDescriptor struct {
@@ -198,6 +201,12 @@ type OpenAICompatibleAgent struct {
 	client *http.Client
 }
 
+type providerHTTPResponse struct {
+	statusCode int
+	header     http.Header
+	body       []byte
+}
+
 func NewOpenAICompatibleAgent(descriptor AgentDescriptor, config OpenAICompatibleConfig) *OpenAICompatibleAgent {
 	if config.Timeout <= 0 {
 		config.Timeout = defaultProviderTimeout
@@ -227,6 +236,10 @@ func (a *OpenAICompatibleAgent) Info() domain.AgentInfo {
 		Capabilities: append([]string(nil), a.info.Capabilities...),
 		Status:       a.info.Status,
 	}
+}
+
+func (a *OpenAICompatibleAgent) SupportsAssignedModelOverride() bool {
+	return true
 }
 
 func (a *OpenAICompatibleAgent) CanAccept(task domain.Task) bool {
@@ -322,28 +335,47 @@ func (a *OpenAICompatibleAgent) Probe(ctx context.Context) domain.ProviderHealth
 		return health
 	}
 	endpoint := a.config.ModelsURL()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	response, err := a.doProviderRequest(ctx, http.MethodGet, endpoint, nil, "", 4096)
 	if err != nil {
 		health.Error = err.Error()
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			health.Status = "degraded"
+		}
 		return health
 	}
-	if key := strings.TrimSpace(a.config.APIKey); key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	response, err := a.client.Do(req)
-	if err != nil {
-		health.Error = err.Error()
-		return health
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		health.Error = providerHTTPError(response.StatusCode, body).Error()
+	if response.statusCode < 200 || response.statusCode >= 300 {
+		health.Error = providerHTTPError(response.statusCode, response.body).Error()
+		if providerResponseLooksRateLimited(response.statusCode, response.body) {
+			health.Status = "rate_limited"
+			return health
+		}
+		switch response.statusCode {
+		case http.StatusTooManyRequests:
+			health.Status = "rate_limited"
+		case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			health.Status = "degraded"
+		}
 		return health
 	}
 	health.Available = true
 	health.Status = "ready"
 	return health
+}
+
+func providerResponseLooksRateLimited(statusCode int, body []byte) bool {
+	if statusCode == http.StatusTooManyRequests {
+		return true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(string(body)))
+	if normalized == "" {
+		return false
+	}
+	for _, token := range []string{"service_busy", "rate_limit_error", "rate limit", "retry after", "too many requests"} {
+		if strings.Contains(normalized, token) {
+			return true
+		}
+	}
+	return false
 }
 
 type chatMessage struct {
@@ -504,31 +536,36 @@ func (a *OpenAICompatibleAgent) doChatCompletionRequest(ctx context.Context, pay
 	if endpoint == "" {
 		return chatCompletionResponse{}, fmt.Errorf("chat completions endpoint is not configured")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	response, err := a.doProviderRequest(ctx, http.MethodPost, endpoint, body, "application/json", 8<<20)
 	if err != nil {
 		return chatCompletionResponse{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if key := strings.TrimSpace(a.config.APIKey); key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-	response, err := a.client.Do(req)
-	if err != nil {
-		return chatCompletionResponse{}, fmt.Errorf("%s request failed: %w", a.info.Provider, err)
-	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil {
-		return chatCompletionResponse{}, fmt.Errorf("read %s response: %w", a.info.Provider, err)
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return chatCompletionResponse{}, providerHTTPError(response.StatusCode, responseBody)
+	if response.statusCode < 200 || response.statusCode >= 300 {
+		return chatCompletionResponse{}, providerHTTPError(response.statusCode, response.body)
 	}
 	var completion chatCompletionResponse
-	if err := json.Unmarshal(responseBody, &completion); err != nil {
+	if err := json.Unmarshal(response.body, &completion); err != nil {
 		return chatCompletionResponse{}, fmt.Errorf("decode %s response: %w", a.info.Provider, err)
 	}
 	return completion, nil
+}
+
+func (a *OpenAICompatibleAgent) doProviderRequest(ctx context.Context, method, endpoint string, body []byte, contentType string, limit int64) (providerHTTPResponse, error) {
+	response, err := providerhttp.Do(ctx, providerhttp.RequestConfig{
+		ProviderID:   a.config.EffectiveProviderID(),
+		BaseURL:      a.config.BaseURL,
+		APIKey:       a.config.APIKey,
+		TrafficClass: "primary",
+		Client:       a.client,
+	}, method, endpoint, body, contentType, limit)
+	if err != nil {
+		return providerHTTPResponse{}, err
+	}
+	return providerHTTPResponse{
+		statusCode: response.StatusCode,
+		header:     response.Header,
+		body:       response.Body,
+	}, nil
 }
 
 func toolRuntimeEnabled(task domain.Task) bool {
@@ -767,7 +804,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			ProviderID:              firstEnv("AI_BRIDGE_LOCAL_LLM_PROVIDER_ID", "OLLAMA_PROVIDER_ID"),
 			BaseURL:                 firstEnvDefault("http://127.0.0.1:11434", "AI_BRIDGE_LOCAL_LLM_ENDPOINT", "OLLAMA_BASE_URL", "OLLAMA_HOST"),
 			APIKey:                  firstEnv("AI_BRIDGE_LOCAL_LLM_API_KEY", "OLLAMA_API_KEY"),
-			DefaultModel:            firstEnvDefault("qwen2.5:32b-instruct-q4_k_m", "AI_BRIDGE_LOCAL_LLM_MODEL", "OLLAMA_MODEL"),
+			DefaultModel:            firstEnvDefault("", "AI_BRIDGE_LOCAL_LLM_MODEL", "OLLAMA_MODEL"),
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_LOCAL_LLM_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_LOCAL_LLM_CHAT_COMPLETIONS_ENDPOINT"),
 		}),
@@ -775,7 +812,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			ProviderID:              firstEnv("AI_BRIDGE_AI_KERNEL_PROVIDER_ID", "AI_KERNEL_PROVIDER_ID"),
 			BaseURL:                 firstEnvDefault("http://127.0.0.1:8012/v1", "AI_KERNEL_BASE_URL", "AI_BRIDGE_AI_KERNEL_BASE_URL"),
 			APIKey:                  firstEnv("AI_KERNEL_API_KEY", "AI_BRIDGE_AI_KERNEL_API_KEY"),
-			DefaultModel:            firstEnvDefault("hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m", "AI_KERNEL_MODEL_ALIAS", "AI_BRIDGE_AI_KERNEL_MODEL"),
+			DefaultModel:            firstEnvDefault("gemma4-12b-agentic-fable5:q4_k_m", "AI_KERNEL_MODEL_ALIAS", "AI_BRIDGE_AI_KERNEL_MODEL"),
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_AI_KERNEL_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT"),
 			RequireKey:              envBool("AI_KERNEL_REQUIRE_API_KEY", true),
@@ -940,4 +977,31 @@ func durationFromEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return parsed
+}
+
+func durationFromEnvAny(fallback time.Duration, keys ...string) time.Duration {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			parsed, err := time.ParseDuration(value)
+			if err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return fallback
+}
+
+func intFromEnv(key string, fallback int, aliases ...string) int {
+	keys := append([]string{key}, aliases...)
+	for _, envKey := range keys {
+		value := strings.TrimSpace(os.Getenv(envKey))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }

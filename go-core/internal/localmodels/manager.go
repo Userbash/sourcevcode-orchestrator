@@ -277,8 +277,13 @@ func stringValue(value any) string {
 
 func runtimeStatus(records map[string]*Record) string {
 	for _, record := range records {
+		if record.LastError != "" {
+			return "degraded"
+		}
+	}
+	for _, record := range records {
 		if record.Resident {
-			return "connected"
+			return "ready"
 		}
 	}
 	return "idle"

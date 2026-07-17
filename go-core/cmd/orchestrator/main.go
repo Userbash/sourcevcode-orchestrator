@@ -88,6 +88,14 @@ func main() {
 		if err := importMemoryStore(cfg, os.Args[2:]); err != nil {
 			log.Fatalf("import-memory-store: %v", err)
 		}
+	case "import-fable-traces":
+		if err := importFableTraces(cfg, os.Args[2:]); err != nil {
+			log.Fatalf("import-fable-traces: %v", err)
+		}
+	case "import-core-sql":
+		if err := importCoreSQL(cfg, os.Args[2:]); err != nil {
+			log.Fatalf("import-core-sql: %v", err)
+		}
 	case "ai-kernel-provision":
 		if err := aiKernelProvision(os.Args[2:]); err != nil {
 			log.Fatalf("ai-kernel-provision: %v", err)
@@ -372,7 +380,7 @@ func aiKernelInstallService(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: orchestrator [serve|state|healthcheck|bootstrap|runtime-preflight|runtime-agent|runtime-agent-auto|runtime-agent-docker-privileged|runtime-agent-docker-unconfined|runtime-agent-podman-privileged|runtime-agent-podman-unconfined|inspect-db|db-backup|db-restore|ai-kernel-provision|ai-kernel-serve|ai-kernel-install-service] [flags]")
+	fmt.Fprintln(os.Stderr, "usage: orchestrator [serve|state|healthcheck|bootstrap|runtime-preflight|runtime-agent|runtime-agent-auto|runtime-agent-docker-privileged|runtime-agent-docker-unconfined|runtime-agent-podman-privileged|runtime-agent-podman-unconfined|inspect-db|db-backup|db-restore|import-memory-store|import-fable-traces|ai-kernel-provision|ai-kernel-serve|ai-kernel-install-service] [flags]")
 }
 
 func detectContainerRuntime() (string, error) {

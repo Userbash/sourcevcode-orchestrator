@@ -194,13 +194,29 @@ func (p DBProtector) captureSnapshot(ctx context.Context, db *sql.DB) (dbSnapsho
 		if err != nil {
 			return dbSnapshot{}, err
 		}
-		query := buildTableSnapshotQuery(tableName, columns)
-		var payload []byte
-		if err := db.QueryRowContext(ctx, query).Scan(&payload); err != nil {
+		query := buildTableSnapshotRowQuery(tableName, columns)
+		rowsResult, err := db.QueryContext(ctx, query)
+		if err != nil {
 			return dbSnapshot{}, err
 		}
 		var rows []map[string]interface{}
-		if err := json.Unmarshal(payload, &rows); err != nil {
+		for rowsResult.Next() {
+			var payload []byte
+			if err := rowsResult.Scan(&payload); err != nil {
+				rowsResult.Close()
+				return dbSnapshot{}, err
+			}
+			var row map[string]interface{}
+			if err := json.Unmarshal(payload, &row); err != nil {
+				rowsResult.Close()
+				return dbSnapshot{}, err
+			}
+			rows = append(rows, row)
+		}
+		if err := rowsResult.Close(); err != nil {
+			return dbSnapshot{}, err
+		}
+		if err := rowsResult.Err(); err != nil {
 			return dbSnapshot{}, err
 		}
 		snapshot.Tables = append(snapshot.Tables, dbSnapshotTable{Name: tableName, Columns: columns, Rows: rows})
@@ -267,13 +283,15 @@ func (p DBProtector) restoreSnapshot(ctx context.Context, db *sql.DB, snapshot d
 		if len(table.Rows) == 0 {
 			continue
 		}
-		rowPayload, err := json.Marshal(table.Rows)
-		if err != nil {
-			return err
-		}
-		query := fmt.Sprintf(`INSERT INTO %s SELECT * FROM jsonb_populate_recordset(NULL::%s, $1::jsonb)`, quoteIdentifier(table.Name), quoteIdentifier(table.Name))
-		if _, err := tx.ExecContext(ctx, query, rowPayload); err != nil {
-			return err
+		query := fmt.Sprintf(`INSERT INTO %s SELECT * FROM jsonb_populate_record(NULL::%s, $1::jsonb)`, quoteIdentifier(table.Name), quoteIdentifier(table.Name))
+		for _, row := range table.Rows {
+			rowPayload, err := json.Marshal(row)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, query, rowPayload); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -343,21 +361,21 @@ func classifySnapshotColumn(dataType string, udtName string) string {
 	}
 }
 
-func buildTableSnapshotQuery(tableName string, columns []dbSnapshotTableColumn) string {
+func buildTableSnapshotRowQuery(tableName string, columns []dbSnapshotTableColumn) string {
 	parts := make([]string, 0, len(columns)*2)
 	for _, column := range columns {
 		parts = append(parts, "'"+strings.ReplaceAll(column.Name, "'", "''")+"'")
 		quotedName := quoteIdentifier(column.Name)
 		switch column.Kind {
 		case "bytea":
-			parts = append(parts, fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '\\\\x' || encode(%s, 'hex') END", quotedName, quotedName))
+			parts = append(parts, fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '\\x' || encode(%s, 'hex') END", quotedName, quotedName))
 		case "vector":
 			parts = append(parts, fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE %s::text END", quotedName, quotedName))
 		default:
 			parts = append(parts, quotedName)
 		}
 	}
-	return fmt.Sprintf(`SELECT COALESCE(jsonb_agg(jsonb_build_object(%s)), '[]'::jsonb) FROM %s`, strings.Join(parts, ", "), quoteIdentifier(tableName))
+	return fmt.Sprintf(`SELECT jsonb_build_object(%s) FROM %s`, strings.Join(parts, ", "), quoteIdentifier(tableName))
 }
 
 func quoteIdentifier(value string) string {

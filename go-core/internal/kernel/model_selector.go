@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	modelQwenCoder  = "qwen2.5:32b-instruct-q4_k_m"
-	modelLocalSmall = "qwen-2.5-7b-instruct"
+	modelQwenCoder  = "gemma4-12b-agentic-fable5:q4_k_m"
+	modelLocalSmall = "gemma4-12b-agentic-fable5:q4_k_m"
 	modelOpenAIHigh = "gpt-5.5"
 	modelMistral    = "mistral-large-latest"
 )
@@ -122,6 +122,7 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 	text := taskText(task)
 	risk := EvaluateRiskContext(text)
 	policy := s.selectionPolicy(task, complexity, risk)
+	policy = s.expandPolicyModels(policy)
 	choice := domain.ModelSelection{
 		Complexity:               complexity,
 		DetectedKeywords:         append([]string(nil), risk.DetectedKeywords...),
@@ -137,8 +138,8 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 			"acceptance_criteria": len(compactStrings(task.Input.AcceptanceCriteria)),
 			"constraints":         len(compactStrings(task.Input.Constraints)),
 			"live_model_criteria": []string{
-				"alive if provider inventory marks Available=true",
-				"probe_failed is treated as degraded but still alive",
+				"confirmed models are alive only when Available=true and verification_status=confirmed",
+				"verification_pending or retryable_failure models stay in catalog diagnostics but are excluded from healthy routing",
 				"validation_failed, missing, disabled, or unavailable inventory entries are treated as dead",
 			},
 		},
@@ -146,6 +147,7 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 	choice.RequiresSecondaryReview = policy.requiresSecondaryReview
 	choice.Provider, choice.ModelName = s.resolveAvailableModel(task, policy, choice.SelectionTrace)
 	choice.Reason = policy.reason
+	choice.SupportLanes = s.supportLanes(task, choice, policy)
 	choice.SelectionTrace["target_provider"] = policy.targetProvider
 	choice.SelectionTrace["target_model"] = policy.targetModel
 	choice.SelectionTrace["provider_candidates"] = append([]string(nil), policy.providers...)
@@ -154,6 +156,10 @@ func (s *ModelSelector) Select(task domain.Task) domain.ModelSelection {
 	choice.SelectionTrace["cloud_required"] = policy.cloudRequired
 	choice.SelectionTrace["resolved_provider"] = choice.Provider
 	choice.SelectionTrace["resolved_model"] = choice.ModelName
+	if len(choice.SupportLanes) > 0 {
+		choice.SelectionTrace["support_lanes"] = choice.SupportLanes
+		choice.SelectionTrace["ai_kernel_helper_available"] = true
+	}
 	return choice
 }
 
@@ -176,8 +182,8 @@ func (s *ModelSelector) selectionPolicy(task domain.Task, complexity domain.Comp
 			targetProvider:          "ai_kernel",
 			targetModel:             modelQwenCoder,
 			providers:               s.providerPreference("code"),
-			families:                []string{"qwen", "deepseek", "llama", "glm", "gpt", "claude", "mistral", "gemini"},
-			models:                  []string{modelQwenCoder, "qwen2.5-coder-32b", "deepseek-coder", "claude-sonnet-4-6", modelOpenAIHigh},
+			families:                []string{"gemma", "deepseek", "llama", "glm", "gpt", "claude", "mistral", "gemini"},
+			models:                  []string{modelQwenCoder, "deepseek-coder", "claude-sonnet-4-6", modelOpenAIHigh},
 			reason:                  "code_specialist_path",
 			requiresSecondaryReview: task.Type == domain.TaskTypeTest,
 		}
@@ -196,7 +202,7 @@ func (s *ModelSelector) selectionPolicy(task domain.Task, complexity domain.Comp
 			targetProvider: "ai_kernel",
 			targetModel:    modelLocalSmall,
 			providers:      s.providerPreference("docs"),
-			families:       []string{"qwen", "llama", "mistral", "gpt", "claude", "gemini"},
+			families:       []string{"gemma", "llama", "mistral", "gpt", "claude", "gemini"},
 			models:         []string{modelLocalSmall, modelQwenCoder, modelMistral},
 			reason:         "docs_path",
 		}
@@ -205,20 +211,54 @@ func (s *ModelSelector) selectionPolicy(task domain.Task, complexity domain.Comp
 			targetProvider: "mistral",
 			targetModel:    modelMistral,
 			providers:      s.providerPreference("research"),
-			families:       []string{"claude", "gpt", "mistral", "gemini", "kimi", "deepseek", "qwen"},
+			families:       []string{"claude", "gpt", "mistral", "gemini", "kimi", "deepseek", "gemma"},
 			models:         []string{"claude-sonnet-4-6", modelOpenAIHigh, modelMistral},
 			reason:         "research_path",
 		}
 	default:
 		return modelSelectionPolicy{
-			targetProvider: "local",
+			targetProvider: "ai_kernel",
 			targetModel:    modelLocalSmall,
 			providers:      s.providerPreference("default"),
-			families:       []string{"qwen", "llama", "gpt", "claude", "mistral"},
+			families:       []string{"gemma", "llama", "gpt", "claude", "mistral"},
 			models:         []string{modelLocalSmall, modelQwenCoder, modelOpenAIHigh},
 			reason:         "policy_default",
 		}
 	}
+}
+
+func (s *ModelSelector) expandPolicyModels(policy modelSelectionPolicy) modelSelectionPolicy {
+	if s == nil || s.registry == nil {
+		policy.models = dedupeStrings(policy.models)
+		return policy
+	}
+	providerOrder := dedupeStrings(append([]string{policy.targetProvider}, policy.providers...))
+	for _, provider := range providerOrder {
+		for _, model := range s.registry.HealthyModels(provider) {
+			if !model.Available || !strings.EqualFold(strings.TrimSpace(model.VerificationStatus), "confirmed") {
+				continue
+			}
+			if len(policy.families) > 0 {
+				family := inferModelFamily(model.ModelName)
+				if metadataFamily, _ := model.Metadata["model_family"].(string); strings.TrimSpace(metadataFamily) != "" {
+					family = metadataFamily
+				}
+				matched := false
+				for _, preferredFamily := range policy.families {
+					if strings.EqualFold(family, preferredFamily) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					continue
+				}
+			}
+			policy.models = appendIfMissingPreserveOrder(policy.models, model.ModelName)
+		}
+	}
+	policy.models = dedupeStrings(policy.models)
+	return policy
 }
 
 func (s *ModelSelector) resolveAvailableModel(task domain.Task, policy modelSelectionPolicy, trace map[string]any) (string, string) {
@@ -671,12 +711,12 @@ func scoreHealthyModel(model domain.ProviderModelStatus, policy modelSelectionPo
 	switch model.Status {
 	case "ready":
 		score += 150
-	case "discovered":
-		score += 120
-	case "probe_failed":
-		score += 90
+	case "verification_pending":
+		score += 25
+	case "validation_failed", "missing", "disabled":
+		score -= 500
 	default:
-		score += 50
+		score += 35
 	}
 	if model.IsDefault {
 		score += 60
@@ -685,6 +725,129 @@ func scoreHealthyModel(model domain.ProviderModelStatus, policy modelSelectionPo
 		score += 80
 	}
 	return score
+}
+
+func (s *ModelSelector) supportLanes(task domain.Task, choice domain.ModelSelection, policy modelSelectionPolicy) []domain.SupportLane {
+	if !s.shouldAttachAIKernelSupport(task, choice, policy) {
+		return nil
+	}
+	modelName, ok := s.resolveAIKernelSupportModel(task.Type)
+	if !ok {
+		return nil
+	}
+	roles := []string{"helper", "fallback"}
+	switch task.Type {
+	case domain.TaskTypePlan, domain.TaskTypeReview, domain.TaskTypeResearch:
+		roles = append(roles, "parallel")
+	}
+	lanes := make([]domain.SupportLane, 0, len(roles))
+	for _, role := range roles {
+		lanes = append(lanes, domain.SupportLane{
+			Provider:           "ai_kernel",
+			ModelName:          modelName,
+			Role:               role,
+			MaxComplexity:      domain.ComplexityMedium,
+			Capabilities:       aiKernelSupportCapabilities(task.Type, role),
+			SupportedTaskTypes: aiKernelSupportTaskTypes(task.Type),
+			Reason:             aiKernelSupportReason(task.Type, role),
+		})
+	}
+	return lanes
+}
+
+func (s *ModelSelector) shouldAttachAIKernelSupport(task domain.Task, choice domain.ModelSelection, policy modelSelectionPolicy) bool {
+	if strings.EqualFold(choice.Provider, "ai_kernel") || strings.EqualFold(policy.targetProvider, "ai_kernel") {
+		return false
+	}
+	if s == nil || s.registry == nil {
+		return false
+	}
+	if len(s.registry.HealthyModels("ai_kernel")) == 0 {
+		return false
+	}
+	if policy.cloudRequired {
+		return true
+	}
+	switch task.Type {
+	case domain.TaskTypePlan, domain.TaskTypeReview, domain.TaskTypeResearch:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *ModelSelector) resolveAIKernelSupportModel(taskType domain.TaskType) (string, bool) {
+	if s == nil || s.registry == nil {
+		return "", false
+	}
+	preferred := []string{modelQwenCoder}
+	if taskType == domain.TaskTypeDocs {
+		preferred = []string{modelLocalSmall, modelQwenCoder}
+	}
+	models := s.registry.HealthyModels("ai_kernel")
+	for _, candidate := range preferred {
+		for _, model := range models {
+			if strings.EqualFold(model.ModelName, candidate) {
+				return model.ModelName, true
+			}
+		}
+	}
+	for _, model := range models {
+		if model.Available && strings.EqualFold(strings.TrimSpace(model.VerificationStatus), "confirmed") {
+			return model.ModelName, true
+		}
+	}
+	return "", false
+}
+
+func aiKernelSupportCapabilities(taskType domain.TaskType, role string) []string {
+	capabilities := []string{"docs", "code", "fix", "test"}
+	switch taskType {
+	case domain.TaskTypePlan, domain.TaskTypeReview:
+		capabilities = append(capabilities, "plan", "review")
+	case domain.TaskTypeResearch:
+		capabilities = append(capabilities, "research", "review")
+	}
+	if role == "parallel" {
+		capabilities = append(capabilities, "analysis")
+	}
+	return dedupeStrings(capabilities)
+}
+
+func aiKernelSupportTaskTypes(taskType domain.TaskType) []domain.TaskType {
+	values := []domain.TaskType{domain.TaskTypeCode, domain.TaskTypeFix, domain.TaskTypeTest, domain.TaskTypeDocs}
+	switch taskType {
+	case domain.TaskTypePlan, domain.TaskTypeReview, domain.TaskTypeResearch:
+		values = append(values, taskType)
+	}
+	return dedupeTaskTypes(values)
+}
+
+func aiKernelSupportReason(taskType domain.TaskType, role string) string {
+	switch role {
+	case "fallback":
+		return "local ai_kernel fallback is available if the primary cloud route degrades"
+	case "parallel":
+		return "local ai_kernel can parallelize repo-local drafting, summarization, and verification subtasks"
+	default:
+		return "local ai_kernel can assist the primary route with repo-local drafting, verification, and synthesis"
+	}
+}
+
+func dedupeTaskTypes(values []domain.TaskType) []domain.TaskType {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[domain.TaskType]struct{}, len(values))
+	result := make([]domain.TaskType, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (s *ModelSelector) providerPreference(path string) []string {

@@ -271,8 +271,13 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		s.writeJSON(w, http.StatusOK, workflows)
 	case http.MethodPost:
-		var task domain.Task
-		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			s.writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		task, err := taskFromTransport(payload)
+		if err != nil {
 			s.writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}

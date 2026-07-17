@@ -26,9 +26,9 @@ const (
 	defaultVectorDims           = 64
 	defaultChunkWordLimit       = 120
 	defaultChunkOverlap         = 24
-	defaultVectorTopK           = 4
-	defaultVectorCandidateCap   = 256
-	defaultRetrievalTokenBudget = 192
+	defaultVectorTopK           = 12
+	defaultVectorCandidateCap   = 2048
+	defaultRetrievalTokenBudget = 1536
 	defaultChunkTokenOverhead   = 8
 	defaultRRFK                 = 60.0
 )
@@ -171,7 +171,7 @@ func (m *Manager) LoadMemoryContext(ctx context.Context, task domain.Task, agent
 	contextValue["session_state"] = sessionState
 	contextValue["memory"] = memoryValues
 	contextValue["memory_identifier"] = memoryIdentifier(task, agentID)
-	contextValue["trained_memory_disabled_for_risk"] = true
+	contextValue["trained_memory_disabled_for_risk"] = false
 	contextValue["trained_memory_brief"] = ""
 	contextValue["reusable_task_memory_brief"] = ""
 	contextValue["reusable_task_memory_count"] = 0
@@ -183,6 +183,9 @@ func (m *Manager) LoadMemoryContext(ctx context.Context, task domain.Task, agent
 	contextValue["vector_memory_brief"] = ""
 	contextValue["vector_memory_count"] = 0
 	contextValue["vector_memory_hits"] = []map[string]any{}
+	contextValue["reasoning_memory_brief"] = ""
+	contextValue["reasoning_memory_count"] = 0
+	contextValue["reasoning_trace_hits"] = []map[string]any{}
 	contextValue["session_memory"] = map[string]any{}
 	contextValue["route_memory"] = map[string]any{}
 	contextValue["knowledge_memory"] = map[string]any{}
@@ -221,6 +224,12 @@ func (m *Manager) LoadMemoryContext(ctx context.Context, task domain.Task, agent
 		}
 		if hits, ok := vectorContext["vector_memory_hits"]; ok {
 			knowledge["vector_memory_hits"] = hits
+		}
+		if brief, ok := vectorContext["reasoning_memory_brief"]; ok {
+			knowledge["reasoning_memory_brief"] = brief
+		}
+		if hits, ok := vectorContext["reasoning_trace_hits"]; ok {
+			knowledge["reasoning_trace_hits"] = hits
 		}
 	}
 	_ = m.RecordPromptInput(ctx, task, agentID)
@@ -306,13 +315,26 @@ func (m *Manager) Retrieve(ctx context.Context, task domain.Task, topK int) (Ret
 	if err != nil {
 		return snapshot, err
 	}
+	aggregated := append([]domain.VectorChunk{}, chunks...)
 	if policy.UseGlobalFallback && len(chunks) < policy.TopK {
 		globalChunks, globalErr := m.store.ListVectorChunks(ctx, "", "", policy.CandidateLimit)
 		if globalErr == nil {
-			chunks = append(chunks, globalChunks...)
+			aggregated = append(aggregated, globalChunks...)
 		}
 	}
-	results := m.rankVectorChunks(task, query, chunks, policy)
+	ragScope := retrievalMemoryScope(policy.MemoryScope)
+	if memories, memErr := m.store.ListRAGMemories(ctx, ragScope, "", policy.CandidateLimit); memErr == nil {
+		for _, record := range memories {
+			aggregated = append(aggregated, ragMemoryToVectorChunk(record))
+		}
+	}
+	if documents, docErr := m.store.ListRAGDocuments(ctx, ragScope, "", policy.CandidateLimit); docErr == nil {
+		for _, record := range documents {
+			aggregated = append(aggregated, ragDocumentToVectorChunk(record))
+		}
+	}
+	aggregated = uniqueVectorChunks(aggregated)
+	results := m.rankVectorChunks(task, query, aggregated, policy)
 	packed, usage := packVectorResults(results, policy.BudgetTokens)
 	snapshot.Results = results
 	snapshot.Packed = packed
@@ -561,21 +583,24 @@ func (m *Manager) buildVectorPromptContext(ctx context.Context, task domain.Task
 	policy := buildRetrievalPolicy(task, defaultVectorTopK, queryText)
 	emptyKPI := retrievalQualityPayload(RetrievalKPI{Tier: "empty", ApproxLatencyHint: "low"})
 	base := map[string]any{
-		"vector_memory_brief":   "",
-		"vector_memory_count":   0,
-		"vector_memory_hits":    []map[string]any{},
-		"augmented_prompt":      buildAugmentedPrompt(task, ""),
-		"prompt_context_blocks": []string{"instruction", "user_prompt"},
-		"retrieval_query":       queryText,
-		"memory_identifier":     memoryIdentifier(task, agentID),
-		"retrieval_strategy":    policy.Strategy,
-		"retrieval_policy":      retrievalPolicyPayload(policy),
-		"retrieval_sources":     []map[string]any{},
-		"retrieval_provenance":  []map[string]any{},
-		"retrieval_quality":     emptyKPI,
-		"retrieval_kpi":         emptyKPI,
-		"layered_context_brief": "",
-		"prompt_guidance":       retrievalPromptGuidance(task, nil, policy),
+		"vector_memory_brief":    "",
+		"vector_memory_count":    0,
+		"vector_memory_hits":     []map[string]any{},
+		"reasoning_memory_brief": "",
+		"reasoning_memory_count": 0,
+		"reasoning_trace_hits":   []map[string]any{},
+		"augmented_prompt":       buildAugmentedPrompt(task, ""),
+		"prompt_context_blocks":  []string{"instruction", "user_prompt"},
+		"retrieval_query":        queryText,
+		"memory_identifier":      memoryIdentifier(task, agentID),
+		"retrieval_strategy":     policy.Strategy,
+		"retrieval_policy":       retrievalPolicyPayload(policy),
+		"retrieval_sources":      []map[string]any{},
+		"retrieval_provenance":   []map[string]any{},
+		"retrieval_quality":      emptyKPI,
+		"retrieval_kpi":          emptyKPI,
+		"layered_context_brief":  "",
+		"prompt_guidance":        retrievalPromptGuidance(task, nil, policy),
 		"retrieval_budget": retrievalUsage{
 			BudgetTokens:      policy.BudgetTokens,
 			UsedTokens:        0,
@@ -610,6 +635,9 @@ func (m *Manager) buildVectorPromptContext(ctx context.Context, task domain.Task
 			"term_overlap":   result.TermOverlap,
 			"keyword_hits":   result.KeywordHits,
 			"summary_signal": result.SummarySignal,
+			"source_kind":    fmt.Sprint(result.Chunk.Metadata["source_kind"]),
+			"memory_type":    fmt.Sprint(result.Chunk.Metadata["memory_type"]),
+			"trace_id":       fmt.Sprint(result.Chunk.Metadata["trace_id"]),
 			"text":           summary,
 		})
 	}
@@ -622,6 +650,10 @@ func (m *Manager) buildVectorPromptContext(ctx context.Context, task domain.Task
 	base["retrieval_provenance"] = retrievalProvenance(packed)
 	base["layered_context_brief"] = buildLayeredContextBrief(task, packed)
 	base["prompt_guidance"] = retrievalPromptGuidance(task, packed, policy)
+	reasoningBrief, reasoningHits := summarizeReasoningHits(packed)
+	base["reasoning_memory_brief"] = reasoningBrief
+	base["reasoning_memory_count"] = len(reasoningHits)
+	base["reasoning_trace_hits"] = reasoningHits
 	return base
 }
 
@@ -788,13 +820,146 @@ func vectorSourceKey(chunk domain.VectorChunk) string {
 	return strings.TrimSpace(chunk.Source)
 }
 
+func retrievalMemoryScope(scope string) string {
+	switch normalizedMemoryScope(scope) {
+	case "distilled":
+		return "distilled"
+	case "deep-history":
+		return "deep-history"
+	case "history":
+		return "history"
+	default:
+		return ""
+	}
+}
+
+func inferMemoryLayer(scope string, memoryType string) string {
+	normalizedScope := normalizedMemoryScope(scope)
+	normalizedType := strings.ToLower(strings.TrimSpace(memoryType))
+	if normalizedScope == "distilled" || strings.Contains(normalizedType, "trained") || strings.Contains(normalizedType, "policy") {
+		return "distilled"
+	}
+	if normalizedScope == "deep-history" || normalizedScope == "history" {
+		return "cold"
+	}
+	if normalizedScope == "global" || normalizedScope == "project" || normalizedScope == "branch" {
+		return "warm"
+	}
+	return "hot"
+}
+
+func inferDocumentLayer(scope string) string {
+	switch normalizedMemoryScope(scope) {
+	case "distilled":
+		return "distilled"
+	case "deep-history", "history":
+		return "cold"
+	case "global", "project", "branch":
+		return "warm"
+	default:
+		return "hot"
+	}
+}
+
+func ragMemoryToVectorChunk(record domain.RAGMemoryRecord) domain.VectorChunk {
+	text := strings.TrimSpace(firstNonEmpty(record.Summary, stringifyContent(record.Content)))
+	if text == "" {
+		text = strings.TrimSpace(record.MemoryID)
+	}
+	metadata := cloneMap(record.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["scope"] = firstNonEmpty(record.Scope, fmt.Sprint(metadata["scope"]))
+	metadata["repo_id"] = firstNonEmpty(record.RepoID, fmt.Sprint(metadata["repo_id"]))
+	metadata["branch"] = firstNonEmpty(record.Branch, fmt.Sprint(metadata["branch"]))
+	metadata["importance"] = record.Importance
+	metadata["confidence"] = record.Confidence
+	metadata["source_kind"] = "rag_memory"
+	metadata["memory_type"] = firstNonEmpty(record.MemoryType, fmt.Sprint(metadata["memory_type"]))
+	metadata["memory_layer"] = inferMemoryLayer(record.Scope, record.MemoryType)
+	return domain.VectorChunk{
+		ChunkID:        "rag-memory:" + strings.TrimSpace(record.MemoryID),
+		SessionID:      normalizeSessionID(firstNonEmpty(record.OwnerID, record.RepoID, record.MemoryID)),
+		Branch:         normalizeBranch(record.Branch),
+		Source:         "rag_memory",
+		SourceID:       strings.TrimSpace(record.MemoryID),
+		ChunkIndex:     0,
+		Text:           text,
+		NormalizedText: normalizeVectorText(text),
+		Terms:          uniqueTerms(text, 32),
+		Embedding:      append([]float64(nil), record.Embedding...),
+		Metadata:       metadata,
+		CreatedAt:      coalesceTime(record.UpdatedAt, record.CreatedAt),
+	}
+}
+
+func ragDocumentToVectorChunk(record domain.RAGDocument) domain.VectorChunk {
+	text := strings.TrimSpace(firstNonEmpty(record.ContentSummary, record.Title, record.ContentText))
+	if text == "" {
+		text = strings.TrimSpace(record.DocumentID)
+	}
+	metadata := cloneMap(record.Metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["scope"] = firstNonEmpty(record.Scope, fmt.Sprint(metadata["scope"]))
+	metadata["repo_id"] = firstNonEmpty(record.RepoID, fmt.Sprint(metadata["repo_id"]))
+	metadata["branch"] = firstNonEmpty(record.Branch, fmt.Sprint(metadata["branch"]))
+	metadata["importance"] = record.Importance
+	metadata["source_kind"] = "rag_document"
+	metadata["memory_layer"] = inferDocumentLayer(record.Scope)
+	return domain.VectorChunk{
+		ChunkID:        "rag-document:" + strings.TrimSpace(record.DocumentID),
+		SessionID:      normalizeSessionID(firstNonEmpty(record.OwnerID, record.RepoID, record.DocumentID)),
+		Branch:         normalizeBranch(record.Branch),
+		Source:         "rag_document",
+		SourceID:       strings.TrimSpace(record.DocumentID),
+		ChunkIndex:     0,
+		Text:           text,
+		NormalizedText: normalizeVectorText(text),
+		Terms:          uniqueTerms(text, 32),
+		Embedding:      nil,
+		Metadata:       metadata,
+		CreatedAt:      coalesceTime(record.UpdatedAt, record.CreatedAt),
+	}
+}
+
+func uniqueVectorChunks(chunks []domain.VectorChunk) []domain.VectorChunk {
+	if len(chunks) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(chunks))
+	unique := make([]domain.VectorChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		key := strings.TrimSpace(chunk.ChunkID)
+		if key == "" {
+			key = strings.TrimSpace(chunk.Source) + ":" + strings.TrimSpace(chunk.SourceID) + ":" + strconv.Itoa(chunk.ChunkIndex)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, chunk)
+	}
+	return unique
+}
+
+func coalesceTime(primary time.Time, fallback time.Time) time.Time {
+	if !primary.IsZero() {
+		return primary
+	}
+	return fallback
+}
+
 func buildRetrievalPolicy(task domain.Task, topK int, query string) retrievalPolicy {
+	explicitTopK := topK
 	if topK <= 0 {
 		topK = defaultVectorTopK
 	}
 	policy := retrievalPolicy{
 		Strategy:          "hybrid_rrf",
-		TopK:              maxInt(2, topK),
+		TopK:              topK,
 		CandidateLimit:    defaultVectorCandidateCap,
 		BudgetTokens:      retrievalTokenBudget(task),
 		QueryTerms:        uniqueTerms(query, 40),
@@ -818,18 +983,20 @@ func buildRetrievalPolicy(task domain.Task, topK int, query string) retrievalPol
 	}
 	switch task.Complexity {
 	case domain.ComplexityHigh:
-		policy.TopK += 1
-		policy.CandidateLimit += 64
-	case domain.ComplexityCritical:
 		policy.TopK += 2
-		policy.CandidateLimit += 128
+		policy.CandidateLimit += 512
+	case domain.ComplexityCritical:
+		policy.TopK += 4
+		policy.CandidateLimit += 1024
 	}
 	if len(task.Input.Files) >= 4 {
-		policy.CandidateLimit += 32
+		policy.CandidateLimit += 256
 	}
 	if task.Type == domain.TaskTypeResearch || task.Type == domain.TaskTypePlan {
 		policy.Strategy = "hybrid_rrf_expanded"
-		policy.TopK += 1
+		policy.TopK += 2
+		policy.CandidateLimit += 512
+		policy.MemoryScope = "deep-history"
 		policy.Reranker.Strategy = "expanded_analysis"
 		policy.Reranker.SemanticWeight = 0.32
 		policy.Reranker.LexicalWeight = 0.16
@@ -842,8 +1009,25 @@ func buildRetrievalPolicy(task domain.Task, topK int, query string) retrievalPol
 		policy.Reranker.ScopeWeight = 0.10
 		policy.Reranker.TrustWeight = 0.04
 	}
-	policy.TopK = minInt(8, maxInt(2, policy.TopK))
-	policy.CandidateLimit = minInt(512, maxInt(64, policy.CandidateLimit))
+	switch policy.MemoryScope {
+	case "history":
+		policy.TopK += 2
+		policy.CandidateLimit += 512
+	case "deep-history":
+		policy.TopK += 4
+		policy.CandidateLimit += 1536
+	case "distilled":
+		policy.TopK += 2
+		policy.CandidateLimit += 256
+		policy.Reranker.ImportanceWeight += 0.05
+		policy.Reranker.ScopeWeight += 0.03
+	}
+	if explicitTopK > 0 {
+		policy.TopK = minInt(24, maxInt(1, policy.TopK))
+	} else {
+		policy.TopK = minInt(24, maxInt(4, policy.TopK))
+	}
+	policy.CandidateLimit = minInt(5000, maxInt(256, policy.CandidateLimit))
 	return policy
 }
 
@@ -931,6 +1115,9 @@ func retrievalProvenance(results []domain.VectorSearchResult) []map[string]any {
 			"branch":        fmt.Sprint(result.Chunk.Metadata["branch"]),
 			"importance":    extractFloat(result.Chunk.Metadata["importance"]),
 			"confidence":    extractFloat(result.Chunk.Metadata["confidence"]),
+			"source_kind":   fmt.Sprint(result.Chunk.Metadata["source_kind"]),
+			"memory_type":   fmt.Sprint(result.Chunk.Metadata["memory_type"]),
+			"trace_id":      fmt.Sprint(result.Chunk.Metadata["trace_id"]),
 			"trust_score":   round2(trustScore(result.Chunk.Metadata)),
 			"score":         result.Score,
 			"keyword_hits":  result.KeywordHits,
@@ -1001,9 +1188,25 @@ func buildLayeredContextBrief(task domain.Task, packed []domain.VectorSearchResu
 		return ""
 	}
 	sources := retrievalSourceSummary(packed)
+	layers := map[string]int{"hot": 0, "warm": 0, "cold": 0, "distilled": 0}
+	for _, item := range packed {
+		layer := strings.TrimSpace(fmt.Sprint(item.Chunk.Metadata["memory_layer"]))
+		if _, ok := layers[layer]; ok {
+			layers[layer]++
+		}
+	}
 	parts := []string{fmt.Sprintf("retrieved %d context chunks for %s task", len(packed), firstNonEmpty(string(task.Type), "generic"))}
 	if len(task.Input.Files) > 0 {
 		parts = append(parts, "files="+strings.Join(task.Input.Files, ", "))
+	}
+	layerParts := make([]string, 0, len(layers))
+	for _, key := range []string{"hot", "warm", "cold", "distilled"} {
+		if layers[key] > 0 {
+			layerParts = append(layerParts, fmt.Sprintf("%s=%d", key, layers[key]))
+		}
+	}
+	if len(layerParts) > 0 {
+		parts = append(parts, "layers="+strings.Join(layerParts, ", "))
 	}
 	if len(sources) > 0 {
 		labels := make([]string, 0, len(sources))
@@ -1015,6 +1218,28 @@ func buildLayeredContextBrief(task domain.Task, packed []domain.VectorSearchResu
 	return strings.Join(parts, "; ")
 }
 
+func summarizeReasoningHits(results []domain.VectorSearchResult) (string, []map[string]any) {
+	hits := make([]map[string]any, 0, len(results))
+	lines := make([]string, 0, len(results))
+	for _, result := range results {
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(result.Chunk.Metadata["memory_type"])), reasoningTraceMemoryType) {
+			continue
+		}
+		summary := truncateText(result.Chunk.Text, 220)
+		hits = append(hits, map[string]any{
+			"chunk_id":       result.Chunk.ChunkID,
+			"trace_id":       fmt.Sprint(result.Chunk.Metadata["trace_id"]),
+			"provider":       fmt.Sprint(result.Chunk.Metadata["provider"]),
+			"model_name":     fmt.Sprint(result.Chunk.Metadata["model_name"]),
+			"reasoning_mode": fmt.Sprint(result.Chunk.Metadata["reasoning_mode"]),
+			"score":          result.Score,
+			"text":           summary,
+		})
+		lines = append(lines, fmt.Sprintf("[trace=%s][mode=%s][score=%0.2f] %s", fmt.Sprint(result.Chunk.Metadata["trace_id"]), fmt.Sprint(result.Chunk.Metadata["reasoning_mode"]), result.Score, summary))
+	}
+	return strings.Join(lines, "\n"), hits
+}
+
 func retrievalPromptGuidance(task domain.Task, packed []domain.VectorSearchResult, policy retrievalPolicy) []string {
 	guidance := []string{
 		"Use retrieved context as supporting evidence, not as a replacement for direct task instructions.",
@@ -1022,6 +1247,14 @@ func retrievalPromptGuidance(task domain.Task, packed []domain.VectorSearchResul
 	}
 	if len(task.Input.Files) > 0 {
 		guidance = append(guidance, "Bias implementation details toward the referenced files before using global memory.")
+	}
+	switch policy.MemoryScope {
+	case "history":
+		guidance = append(guidance, "Historical context is enabled; prefer stable long-term patterns over stale session details.")
+	case "deep-history":
+		guidance = append(guidance, "Deep-history retrieval is enabled; cross-check cold archive evidence with current repository state before acting.")
+	case "distilled":
+		guidance = append(guidance, "Distilled memory is enabled; treat retrieved policies and trained patterns as high-priority guidance.")
 	}
 	if len(packed) == 0 {
 		guidance = append(guidance, "No retrieval hits were packed into the prompt; proceed from task instructions only.")
@@ -1055,26 +1288,26 @@ func retrievalTokenBudget(task domain.Task) int {
 	budget := defaultRetrievalTokenBudget
 	switch task.Complexity {
 	case domain.ComplexityMedium:
-		budget += 48
+		budget += 192
 	case domain.ComplexityHigh:
-		budget += 96
+		budget += 384
 	case domain.ComplexityCritical:
-		budget += 144
+		budget += 640
 	}
 	switch task.Type {
 	case domain.TaskTypeCode, domain.TaskTypeFix, domain.TaskTypeReview:
-		budget += 24
+		budget += 192
 	case domain.TaskTypeResearch, domain.TaskTypePlan:
-		budget += 40
+		budget += 384
 	}
 	if len(task.Input.AcceptanceCriteria) > 0 {
-		budget += minInt(64, len(task.Input.AcceptanceCriteria)*8)
+		budget += minInt(256, len(task.Input.AcceptanceCriteria)*16)
 	}
 	if len(task.Input.Files) > 0 {
-		budget += minInt(72, len(task.Input.Files)*6)
+		budget += minInt(320, len(task.Input.Files)*24)
 	}
-	budget += minInt(72, approximateTokenCount(task.Input.Description)/3)
-	return minInt(640, maxInt(128, budget))
+	budget += minInt(384, approximateTokenCount(task.Input.Description)/2)
+	return minInt(3072, maxInt(512, budget))
 }
 
 func packVectorResults(results []domain.VectorSearchResult, budgetTokens int) ([]domain.VectorSearchResult, retrievalUsage) {
@@ -1340,7 +1573,7 @@ func normalizeBranch(branch string) string {
 func normalizedMemoryScope(scope string) string {
 	normalized := strings.ToLower(strings.TrimSpace(scope))
 	switch normalized {
-	case "task", "branch", "project", "session", "agent", "capability":
+	case "task", "branch", "project", "session", "agent", "capability", "global", "history", "deep-history", "distilled":
 		return normalized
 	default:
 		return "session"

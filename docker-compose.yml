@@ -65,39 +65,6 @@ services:
     networks:
       - hebrew_net
 
-  local_llm:
-    image: docker.io/ollama/ollama:latest
-    container_name: ai_bridge_local_llm
-    restart: unless-stopped
-    environment:
-      OLLAMA_HOST: 0.0.0.0:11434
-      NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      NVIDIA_VISIBLE_DEVICES: all
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    devices:
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
-      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/dri/card2:/dev/dri/card2
-      - /dev/dri/renderD129:/dev/dri/renderD129
-    security_opt:
-      - label=disable
-    healthcheck:
-      test:
-        - CMD
-        - /bin/ollama
-        - list
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    networks:
-      - hebrew_net
-
   ai_kernel:
     image: localhost/hebrew-ai-kernel:local
     container_name: ai_bridge_ai_kernel
@@ -105,24 +72,21 @@ services:
     environment:
       AI_KERNEL_HOST: 0.0.0.0
       AI_KERNEL_PORT: "8012"
-      AI_KERNEL_API_KEY: local
-      AI_KERNEL_MODEL_ALIAS: hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m
-      AI_KERNEL_MODEL_ID: HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive
-      AI_KERNEL_MODEL_FILE: Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
-      AI_KERNEL_MMPROJ_FILE: mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf
-      AI_KERNEL_MODEL_DIR: /models/hauhaucs-qwen36-35b-a3b-aggressive
-      AI_KERNEL_MODEL_PATH: /models/hauhaucs-qwen36-35b-a3b-aggressive/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
-      AI_KERNEL_MMPROJ_PATH: /models/hauhaucs-qwen36-35b-a3b-aggressive/mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf
+      AI_KERNEL_MODEL_ALIAS: gemma4-12b-agentic-fable5:q4_k_m
+      AI_KERNEL_MODEL_ID: yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF
+      AI_KERNEL_MODEL_FILE: gemma4-v2-Q4_K_M.gguf
+      AI_KERNEL_MODEL_DIR: /models/gemma4-12b-agentic-fable5-q4_k_m
+      AI_KERNEL_MODEL_PATH: /models/gemma4-12b-agentic-fable5-q4_k_m/gemma4-v2-Q4_K_M.gguf
       AI_KERNEL_N_CTX: "8192"
       AI_KERNEL_N_THREADS: "16"
       AI_KERNEL_N_GPU_LAYERS: "999"
-      AI_KERNEL_CHAT_TEMPLATE_KWARGS: '{"enable_thinking": false}'
+      AI_KERNEL_REASONING_PROFILE: thinking
+      AI_KERNEL_ENABLE_THINKING: "true"
+      AI_KERNEL_ENABLE_EMBEDDINGS: "true"
     ports:
       - "8012:8012"
     volumes:
       - ai_kernel_models:/models
-    depends_on:
-      - local_llm
     networks:
       - hebrew_net
 
@@ -149,15 +113,13 @@ services:
       AI_BRIDGE_RABBITMQ_USER: guest
       AI_BRIDGE_RABBITMQ_PASSWORD: guest
       AI_BRIDGE_RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      AI_BRIDGE_LOCAL_LLM_ENDPOINT: http://local_llm:11434
-      AI_BRIDGE_LOCAL_LLM_MODELS_ENDPOINT: http://local_llm:11434/api/tags
-      AI_BRIDGE_LOCAL_LLM_CHAT_COMPLETIONS_ENDPOINT: http://local_llm:11434/v1/chat/completions
       AI_KERNEL_BASE_URL: http://ai_kernel:8012/v1
       AI_BRIDGE_AI_KERNEL_BASE_URL: http://ai_kernel:8012/v1
       AI_BRIDGE_AI_KERNEL_MODELS_ENDPOINT: http://ai_kernel:8012/v1/models
       AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT: http://ai_kernel:8012/v1/chat/completions
-      AI_KERNEL_API_KEY: local
-      AI_BRIDGE_LOCAL_LLM_AUTO_PROVISION: "false"
+      GO_CORE_RAG_EMBEDDING_BASE_URL: http://ai_kernel:8012/v1
+      GO_CORE_RAG_EMBEDDING_MODEL: gemma4-12b-agentic-fable5:q4_k_m
+      AI_KERNEL_REQUIRE_API_KEY: "false"
       AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE: "false"
     ports:
       - "8010:8010"
@@ -166,7 +128,6 @@ services:
     depends_on:
       - postgresql
       - rabbitmq
-      - local_llm
       - ai_kernel
     healthcheck:
       test:
@@ -207,9 +168,6 @@ volumes:
     external: true
   rabbitmq_data:
     name: f4e8a2ce6ed671173eddf888afcefc9489463ff48774ed94a56938d48b86a215
-    external: true
-  ollama_data:
-    name: hebrew_ollama_data
     external: true
   ai_kernel_models:
     name: ai_kernel_models

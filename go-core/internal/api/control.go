@@ -518,7 +518,19 @@ func taskFromTransport(data map[string]any) (domain.Task, error) {
 	if priority == "" {
 		priority = domain.PriorityNormal
 	}
+	switch priority {
+	case domain.PriorityLow, domain.PriorityNormal, domain.PriorityHigh, domain.PriorityCritical:
+	default:
+		return domain.Task{}, transport.NewProtocolFrameError("BAD_REQUEST", "unsupported priority: "+string(priority), nil)
+	}
 	complexity := domain.Complexity(strings.ToLower(firstStringField(data, "complexity")))
+	if complexity != "" {
+		switch complexity {
+		case domain.ComplexityLow, domain.ComplexityMedium, domain.ComplexityHigh, domain.ComplexityCritical:
+		default:
+			return domain.Task{}, transport.NewProtocolFrameError("BAD_REQUEST", "unsupported complexity: "+string(complexity), nil)
+		}
+	}
 	files := stringSliceField(data, "files")
 	if len(files) == 0 {
 		files = stringSliceField(input, "files")
@@ -542,6 +554,18 @@ func taskFromTransport(data map[string]any) (domain.Task, error) {
 	branch := stringField(data, "branch")
 	if branch == "" {
 		branch = stringField(contextPayload, "branch")
+	}
+	checkpointPolicy := strings.ToLower(strings.TrimSpace(stringField(data, "checkpoint_policy")))
+	if checkpointPolicy != "" {
+		switch checkpointPolicy {
+		case "branch":
+		default:
+			return domain.Task{}, transport.NewProtocolFrameError("BAD_REQUEST", "unsupported checkpoint_policy: "+checkpointPolicy, nil)
+		}
+	}
+	reviewDepth := intField(data, "review_depth")
+	if reviewDepth < 0 {
+		return domain.Task{}, transport.NewProtocolFrameError("BAD_REQUEST", "review_depth must be greater than or equal to zero", nil)
 	}
 	return domain.Task{
 		ID:                 stringField(data, "id"),
@@ -570,8 +594,8 @@ func taskFromTransport(data map[string]any) (domain.Task, error) {
 		Dependencies:      stringSliceField(data, "dependencies"),
 		BranchID:          stringField(data, "branch_id"),
 		DraftLayer:        stringField(data, "draft_layer"),
-		CheckpointPolicy:  stringField(data, "checkpoint_policy"),
-		ReviewDepth:       intField(data, "review_depth"),
+		CheckpointPolicy:  checkpointPolicy,
+		ReviewDepth:       reviewDepth,
 		ResumeToken:       stringField(data, "resume_token"),
 		EstimatedCost:     float64Field(data, "estimated_cost"),
 		ExecutionContract: mapField(data, "execution_contract"),

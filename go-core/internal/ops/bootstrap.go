@@ -110,7 +110,7 @@ func bootstrapConfigFromEnv(opts BootstrapOptions) (BootstrapConfig, error) {
 		OllamaContainer:           envOrDefault("OLLAMA_CONTAINER", "ai_bridge_local_llm"),
 		MemoryVolume:              envOrDefault("AI_BRIDGE_MEMORY_VOLUME_NAME", "hebrew_core_memory"),
 		OllamaVolume:              envOrDefault("AI_BRIDGE_OLLAMA_VOLUME_NAME", "hebrew_ollama_data"),
-		LocalModel:                firstNonEmpty(opts.Model, os.Getenv("AI_BRIDGE_LOCAL_LLM_MODEL"), "qwen2.5:0.5b"),
+		LocalModel:                firstNonEmpty(opts.Model, os.Getenv("AI_BRIDGE_LOCAL_LLM_MODEL")),
 		OrchestratorPort:          envOrDefault("ORCHESTRATOR_PORT", "8000"),
 		OrchestratorContainerPort: envOrDefault("ORCHESTRATOR_CONTAINER_PORT", "8000"),
 		OllamaPort:                envOrDefault("AI_BRIDGE_LOCAL_LLM_PORT", "11434"),
@@ -151,6 +151,9 @@ func startLocalLLM(ctx context.Context, cfg BootstrapConfig) error {
 	}
 	if err := waitForHTTP(ctx, "http://127.0.0.1:"+cfg.OllamaPort+"/api/tags", 45, time.Second); err != nil {
 		return err
+	}
+	if strings.TrimSpace(cfg.LocalModel) == "" {
+		return nil
 	}
 	result := RunCommand(ctx, "podman", "exec", cfg.OllamaContainer, "ollama", "pull", cfg.LocalModel)
 	if result.ReturnCode != 0 && !strings.Contains(result.Stderr, "already exists") {
@@ -200,8 +203,8 @@ func startOrchestrator(ctx context.Context, cfg BootstrapConfig) error {
 		"-e", "AI_BRIDGE_LOCAL_LLM_MODEL=" + cfg.LocalModel,
 		"-e", "AI_KERNEL_ENABLED=" + firstNonEmpty(os.Getenv("AI_KERNEL_ENABLED"), "true"),
 		"-e", "AI_KERNEL_BASE_URL=" + firstNonEmpty(os.Getenv("AI_KERNEL_BASE_URL"), "http://host.containers.internal:"+cfg.AIKernelPort+"/v1"),
-		"-e", "AI_KERNEL_API_KEY=" + os.Getenv("AI_KERNEL_API_KEY"),
-		"-e", "AI_KERNEL_MODEL_ALIAS=" + firstNonEmpty(os.Getenv("AI_KERNEL_MODEL_ALIAS"), "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"),
+		"-e", "AI_KERNEL_REQUIRE_API_KEY=" + firstNonEmpty(os.Getenv("AI_KERNEL_REQUIRE_API_KEY"), "false"),
+		"-e", "AI_KERNEL_MODEL_ALIAS=" + firstNonEmpty(os.Getenv("AI_KERNEL_MODEL_ALIAS"), "gemma4-12b-agentic-fable5:q4_k_m"),
 		"-e", "AI_KERNEL_TCP_PROBE_HOSTS=" + firstNonEmpty(os.Getenv("AI_KERNEL_TCP_PROBE_HOSTS"), "host.containers.internal:"+cfg.AIKernelPort),
 		"-e", "AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE=" + firstNonEmpty(os.Getenv("AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE"), "false"),
 		"-e", "AI_BRIDGE_HOST_WORKSPACE_ROOT=" + cfg.ProjectRoot,

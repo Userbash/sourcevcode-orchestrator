@@ -24,5 +24,5 @@ WORKDIR /app
 COPY --from=build /out/orchestrator /usr/local/bin/orchestrator
 COPY --from=build --chown=65532:65532 /out/db_backups /app/db_backups
 VOLUME ["/app/db_backups"]
-EXPOSE 8000
+EXPOSE 8010
 ENTRYPOINT ["/usr/local/bin/orchestrator", "serve"]

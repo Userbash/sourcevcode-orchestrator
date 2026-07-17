@@ -77,6 +77,39 @@ func newBudgetTestOrchestrator(t *testing.T) (*Orchestrator, state.Store, *Regis
 	return orchestrator, store, registry
 }
 
+func TestSubmissionSchedulerAllowsIndependentSessionBranchesInParallel(t *testing.T) {
+	scheduler := newSubmissionScheduler(8, 1)
+	ctx := context.Background()
+
+	first := scheduledSubmission{groupKey: submissionGroupKey(domain.Task{ID: "task-1", SessionID: "session-1", BranchID: "branch-a"})}
+	second := scheduledSubmission{groupKey: submissionGroupKey(domain.Task{ID: "task-2", SessionID: "session-1", BranchID: "branch-b"})}
+
+	if err := scheduler.enqueue(ctx, first); err != nil {
+		t.Fatalf("submit(first) error = %v", err)
+	}
+	if err := scheduler.enqueue(ctx, second); err != nil {
+		t.Fatalf("submit(second) error = %v", err)
+	}
+
+	one, ok, err := scheduler.next(ctx)
+	if err != nil {
+		t.Fatalf("next(first) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("next(first) ok = false, want true")
+	}
+	two, ok, err := scheduler.next(ctx)
+	if err != nil {
+		t.Fatalf("next(second) error = %v", err)
+	}
+	if !ok {
+		t.Fatal("next(second) ok = false, want true")
+	}
+	if one.groupKey == two.groupKey {
+		t.Fatalf("group keys = %q and %q, want independent session branches to schedule separately", one.groupKey, two.groupKey)
+	}
+}
+
 func TestOrchestratorPeerFailoverRoutesToNextAgent(t *testing.T) {
 	orchestrator, _, registry := newBudgetTestOrchestrator(t)
 	ctx := context.Background()

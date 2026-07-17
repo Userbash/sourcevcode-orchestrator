@@ -486,7 +486,7 @@ func (s *FileStore) persistLocked() error {
 		VFSArtifacts:   s.vfsArtifacts,
 		VFSCheckpoints: s.vfsCheckpoints,
 	}
-	data, err := json.MarshalIndent(payload, "", "  ")
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

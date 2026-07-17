@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,34 +49,79 @@ type EnvironmentInfo struct {
 }
 
 type RuntimeProfile struct {
-	Scenario                string         `json:"scenario"`
-	RootTaskID              string         `json:"root_task_id"`
-	SessionID               string         `json:"session_id"`
-	Duration                time.Duration  `json:"duration"`
-	GoroutinesBefore        int            `json:"goroutines_before"`
-	GoroutinesPeak          int            `json:"goroutines_peak"`
-	GoroutinesAfter         int            `json:"goroutines_after"`
-	HeapAllocBeforeBytes    uint64         `json:"heap_alloc_before_bytes"`
-	HeapAllocPeakBytes      uint64         `json:"heap_alloc_peak_bytes"`
-	HeapAllocAfterBytes     uint64         `json:"heap_alloc_after_bytes"`
-	TotalAllocDeltaBytes    uint64         `json:"total_alloc_delta_bytes"`
-	MallocDelta             uint64         `json:"malloc_delta"`
-	FreeDelta               uint64         `json:"free_delta"`
-	GCDelta                 uint32         `json:"gc_delta"`
-	PlannedTaskCount        int            `json:"planned_task_count"`
-	CompletedTaskCount      int            `json:"completed_task_count"`
-	ParallelBranchCount     int            `json:"parallel_branch_count"`
-	RegisteredAgentCount    int            `json:"registered_agent_count"`
-	WorkflowCount           int            `json:"workflow_count"`
-	RoutingWeights          map[string]any `json:"routing_weights,omitempty"`
-	ExecutionProfile        map[string]any `json:"execution_profile,omitempty"`
-	DeliverySnapshot        map[string]any `json:"delivery_snapshot,omitempty"`
-	RuntimeSnapshot         map[string]any `json:"runtime_snapshot,omitempty"`
-	PlanTaskIDs             []string       `json:"plan_task_ids,omitempty"`
-	CompletedTaskIDs        []string       `json:"completed_task_ids,omitempty"`
-	ResultArtifactCount     int            `json:"result_artifact_count"`
-	AcceptanceCriteriaCount int            `json:"acceptance_criteria_count"`
-	RequestedFileCount      int            `json:"requested_file_count"`
+	Scenario                string              `json:"scenario"`
+	Level                   string              `json:"level,omitempty"`
+	Description             string              `json:"description,omitempty"`
+	FocusAreas              []string            `json:"focus_areas,omitempty"`
+	Warnings                []string            `json:"warnings,omitempty"`
+	RootTaskID              string              `json:"root_task_id"`
+	SessionID               string              `json:"session_id"`
+	Duration                time.Duration       `json:"duration"`
+	GoroutinesBefore        int                 `json:"goroutines_before"`
+	GoroutinesPeak          int                 `json:"goroutines_peak"`
+	GoroutinesAfter         int                 `json:"goroutines_after"`
+	HeapAllocBeforeBytes    uint64              `json:"heap_alloc_before_bytes"`
+	HeapAllocPeakBytes      uint64              `json:"heap_alloc_peak_bytes"`
+	HeapAllocAfterBytes     uint64              `json:"heap_alloc_after_bytes"`
+	TotalAllocDeltaBytes    uint64              `json:"total_alloc_delta_bytes"`
+	MallocDelta             uint64              `json:"malloc_delta"`
+	FreeDelta               uint64              `json:"free_delta"`
+	GCDelta                 uint32              `json:"gc_delta"`
+	PlannedTaskCount        int                 `json:"planned_task_count"`
+	CompletedTaskCount      int                 `json:"completed_task_count"`
+	ParallelBranchCount     int                 `json:"parallel_branch_count"`
+	RegisteredAgentCount    int                 `json:"registered_agent_count"`
+	WorkflowCount           int                 `json:"workflow_count"`
+	RoutingWeights          map[string]any      `json:"routing_weights,omitempty"`
+	ExecutionProfile        map[string]any      `json:"execution_profile,omitempty"`
+	DeliverySnapshot        map[string]any      `json:"delivery_snapshot,omitempty"`
+	RuntimeSnapshot         map[string]any      `json:"runtime_snapshot,omitempty"`
+	PlanTaskIDs             []string            `json:"plan_task_ids,omitempty"`
+	CompletedTaskIDs        []string            `json:"completed_task_ids,omitempty"`
+	ResultArtifactCount     int                 `json:"result_artifact_count"`
+	AcceptanceCriteriaCount int                 `json:"acceptance_criteria_count"`
+	RequestedFileCount      int                 `json:"requested_file_count"`
+	WorkflowTraces          []WorkflowTrace     `json:"workflow_traces,omitempty"`
+	Distribution            DistributionSummary `json:"distribution,omitempty"`
+	TaskEventCount          int                 `json:"task_event_count"`
+	UnexpectedEventCount    int                 `json:"unexpected_event_count"`
+	NoisyWorkflowCount      int                 `json:"noisy_workflow_count"`
+	MeanQueueLatency        time.Duration       `json:"mean_queue_latency,omitempty"`
+	MeanExecutionLatency    time.Duration       `json:"mean_execution_latency,omitempty"`
+	MeanTotalLatency        time.Duration       `json:"mean_total_latency,omitempty"`
+	MaxObservedParallelism  int                 `json:"max_observed_parallelism"`
+}
+
+type WorkflowTrace struct {
+	TaskID              string        `json:"task_id"`
+	ParentTaskID        string        `json:"parent_task_id,omitempty"`
+	BranchID            string        `json:"branch_id,omitempty"`
+	ClusterID           string        `json:"cluster_id,omitempty"`
+	Capability          string        `json:"capability,omitempty"`
+	WorkerClass         string        `json:"worker_class,omitempty"`
+	Status              string        `json:"status,omitempty"`
+	ResultStatus        string        `json:"result_status,omitempty"`
+	AgentID             string        `json:"agent_id,omitempty"`
+	Provider            string        `json:"provider,omitempty"`
+	ModelName           string        `json:"model_name,omitempty"`
+	Dependencies        []string      `json:"dependencies,omitempty"`
+	Files               []string      `json:"files,omitempty"`
+	EventKinds          []string      `json:"event_kinds,omitempty"`
+	AcceptedAt          time.Time     `json:"accepted_at,omitempty"`
+	StartedAt           time.Time     `json:"started_at,omitempty"`
+	CompletedAt         time.Time     `json:"completed_at,omitempty"`
+	QueueLatency        time.Duration `json:"queue_latency,omitempty"`
+	ExecutionLatency    time.Duration `json:"execution_latency,omitempty"`
+	TotalLatency        time.Duration `json:"total_latency,omitempty"`
+	ResultSummary       string        `json:"result_summary,omitempty"`
+	ResultArtifactCount int           `json:"result_artifact_count,omitempty"`
+}
+
+type DistributionSummary struct {
+	ByCapability map[string]int `json:"by_capability,omitempty"`
+	ByAgent      map[string]int `json:"by_agent,omitempty"`
+	ByProvider   map[string]int `json:"by_provider,omitempty"`
+	ByModel      map[string]int `json:"by_model,omitempty"`
 }
 
 type AgentKPI struct {
@@ -117,20 +163,35 @@ type CoordinatorKPI struct {
 }
 
 type Report struct {
-	GeneratedAt    time.Time       `json:"generated_at"`
-	Root           string          `json:"root"`
-	Environment    EnvironmentInfo `json:"environment"`
-	Steps          []StepResult    `json:"steps"`
-	RuntimeProfile *RuntimeProfile `json:"runtime_profile,omitempty"`
-	AgentKPIs      []AgentKPI      `json:"agent_kpis,omitempty"`
-	CoordinatorKPI *CoordinatorKPI `json:"coordinator_kpi,omitempty"`
-	Success        bool            `json:"success"`
-	Notes          []string        `json:"notes,omitempty"`
+	GeneratedAt      time.Time         `json:"generated_at"`
+	Root             string            `json:"root"`
+	Environment      EnvironmentInfo   `json:"environment"`
+	Steps            []StepResult      `json:"steps"`
+	RuntimeProfile   *RuntimeProfile   `json:"runtime_profile,omitempty"`
+	RuntimeScenarios []*RuntimeProfile `json:"runtime_scenarios,omitempty"`
+	AgentKPIs        []AgentKPI        `json:"agent_kpis,omitempty"`
+	CoordinatorKPI   *CoordinatorKPI   `json:"coordinator_kpi,omitempty"`
+	Success          bool              `json:"success"`
+	Notes            []string          `json:"notes,omitempty"`
 }
 
 type step struct {
 	name string
 	cmd  []string
+}
+
+type syntheticScenario struct {
+	Name        string
+	Level       string
+	Description string
+	FocusAreas  []string
+	Task        domain.Task
+}
+
+type runtimeScenarioExecution struct {
+	Profile        *RuntimeProfile
+	AgentKPIs      []AgentKPI
+	CoordinatorKPI *CoordinatorKPI
 }
 
 type syntheticAgent struct {
@@ -309,9 +370,10 @@ func main() {
 		}
 	}
 
-	runtimeStep, runtimeProfile, agentKPIs, coordinatorKPI := runRuntimeProfileStep(ctx)
+	runtimeStep, runtimeProfile, runtimeScenarios, agentKPIs, coordinatorKPI := runRuntimeProfileStep(ctx)
 	report.Steps = append(report.Steps, runtimeStep)
 	report.RuntimeProfile = runtimeProfile
+	report.RuntimeScenarios = runtimeScenarios
 	report.AgentKPIs = agentKPIs
 	report.CoordinatorKPI = coordinatorKPI
 	if !runtimeStep.Success {
@@ -324,6 +386,7 @@ func main() {
 	report.Notes = append(report.Notes,
 		"all validation steps passed",
 		"runtime profiler exported CPU/memory/goroutine and agent KPI snapshots",
+		"runtime scenarios cover basic docs, intermediate research and advanced parallel code execution",
 	)
 	printReport(report, *jsonOutput)
 }
@@ -376,9 +439,9 @@ func runCommandStep(ctx context.Context, root string, current step) StepResult {
 	return result
 }
 
-func runRuntimeProfileStep(ctx context.Context) (StepResult, *RuntimeProfile, []AgentKPI, *CoordinatorKPI) {
+func runRuntimeProfileStep(ctx context.Context) (StepResult, *RuntimeProfile, []*RuntimeProfile, []AgentKPI, *CoordinatorKPI) {
 	startedAt := time.Now()
-	profile, agentKPIs, coordinatorKPI, err := runSyntheticRuntimeProfile(ctx)
+	executions, err := runSyntheticRuntimeProfiles(ctx)
 	result := StepResult{
 		Name:      "runtime-profile",
 		StartedAt: startedAt,
@@ -388,20 +451,44 @@ func runRuntimeProfileStep(ctx context.Context) (StepResult, *RuntimeProfile, []
 	if err != nil {
 		result.Success = false
 		result.Error = err.Error()
-		return result, nil, nil, nil
+		return result, nil, nil, nil, nil
 	}
+	if len(executions) == 0 {
+		result.Success = false
+		result.Error = "no runtime scenarios executed"
+		return result, nil, nil, nil, nil
+	}
+	scenarios := make([]*RuntimeProfile, 0, len(executions))
+	for _, execution := range executions {
+		scenarios = append(scenarios, execution.Profile)
+	}
+	selected := executions[len(executions)-1]
 	result.Success = true
-	result.Output = fmt.Sprintf("scenario=%s goroutines_peak=%d planned=%d completed=%d agents=%d",
-		profile.Scenario,
-		profile.GoroutinesPeak,
-		profile.PlannedTaskCount,
-		profile.CompletedTaskCount,
-		len(agentKPIs),
+	result.Output = fmt.Sprintf("scenarios=%d final=%s peak_goroutines=%d planned=%d completed=%d agents=%d warnings=%d",
+		len(executions),
+		selected.Profile.Scenario,
+		selected.Profile.GoroutinesPeak,
+		selected.Profile.PlannedTaskCount,
+		selected.Profile.CompletedTaskCount,
+		len(selected.AgentKPIs),
+		len(selected.Profile.Warnings),
 	)
-	return result, profile, agentKPIs, coordinatorKPI
+	return result, selected.Profile, scenarios, selected.AgentKPIs, selected.CoordinatorKPI
 }
 
 func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKPI, *CoordinatorKPI, error) {
+	executions, err := runSyntheticRuntimeProfiles(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(executions) == 0 {
+		return nil, nil, nil, errors.New("no runtime scenarios executed")
+	}
+	selected := executions[len(executions)-1]
+	return selected.Profile, selected.AgentKPIs, selected.CoordinatorKPI, nil
+}
+
+func runSyntheticRuntimeProfiles(ctx context.Context) ([]runtimeScenarioExecution, error) {
 	for key, value := range map[string]string{
 		"GO_CORE_MESSAGE_BUS_BACKEND":      "memory",
 		"GO_CORE_SUBMIT_MODE":              "sync",
@@ -414,20 +501,108 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 	} {
 		if os.Getenv(key) == "" {
 			if err := os.Setenv(key, value); err != nil {
-				return nil, nil, nil, err
+				return nil, err
 			}
 		}
 	}
 
+	scenarios := syntheticScenarios()
+	executions := make([]runtimeScenarioExecution, 0, len(scenarios))
+	for _, scenario := range scenarios {
+		execution, err := runSyntheticRuntimeScenario(ctx, scenario)
+		if err != nil {
+			return nil, fmt.Errorf("scenario %s: %w", scenario.Name, err)
+		}
+		executions = append(executions, execution)
+	}
+	return executions, nil
+}
+
+func syntheticScenarios() []syntheticScenario {
+	return []syntheticScenario{
+		{
+			Name:        "level-1-docs-sequential",
+			Level:       "basic",
+			Description: "Single-stage documentation task used to baseline latency, typing and sequential routing.",
+			FocusAreas:  []string{"single-agent routing", "transport validation", "low-latency baseline"},
+			Task: domain.Task{
+				ID:               "verify-docs-task",
+				SessionID:        "verify-session-docs",
+				Type:             domain.TaskTypeDocs,
+				Complexity:       domain.ComplexityLow,
+				AssignedProvider: "kernel",
+				Input: domain.TaskInput{
+					Description: "Draft a small API usage note for runtime profiling.",
+					Files:       []string{"README.md"},
+					AcceptanceCriteria: []string{
+						"single docs artifact",
+						"no empty output fields",
+					},
+				},
+			},
+		},
+		{
+			Name:        "level-2-research-review",
+			Level:       "intermediate",
+			Description: "Research-heavy task that should traverse planner, research and review stages without parallel fanout.",
+			FocusAreas:  []string{"planner decomposition", "research handoff", "review latency"},
+			Task: domain.Task{
+				ID:               "verify-research-task",
+				SessionID:        "verify-session-research",
+				Type:             domain.TaskTypeResearch,
+				Complexity:       domain.ComplexityMedium,
+				AssignedProvider: "kernel",
+				Input: domain.TaskInput{
+					Description: "Investigate routing and summarize validation risks before implementation.",
+					Files: []string{
+						"go-core/internal/kernel/router.go",
+						"go-core/internal/kernel/model_selector.go",
+					},
+					AcceptanceCriteria: []string{
+						"research summary",
+						"review recommendation",
+					},
+				},
+			},
+		},
+		{
+			Name:        "level-3-code-fanout",
+			Level:       "advanced",
+			Description: "Critical code task that should fan out across workers, then converge through review and test stages.",
+			FocusAreas:  []string{"parallel branch scheduling", "memory pressure", "fanout/fanin correctness", "multistage coordination"},
+			Task: domain.Task{
+				ID:               "verify-root-task",
+				SessionID:        "verify-session",
+				Type:             domain.TaskTypeCode,
+				Complexity:       domain.ComplexityCritical,
+				AssignedProvider: "kernel",
+				Input: domain.TaskInput{
+					Description: "Split a code task into plan, code, review and test stages.",
+					Files: []string{
+						"go-core/internal/kernel/orchestrator.go",
+						"go-core/internal/kernel/router.go",
+						"go-core/internal/kernel/model_selector.go",
+					},
+					AcceptanceCriteria: []string{
+						"parallel branch execution",
+						"type-safe results",
+					},
+				},
+			},
+		},
+	}
+}
+
+func runSyntheticRuntimeScenario(ctx context.Context, scenario syntheticScenario) (runtimeScenarioExecution, error) {
 	storeDir, err := os.MkdirTemp("", "orchestrator-verify-store-")
 	if err != nil {
-		return nil, nil, nil, err
+		return runtimeScenarioExecution{}, err
 	}
 	defer os.RemoveAll(storeDir)
 
 	store, err := state.NewFileStore(filepath.Join(storeDir, "state"))
 	if err != nil {
-		return nil, nil, nil, err
+		return runtimeScenarioExecution{}, err
 	}
 
 	registry := kernel.NewRegistry()
@@ -438,11 +613,16 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 	inventoryHub := realtime.NewHub("inventory", 32)
 	orchestrator := kernel.NewOrchestrator(registry, planner, router, store, runtimeHub, inventoryHub, nil)
 
+	selection := selector.Select(scenario.Task)
+	agentProvider := firstNonEmptyString(strings.TrimSpace(scenario.Task.AssignedProvider), strings.TrimSpace(selection.Provider), "kernel")
+	agentModel := firstNonEmptyString(strings.TrimSpace(scenario.Task.AssignedModel), strings.TrimSpace(selection.ModelName), "synthetic-default")
 	agents := []*syntheticAgent{
-		{info: domain.AgentInfo{ID: "plan-supervisor", Type: "superagent", Provider: "kernel", ModelName: "planner-sim", Capabilities: []string{"plan"}, Status: domain.AgentStatusReady}, delay: 25 * time.Millisecond},
-		{info: domain.AgentInfo{ID: "code-worker", Type: "agent", Provider: "kernel", ModelName: "code-sim", Capabilities: []string{"code"}, Status: domain.AgentStatusReady}, delay: 90 * time.Millisecond},
-		{info: domain.AgentInfo{ID: "review-supervisor", Type: "superagent", Provider: "kernel", ModelName: "review-sim", Capabilities: []string{"review"}, Status: domain.AgentStatusReady}, delay: 30 * time.Millisecond},
-		{info: domain.AgentInfo{ID: "test-worker", Type: "agent", Provider: "kernel", ModelName: "test-sim", Capabilities: []string{"test"}, Status: domain.AgentStatusReady}, delay: 35 * time.Millisecond},
+		{info: domain.AgentInfo{ID: "plan-supervisor", Type: "superagent", Provider: agentProvider, ModelName: agentModel, Capabilities: []string{"plan"}, Status: domain.AgentStatusReady}, delay: 25 * time.Millisecond},
+		{info: domain.AgentInfo{ID: "code-worker", Type: "agent", Provider: agentProvider, ModelName: agentModel, Capabilities: []string{"code"}, Status: domain.AgentStatusReady}, delay: 90 * time.Millisecond},
+		{info: domain.AgentInfo{ID: "review-supervisor", Type: "superagent", Provider: agentProvider, ModelName: agentModel, Capabilities: []string{"review"}, Status: domain.AgentStatusReady}, delay: 30 * time.Millisecond},
+		{info: domain.AgentInfo{ID: "test-worker", Type: "agent", Provider: agentProvider, ModelName: agentModel, Capabilities: []string{"test"}, Status: domain.AgentStatusReady}, delay: 35 * time.Millisecond},
+		{info: domain.AgentInfo{ID: "docs-worker", Type: "agent", Provider: agentProvider, ModelName: agentModel, Capabilities: []string{"docs"}, Status: domain.AgentStatusReady}, delay: 20 * time.Millisecond},
+		{info: domain.AgentInfo{ID: "research-worker", Type: "agent", Provider: agentProvider, ModelName: agentModel, Capabilities: []string{"research"}, Status: domain.AgentStatusReady}, delay: 40 * time.Millisecond},
 	}
 	for _, agent := range agents {
 		registry.RegisterAgent(agent)
@@ -459,32 +639,12 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 	sampled := make(chan struct{})
 	go sampleRuntime(runtimeCtx, stopSampling, sampled, &peakGoroutines, &heapPeak)
 
-	rootTask := domain.Task{
-		ID:               "verify-root-task",
-		SessionID:        "verify-session",
-		Type:             domain.TaskTypeCode,
-		Complexity:       domain.ComplexityCritical,
-		AssignedProvider: "kernel",
-		Input: domain.TaskInput{
-			Description: "Split a code task into plan, code, review and test stages.",
-			Files: []string{
-				"go-core/internal/kernel/orchestrator.go",
-				"go-core/internal/kernel/router.go",
-				"go-core/internal/kernel/model_selector.go",
-			},
-			AcceptanceCriteria: []string{
-				"parallel branch execution",
-				"type-safe results",
-			},
-		},
-	}
-
 	startedAt := time.Now()
-	run, err := orchestrator.RunExecutionPlan(ctx, rootTask)
+	run, err := orchestrator.RunExecutionPlan(ctx, scenario.Task)
 	close(stopSampling)
 	<-sampled
 	if err != nil {
-		return nil, nil, nil, err
+		return runtimeScenarioExecution{}, err
 	}
 	completedAt := time.Now()
 	memAfter := readMemStats()
@@ -500,9 +660,12 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 	taskArtifactsByID := planTasksByID(run.PlanArtifact)
 
 	profile := &RuntimeProfile{
-		Scenario:                "synthetic-orchestrator-runtime",
-		RootTaskID:              rootTask.ID,
-		SessionID:               rootTask.SessionID,
+		Scenario:                scenario.Name,
+		Level:                   scenario.Level,
+		Description:             scenario.Description,
+		FocusAreas:              append([]string(nil), scenario.FocusAreas...),
+		RootTaskID:              scenario.Task.ID,
+		SessionID:               scenario.Task.SessionID,
 		Duration:                completedAt.Sub(startedAt),
 		GoroutinesBefore:        goroutinesBefore,
 		GoroutinesPeak:          peakGoroutines,
@@ -526,9 +689,18 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 		PlanTaskIDs:             plannedIDs,
 		CompletedTaskIDs:        completedIDs,
 		ResultArtifactCount:     len(run.Checkpoint.ResultsByTaskID),
-		AcceptanceCriteriaCount: len(rootTask.Input.AcceptanceCriteria),
-		RequestedFileCount:      len(rootTask.Input.Files),
+		AcceptanceCriteriaCount: len(scenario.Task.Input.AcceptanceCriteria),
+		RequestedFileCount:      len(scenario.Task.Input.Files),
 	}
+	taskEvents := orchestrator.RuntimeEventSnapshot("tasks")
+	workflowTraces := buildWorkflowTraces(run.PlanArtifact, run.Workflows, taskEvents)
+	profile.WorkflowTraces = workflowTraces
+	profile.Distribution = summarizeDistribution(workflowTraces)
+	profile.TaskEventCount, profile.UnexpectedEventCount, profile.NoisyWorkflowCount = summarizeTaskEvents(workflowTraces)
+	profile.MeanQueueLatency = meanWorkflowLatency(workflowTraces, func(trace WorkflowTrace) time.Duration { return trace.QueueLatency })
+	profile.MeanExecutionLatency = meanWorkflowLatency(workflowTraces, func(trace WorkflowTrace) time.Duration { return trace.ExecutionLatency })
+	profile.MeanTotalLatency = meanWorkflowLatency(workflowTraces, func(trace WorkflowTrace) time.Duration { return trace.TotalLatency })
+	profile.MaxObservedParallelism = maxObservedParallelism(workflowTraces)
 
 	agentKPIs := make([]AgentKPI, 0, len(agents))
 	for _, agent := range agents {
@@ -536,6 +708,7 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 	}
 	mergeWorkflowRecords(agentKPIs, run.Workflows, taskArtifactsByID)
 	mergeCheckpointResults(agentKPIs, run.Checkpoint.ResultsByTaskID, taskArtifactsByID)
+	profile.Warnings = detectScenarioWarnings(profile, agentKPIs)
 
 	coordinator := &CoordinatorKPI{
 		RegisteredAgents:     len(agents),
@@ -562,7 +735,322 @@ func runSyntheticRuntimeProfile(ctx context.Context) (*RuntimeProfile, []AgentKP
 		CompletedTaskIDs: completedIDs,
 	}
 
-	return profile, agentKPIs, coordinator, nil
+	return runtimeScenarioExecution{Profile: profile, AgentKPIs: agentKPIs, CoordinatorKPI: coordinator}, nil
+}
+
+func detectScenarioWarnings(profile *RuntimeProfile, agentKPIs []AgentKPI) []string {
+	warnings := make([]string, 0, 12)
+	if profile == nil {
+		return warnings
+	}
+	if profile.CompletedTaskCount < profile.PlannedTaskCount {
+		warnings = append(warnings, "planned task count exceeds completed task count")
+	}
+	if len(profile.WorkflowTraces) != profile.PlannedTaskCount {
+		warnings = append(warnings, "workflow trace count does not match planned task count")
+	}
+	if profile.ResultArtifactCount == 0 {
+		warnings = append(warnings, "no result artifacts were produced")
+	}
+	if profile.ParallelBranchCount > 1 && maxPeakConcurrency(agentKPIs) < 2 {
+		warnings = append(warnings, "parallel branches were planned but worker concurrency stayed below 2")
+	}
+	if profile.ParallelBranchCount > 1 && profile.MaxObservedParallelism < 2 {
+		warnings = append(warnings, "parallel branches were planned but workflow traces did not overlap")
+	}
+	if profile.UnexpectedEventCount > 0 {
+		warnings = append(warnings, fmt.Sprintf("unexpected task events detected: count=%d", profile.UnexpectedEventCount))
+	}
+	if profile.NoisyWorkflowCount > 0 {
+		warnings = append(warnings, fmt.Sprintf("workflow event noise threshold exceeded: workflows=%d", profile.NoisyWorkflowCount))
+	}
+	mallocThreshold := uint64(maxInt(profile.PlannedTaskCount, 2) * 250000)
+	if profile.MallocDelta > mallocThreshold {
+		warnings = append(warnings, fmt.Sprintf("high allocation pressure detected: malloc_delta=%d threshold=%d", profile.MallocDelta, mallocThreshold))
+	}
+	gcThreshold := uint32(maxInt(profile.PlannedTaskCount*8, 24))
+	if profile.GCDelta > gcThreshold {
+		warnings = append(warnings, fmt.Sprintf("elevated GC activity detected: gc_delta=%d threshold=%d", profile.GCDelta, gcThreshold))
+	}
+	if profile.Level != "advanced" && profile.Duration > 350*time.Millisecond {
+		warnings = append(warnings, fmt.Sprintf("unexpected latency for %s scenario: %s", profile.Level, profile.Duration))
+	}
+	if duplicates := duplicateStrings(profile.CompletedTaskIDs); len(duplicates) > 0 {
+		warnings = append(warnings, fmt.Sprintf("duplicate completed task ids detected: %s", strings.Join(duplicates, ",")))
+	}
+	if duplicates := duplicateStrings(profile.PlanTaskIDs); len(duplicates) > 0 {
+		warnings = append(warnings, fmt.Sprintf("duplicate planned task ids detected: %s", strings.Join(duplicates, ",")))
+	}
+	warnings = append(warnings, missingWorkflowTraceFields(profile.WorkflowTraces)...)
+	return warnings
+}
+
+func buildWorkflowTraces(plan domain.PlanArtifact, workflows []domain.WorkflowRecord, events []domain.StreamEvent) []WorkflowTrace {
+	if len(plan.Tasks) == 0 {
+		return nil
+	}
+	workflowByTaskID := make(map[string]domain.WorkflowRecord, len(workflows))
+	for _, workflow := range workflows {
+		if workflow.Task.ID != "" {
+			workflowByTaskID[workflow.Task.ID] = workflow
+		}
+	}
+	timelines := taskEventTimelines(events)
+	traces := make([]WorkflowTrace, 0, len(plan.Tasks))
+	for _, task := range plan.Tasks {
+		trace := WorkflowTrace{
+			TaskID:       task.TaskID,
+			BranchID:     task.BranchID,
+			ClusterID:    task.ClusterID,
+			Capability:   task.Capability,
+			WorkerClass:  task.WorkerClass,
+			Dependencies: append([]string(nil), task.Dependencies...),
+			Files:        append([]string(nil), task.Files...),
+		}
+		if workflow, ok := workflowByTaskID[task.TaskID]; ok {
+			trace.ParentTaskID = workflow.Task.ParentTaskID
+			trace.Status = string(workflow.Acceptance.Status)
+			trace.AgentID = workflow.Acceptance.AgentID
+			trace.Provider = workflow.Acceptance.Provider
+			trace.ModelName = workflow.Acceptance.ModelName
+			if workflow.Acceptance.Capability != "" {
+				trace.Capability = workflow.Acceptance.Capability
+			}
+			trace.AcceptedAt = workflow.Acceptance.AcceptedAt
+			if workflow.Result != nil {
+				trace.ResultStatus = string(workflow.Result.Status)
+				trace.Provider = firstNonEmptyString(trace.Provider, workflow.Result.Provider)
+				trace.ModelName = firstNonEmptyString(trace.ModelName, workflow.Result.ModelName)
+				trace.AgentID = firstNonEmptyString(trace.AgentID, workflow.Result.AgentID)
+				trace.CompletedAt = workflow.Result.CompletedAt
+				trace.ResultSummary = workflow.Result.Output.Summary
+				trace.ResultArtifactCount = len(workflow.Result.Output.Artifacts)
+			}
+			if trace.CompletedAt.IsZero() {
+				trace.CompletedAt = workflow.UpdatedAt
+			}
+		}
+		if timeline, ok := timelines[task.TaskID]; ok {
+			trace.EventKinds = append([]string(nil), timeline.Kinds...)
+			if trace.AcceptedAt.IsZero() {
+				trace.AcceptedAt = timeline.Accepted
+			}
+			trace.StartedAt = timeline.Running
+			if trace.CompletedAt.IsZero() {
+				trace.CompletedAt = timeline.Completed
+			}
+			if !timeline.Queued.IsZero() && !timeline.Running.IsZero() {
+				trace.QueueLatency = timeline.Running.Sub(timeline.Queued)
+			}
+			if !timeline.Running.IsZero() && !timeline.Completed.IsZero() {
+				trace.ExecutionLatency = timeline.Completed.Sub(timeline.Running)
+			}
+			switch {
+			case !timeline.Queued.IsZero() && !timeline.Completed.IsZero():
+				trace.TotalLatency = timeline.Completed.Sub(timeline.Queued)
+			case !trace.AcceptedAt.IsZero() && !timeline.Completed.IsZero():
+				trace.TotalLatency = timeline.Completed.Sub(trace.AcceptedAt)
+			}
+		}
+		traces = append(traces, trace)
+	}
+	return traces
+}
+
+func summarizeDistribution(traces []WorkflowTrace) DistributionSummary {
+	summary := DistributionSummary{
+		ByCapability: map[string]int{},
+		ByAgent:      map[string]int{},
+		ByProvider:   map[string]int{},
+		ByModel:      map[string]int{},
+	}
+	for _, trace := range traces {
+		if trace.Capability != "" {
+			summary.ByCapability[trace.Capability]++
+		}
+		if trace.AgentID != "" {
+			summary.ByAgent[trace.AgentID]++
+		}
+		if trace.Provider != "" {
+			summary.ByProvider[trace.Provider]++
+		}
+		if trace.ModelName != "" {
+			summary.ByModel[trace.ModelName]++
+		}
+	}
+	return summary
+}
+
+func summarizeTaskEvents(traces []WorkflowTrace) (int, int, int) {
+	total := 0
+	unexpected := 0
+	noisy := 0
+	for _, trace := range traces {
+		total += len(trace.EventKinds)
+		if len(trace.EventKinds) > 7 {
+			noisy++
+		}
+		for _, kind := range trace.EventKinds {
+			if !isExpectedTaskEvent(kind) {
+				unexpected++
+			}
+		}
+	}
+	return total, unexpected, noisy
+}
+
+func meanWorkflowLatency(traces []WorkflowTrace, pick func(WorkflowTrace) time.Duration) time.Duration {
+	var total time.Duration
+	count := 0
+	for _, trace := range traces {
+		latency := pick(trace)
+		if latency <= 0 {
+			continue
+		}
+		total += latency
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return total / time.Duration(count)
+}
+
+func maxObservedParallelism(traces []WorkflowTrace) int {
+	type edge struct {
+		at    time.Time
+		delta int
+	}
+	edges := make([]edge, 0, len(traces)*2)
+	for _, trace := range traces {
+		if trace.StartedAt.IsZero() || trace.CompletedAt.IsZero() || !trace.CompletedAt.After(trace.StartedAt) {
+			continue
+		}
+		edges = append(edges, edge{at: trace.StartedAt, delta: 1})
+		edges = append(edges, edge{at: trace.CompletedAt, delta: -1})
+	}
+	if len(edges) == 0 {
+		return 0
+	}
+	sort.Slice(edges, func(i, j int) bool {
+		if edges[i].at.Equal(edges[j].at) {
+			return edges[i].delta > edges[j].delta
+		}
+		return edges[i].at.Before(edges[j].at)
+	})
+	current := 0
+	maxCurrent := 0
+	for _, edge := range edges {
+		current += edge.delta
+		if current > maxCurrent {
+			maxCurrent = current
+		}
+	}
+	return maxCurrent
+}
+
+type taskEventTimeline struct {
+	Accepted  time.Time
+	Queued    time.Time
+	Running   time.Time
+	Completed time.Time
+	Kinds     []string
+}
+
+func taskEventTimelines(events []domain.StreamEvent) map[string]taskEventTimeline {
+	timelines := make(map[string]taskEventTimeline, len(events))
+	for _, event := range events {
+		if event.EntityID == "" {
+			continue
+		}
+		timeline := timelines[event.EntityID]
+		timeline.Kinds = append(timeline.Kinds, event.Kind)
+		switch event.Kind {
+		case "task.accepted":
+			if timeline.Accepted.IsZero() {
+				timeline.Accepted = event.Timestamp
+			}
+		case "task.queued", "task.dequeued":
+			if timeline.Queued.IsZero() {
+				timeline.Queued = event.Timestamp
+			}
+		case "task.running":
+			if timeline.Running.IsZero() {
+				timeline.Running = event.Timestamp
+			}
+		case "task.completed", "task.result_received":
+			if timeline.Completed.IsZero() {
+				timeline.Completed = event.Timestamp
+			}
+		}
+		timelines[event.EntityID] = timeline
+	}
+	return timelines
+}
+
+func isExpectedTaskEvent(kind string) bool {
+	switch kind {
+	case "task.accepted", "task.queued", "task.dequeued", "task.running", "task.result_received", "task.completed", "task.failed", "task.result_failed", "task.rerouted":
+		return true
+	default:
+		return false
+	}
+}
+
+func duplicateStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	reported := map[string]struct{}{}
+	duplicates := make([]string, 0, 2)
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			if _, exists := reported[value]; !exists {
+				duplicates = append(duplicates, value)
+				reported[value] = struct{}{}
+			}
+			continue
+		}
+		seen[value] = struct{}{}
+	}
+	return duplicates
+}
+
+func missingWorkflowTraceFields(traces []WorkflowTrace) []string {
+	warnings := make([]string, 0, 4)
+	for _, trace := range traces {
+		if trace.TaskID == "" {
+			warnings = append(warnings, "workflow trace has empty task id")
+			continue
+		}
+		if trace.Capability == "" {
+			warnings = append(warnings, fmt.Sprintf("workflow trace %s is missing capability", trace.TaskID))
+		}
+		if trace.AgentID == "" {
+			warnings = append(warnings, fmt.Sprintf("workflow trace %s is missing agent id", trace.TaskID))
+		}
+		if trace.Status == "" && trace.ResultStatus == "" {
+			warnings = append(warnings, fmt.Sprintf("workflow trace %s is missing terminal status", trace.TaskID))
+		}
+		if len(trace.EventKinds) == 0 {
+			warnings = append(warnings, fmt.Sprintf("workflow trace %s did not capture task events", trace.TaskID))
+		}
+	}
+	return warnings
+}
+
+func maxPeakConcurrency(agentKPIs []AgentKPI) int64 {
+	var max int64
+	for _, kpi := range agentKPIs {
+		if kpi.PeakConcurrency > max {
+			max = kpi.PeakConcurrency
+		}
+	}
+	return max
 }
 
 func sampleRuntime(ctx context.Context, stop <-chan struct{}, done chan<- struct{}, peakGoroutines *int, heapPeak *uint64) {
@@ -871,6 +1359,22 @@ func contains(items []string, target string) bool {
 	return false
 }
 
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
 func printReport(report Report, jsonOutput bool) {
 	if jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
@@ -903,7 +1407,7 @@ func printReport(report Report, jsonOutput bool) {
 		}
 	}
 	if report.RuntimeProfile != nil {
-		fmt.Printf("runtime-profile: duration=%s goroutines(before=%d peak=%d after=%d) heap_peak=%dB planned=%d completed=%d parallel_branches=%d\n",
+		fmt.Printf("runtime-profile: duration=%s goroutines(before=%d peak=%d after=%d) heap_peak=%dB planned=%d completed=%d parallel_branches=%d observed_parallel=%d mean(queue=%s exec=%s total=%s) warnings=%d\n",
 			report.RuntimeProfile.Duration,
 			report.RuntimeProfile.GoroutinesBefore,
 			report.RuntimeProfile.GoroutinesPeak,
@@ -912,7 +1416,43 @@ func printReport(report Report, jsonOutput bool) {
 			report.RuntimeProfile.PlannedTaskCount,
 			report.RuntimeProfile.CompletedTaskCount,
 			report.RuntimeProfile.ParallelBranchCount,
+			report.RuntimeProfile.MaxObservedParallelism,
+			report.RuntimeProfile.MeanQueueLatency,
+			report.RuntimeProfile.MeanExecutionLatency,
+			report.RuntimeProfile.MeanTotalLatency,
+			len(report.RuntimeProfile.Warnings),
 		)
+		if len(report.RuntimeProfile.WorkflowTraces) > 0 {
+			fmt.Println("workflow-traces:")
+			for _, trace := range report.RuntimeProfile.WorkflowTraces {
+				fmt.Printf("  - task=%s capability=%s agent=%s status=%s result=%s queue=%s exec=%s total=%s deps=%d files=%d branch=%s cluster=%s events=%s\n",
+					trace.TaskID,
+					trace.Capability,
+					trace.AgentID,
+					trace.Status,
+					trace.ResultStatus,
+					trace.QueueLatency,
+					trace.ExecutionLatency,
+					trace.TotalLatency,
+					len(trace.Dependencies),
+					len(trace.Files),
+					trace.BranchID,
+					trace.ClusterID,
+					strings.Join(trace.EventKinds, ","),
+				)
+			}
+		}
+		if len(report.RuntimeProfile.Distribution.ByCapability) > 0 || len(report.RuntimeProfile.Distribution.ByAgent) > 0 {
+			fmt.Printf("distribution: capabilities=%v agents=%v providers=%v models=%v\n",
+				report.RuntimeProfile.Distribution.ByCapability,
+				report.RuntimeProfile.Distribution.ByAgent,
+				report.RuntimeProfile.Distribution.ByProvider,
+				report.RuntimeProfile.Distribution.ByModel,
+			)
+		}
+		for _, warning := range report.RuntimeProfile.Warnings {
+			fmt.Printf("runtime-warning: %s\n", warning)
+		}
 	}
 	if len(report.AgentKPIs) > 0 {
 		fmt.Println("agent-kpis:")

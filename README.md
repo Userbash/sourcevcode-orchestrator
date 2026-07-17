@@ -19,16 +19,19 @@ This repository also contains the supporting infrastructure needed to run the ru
 ## Main capabilities
 
 - Asynchronous task intake with explicit workflow states
-- Dependency-aware execution plans with parallel batching
-- Multi-provider model inventory with live runtime refresh
-- Task-aware model selection using complexity, risk, memory, retrieval, route history, and budget pressure
+- Dependency-aware execution plans with resumable parallel execution
+- Split static and runtime checkpoints for long-running plan recovery
+- Conflict-aware scheduling for parallel artifacts that should not run at the same time
+- Dynamic per-step routing, including late provider and model binding for plan and analysis tasks
+- Multi-provider model inventory with live runtime refresh, freshness checks, and readiness confirmation
+- Capacity-aware model selection using complexity, risk, memory, retrieval, route history, and live runtime pressure
 - Provider-safe agent routing that respects the model selection result
 - Local, AI-kernel, and cloud execution paths
-- Message delivery through in-memory transport or RabbitMQ
+- Layered memory retrieval from vector chunks, documents, route memory, and reasoning traces
 - Runtime event streaming over HTTP, SSE, and WebSocket
 - Transport audit for incoming WebSocket messages and orchestration envelopes
 - Sourcecraft planning and delegation endpoints
-- Database backup, restore, bootstrap, and runtime preflight tooling
+- Database backup, restore, bootstrap, migration, and runtime preflight tooling
 
 ## Repository layout
 
@@ -82,12 +85,50 @@ The current runtime no longer assumes that GPT-family models are the only meanin
 Important behavior in the current implementation:
 
 - The model registry refreshes provider inventories and discovers live models at runtime.
-- Models are classified as ready, degraded, unavailable, missing, or not configured.
-- The selector uses task type, complexity, risk, route memory, peer failures, token pressure, retrieval hints, vector memory activity, and trained memory signals.
-- The router now respects `AssignedProvider` when binding the selected model to an agent.
+- Models are classified with inventory, transport, verification, and freshness state instead of a single binary alive/dead flag.
+- A provider can be usable, degraded, cooling down, stale, queued for verification, or blocked because its confirmed snapshot is no longer fresh enough for routing.
+- The selector uses task type, complexity, risk, route memory, peer failures, token pressure, retrieval hints, vector memory activity, reasoning traces, and trained memory signals.
+- The runtime manager applies capacity pressure, worker-class pressure, slot usage, suppression state, and live failure rate before final routing weights are exposed.
+- The router respects `AssignedProvider` when binding the selected model to an agent.
 - Fallback behavior updates provider and model selection consistently instead of leaving the task in a split state.
+- Some planning steps can intentionally defer provider and model assignment so runtime selection happens at execution time when live inventory is known.
 
-This is the change that fixed the earlier selector-router mismatch where the runtime could choose one provider at selection time and another provider at routing time.
+This is the change set that fixed the earlier selector-router mismatch where the runtime could choose one provider at selection time and another provider at routing time.
+
+## Parallel planning and checkpointing
+
+Parallel execution is no longer treated as a single best-effort batch. The planner now stores two checkpoint forms for multi-step execution plans.
+
+- The static checkpoint stores the immutable shape of the plan: the root task id, the plan graph, and the plan artifact list.
+- The runtime checkpoint stores mutable execution progress: pending tasks, completed tasks, collected results, current batch number, status, and update time.
+
+This split matters because the plan definition and the live execution state change at different rates. Static plan data can be reused safely, while runtime progress can be updated frequently without rewriting the full artifact graph.
+
+Parallel execution is also more incremental than before.
+
+- Ready tasks are launched as soon as their dependencies are satisfied.
+- Results are consumed continuously instead of waiting for a whole batch barrier.
+- The runtime can persist progress after each completed artifact.
+- A failure cancels the remaining execution branch quickly through a shared context.
+- Conflict keys can prevent artifacts that touch the same resource or branch from running concurrently.
+
+Each plan artifact can now carry additional execution metadata such as worker class, cluster id, context budget, conflict keys, and weight. That metadata is copied into execution contracts and routing hints so the runtime can make better per-step decisions.
+
+## Memory, reasoning traces, and self-learning
+
+The memory layer is broader than simple vector retrieval.
+
+The runtime can now combine:
+
+- session-local vector chunks
+- global vector fallback
+- RAG memory records
+- RAG documents
+- reasoning traces stored as retrieval-ready memory
+
+When a task loads memory context, it can receive a reasoning-memory brief and counts for reasoning trace hits, not only raw vector excerpts. This is useful for tasks that depend on prior decision patterns, review notes, or tool-usage traces rather than plain document text.
+
+The repository also now includes explicit domain contracts for a future self-learning pipeline. Those contracts define how the runtime can describe reasoning requests, code evaluation, preference data, fine-tuning jobs, model discovery, and hot-reload operations. They do not turn the runtime into a trainer by themselves, but they establish a stable interface for trace-driven learning and model replacement.
 
 ## Infrastructure and services
 
@@ -144,11 +185,13 @@ The main runtime binary provides operational commands beyond `serve`:
 - `db-backup`
 - `db-restore`
 - `import-memory-store`
+- `import-core-sql`
+- `import-fable-traces`
 - `ai-kernel-provision`
 - `ai-kernel-serve`
 - `ai-kernel-install-service`
 
-These commands cover stack bootstrap, runtime readiness checks, agent runtime setup, database operations, and AI-kernel lifecycle management.
+These commands cover stack bootstrap, runtime readiness checks, agent runtime setup, database operations, legacy import flows, reasoning-trace ingestion, and AI-kernel lifecycle management.
 
 ## Running the project
 
@@ -206,6 +249,7 @@ The current runtime has already been exercised across the core transport path:
 - The task was created and planned
 - The provider and routed agent stayed aligned after the routing fix
 - The task completed and returned a final response over the same WebSocket channel
+- Runtime verification now also covers synthetic workflow profiles for simple, intermediate, and advanced orchestration shapes
 
 This confirms that the transport layer, planner, selector, router, and execution path are working together in the rebuilt runtime.
 
@@ -219,16 +263,8 @@ This repository is prepared for GitHub publication with a root-level documentati
 
 Before a public release, you should still review:
 
-- secrets and provider credentials
-- environment defaults
-- deployment assumptions for Docker versus Podman
-- any private or environment-specific scripts
-
-## Documentation index
-
-- [Architecture](docs/architecture.md)
-- [Runtime Routing and Model Selection](docs/runtime-routing-and-model-selection.md)
-- [API and Transport](docs/api-and-transport.md)
-- [Deployment and Publication](docs/deployment-and-publication.md)
-- [Changelog](CHANGELOG.md)
-
+- credentials and environment defaults
+- internal hostnames and machine-specific paths
+- provider defaults and bootstrap assumptions
+- local-only model files or volumes
+- deployment-specific AI-kernel settings

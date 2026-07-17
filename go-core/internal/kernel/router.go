@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,9 +57,8 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 	if preferredAgentID != "" {
 		if _, blocked := exclude[preferredAgentID]; !blocked {
 			if preferred, ok := r.agentByID(preferredAgentID); ok {
-				info := preferred.Info()
 				if r.canRouteAgent(task, preferred, capability) {
-					return accepted(task, plan, info, capability, "preferred agent routing"), preferred, true
+					return accepted(task, plan, preferred, capability, "preferred agent routing", r.runtime), preferred, true
 				}
 			}
 		}
@@ -66,14 +66,14 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 	if routeModeOrchestrator(task.RoutingHints) {
 		if _, blocked := exclude["orchestrator"]; !blocked {
 			if agent, ok := r.agentByID("orchestrator"); ok && r.canRouteAgent(task, agent, capability) {
-				return accepted(task, plan, agent.Info(), capability, "orchestrator route override"), agent, true
+				return accepted(task, plan, agent, capability, "orchestrator route override", r.runtime), agent, true
 			}
 		}
 	}
 	if isSourcecraftWork(task) {
 		if _, blocked := exclude["orchestrator"]; !blocked {
 			if agent, ok := r.agentByID("orchestrator"); ok && r.canRouteAgent(task, agent, capability) {
-				return accepted(task, plan, agent.Info(), capability, "sourcecraft route"), agent, true
+				return accepted(task, plan, agent, capability, "sourcecraft route", r.runtime), agent, true
 			}
 		}
 	}
@@ -89,7 +89,11 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 		candidates = append(candidates, agent)
 	}
 	candidates = filterCandidatesByAssignedProvider(task, candidates, relaxAssignedProvider)
+	candidates = filterCandidatesByAssignedModel(task, candidates, r.runtime, relaxAssignedProvider || shouldRelaxAssignedProvider(task))
 	if len(candidates) == 0 {
+		if strings.TrimSpace(task.AssignedModel) != "" {
+			return rejected(task, complexity, capability, "no available agent matched assigned model "+task.AssignedModel), nil, false
+		}
 		if strings.TrimSpace(task.AssignedProvider) != "" {
 			return rejected(task, complexity, capability, "no available agent matched assigned provider "+task.AssignedProvider), nil, false
 		}
@@ -99,7 +103,7 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 	bestScore := -1e9
 	var best agents.Agent
 	for _, candidate := range candidates {
-		score := r.scoreAgent(context.Background(), candidate.Info(), task, capability, complexity, risk)
+		score := r.scoreAgent(context.Background(), candidate, task, capability, complexity, risk)
 		if score > bestScore {
 			bestScore = score
 			best = candidate
@@ -108,7 +112,7 @@ func (r *Router) route(task domain.Task, plan domain.ExecutionPlan, exclude map[
 	if best == nil {
 		return rejected(task, complexity, capability, "no healthy agent selected for capability "+capability), nil, false
 	}
-	return accepted(task, plan, best.Info(), capability, "policy routing"), best, true
+	return accepted(task, plan, best, capability, "policy routing", r.runtime), best, true
 }
 
 func (r *Router) RouteWithinProviders(task domain.Task, plan domain.ExecutionPlan, providers []string, exclude map[string]struct{}) (domain.TaskAcceptance, agents.Agent, bool) {
@@ -151,7 +155,7 @@ func (r *Router) RouteWithinProviders(task domain.Task, plan domain.ExecutionPla
 		if !r.canRouteAgent(task, candidate, capability) {
 			continue
 		}
-		score := r.scoreAgent(context.Background(), info, task, capability, complexity, risk) - float64(rank*15)
+		score := r.scoreAgent(context.Background(), candidate, task, capability, complexity, risk) - float64(rank*15)
 		if score > bestScore {
 			bestScore = score
 			best = candidate
@@ -160,7 +164,7 @@ func (r *Router) RouteWithinProviders(task domain.Task, plan domain.ExecutionPla
 	if best == nil {
 		return rejected(task, complexity, capability, "no available agent matched fallback providers"), nil, false
 	}
-	return accepted(task, plan, best.Info(), capability, "budget fallback routing"), best, true
+	return accepted(task, plan, best, capability, "budget fallback routing", r.runtime), best, true
 }
 
 func (r *Router) canRouteAgent(task domain.Task, agent agents.Agent, capability string) bool {
@@ -193,6 +197,39 @@ func filterCandidatesByAssignedProvider(task domain.Task, candidates []agents.Ag
 	return filtered
 }
 
+func filterCandidatesByAssignedModel(task domain.Task, candidates []agents.Agent, runtime *RuntimeManager, relaxAssignedModel bool) []agents.Agent {
+	assignedModel := strings.TrimSpace(task.AssignedModel)
+	if assignedModel == "" || relaxAssignedModel {
+		return candidates
+	}
+	filtered := make([]agents.Agent, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidateMatchesAssignedModel(candidate, assignedModel, runtime) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func candidateMatchesAssignedModel(candidate agents.Agent, assignedModel string, runtime *RuntimeManager) bool {
+	assignedModel = strings.TrimSpace(assignedModel)
+	if candidate == nil || assignedModel == "" {
+		return false
+	}
+	info := candidate.Info()
+	if strings.EqualFold(strings.TrimSpace(info.ModelName), assignedModel) {
+		if runtime == nil || runtime.providerRegistry == nil {
+			return true
+		}
+		ready, known := runtime.ProviderModelReadyStatus(info.Provider, assignedModel)
+		return known && ready
+	}
+	if runtime == nil || runtime.providerRegistry == nil {
+		return false
+	}
+	return runtime.SupportsAssignedModel(candidate, assignedModel)
+}
+
 func shouldRelaxAssignedProvider(task domain.Task) bool {
 	if task.RoutingHints == nil {
 		return false
@@ -214,16 +251,18 @@ func shouldRelaxAssignedProvider(task domain.Task) bool {
 	return false
 }
 
-func (r *Router) scoreAgent(ctx context.Context, info domain.AgentInfo, task domain.Task, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {
-	policyScore := r.policyScore(info, task, capability, complexity, risk)
+func (r *Router) scoreAgent(ctx context.Context, agent agents.Agent, task domain.Task, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {
+	info := agent.Info()
+	policyScore := r.policyScore(agent, task, capability, complexity, risk)
 	historyScore := r.historyScore(ctx, info, task)
-	runtimeScore := r.runtimeScore(info)
+	runtimeScore := r.runtimeScore(info, task, capability)
 	retrievalScore := r.retrievalScore(ctx, info, task, complexity)
-	finalScore := 0.45*policyScore + 0.25*historyScore + 0.15*runtimeScore + 0.15*retrievalScore
+	finalScore := 0.43*policyScore + 0.22*historyScore + 0.22*runtimeScore + 0.13*retrievalScore
 	return finalScore * 100.0
 }
 
-func (r *Router) policyScore(info domain.AgentInfo, task domain.Task, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {
+func (r *Router) policyScore(agent agents.Agent, task domain.Task, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {
+	info := agent.Info()
 	score := 100.0
 	if info.Status == domain.AgentStatusReady {
 		score += 20
@@ -237,7 +276,7 @@ func (r *Router) policyScore(info domain.AgentInfo, task domain.Task, capability
 	if task.AssignedProvider != "" && strings.EqualFold(info.Provider, task.AssignedProvider) {
 		score += 35
 	}
-	if task.AssignedModel != "" && strings.EqualFold(info.ModelName, task.AssignedModel) {
+	if task.AssignedModel != "" && candidateMatchesAssignedModel(agent, task.AssignedModel, r.runtime) {
 		score += 15
 	}
 	if preferredAgentID(task.RoutingHints) == info.ID {
@@ -269,6 +308,7 @@ func (r *Router) policyScore(info domain.AgentInfo, task domain.Task, capability
 	if complexity == domain.ComplexityLow && strings.EqualFold(info.Provider, "local") {
 		score += 10
 	}
+	score += clusterPolicyDelta(task, info, capability, complexity, risk)
 	return clampPolicyScore(score)
 }
 
@@ -283,7 +323,7 @@ func (r *Router) historyScore(ctx context.Context, info domain.AgentInfo, task d
 	return clampRouterScore(score)
 }
 
-func (r *Router) runtimeScore(info domain.AgentInfo) float64 {
+func (r *Router) runtimeScore(info domain.AgentInfo, task domain.Task, capability string) float64 {
 	if r == nil || r.runtime == nil {
 		return 0.5
 	}
@@ -291,9 +331,23 @@ func (r *Router) runtimeScore(info domain.AgentInfo) float64 {
 	if state, ok := r.runtime.State(info.ID); ok {
 		priority := clampRouterScore(state.PriorityScore)
 		errorPenalty := clampRouterScore(1 - state.ErrorRate)
-		return clampRouterScore(weight*0.50 + priority*0.30 + errorPenalty*0.20)
+		loadScore := liveLoadScore(state)
+		workerClass := taskWorkerClass(task, capability)
+		capacityScore := clampRouterScore(1 - r.runtime.CapacityPressure(info, workerClass))
+		return clampRouterScore(weight*0.30 + priority*0.20 + errorPenalty*0.18 + loadScore*0.16 + capacityScore*0.16)
 	}
 	return weight
+}
+
+func liveLoadScore(state domain.AgentRuntimeState) float64 {
+	pressure := state.AgentSlotUsage
+	if state.ModelSlotUsage > pressure {
+		pressure = state.ModelSlotUsage
+	}
+	if state.GlobalSlotUsage > pressure {
+		pressure = state.GlobalSlotUsage
+	}
+	return clampRouterScore(1 - pressure)
 }
 
 func (r *Router) retrievalScore(ctx context.Context, info domain.AgentInfo, task domain.Task, complexity domain.Complexity) float64 {
@@ -339,6 +393,156 @@ func (r *Router) retrievalScore(ctx context.Context, info domain.AgentInfo, task
 	return clampRouterScore(score)
 }
 
+func clusterPolicyDelta(task domain.Task, info domain.AgentInfo, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {
+	workerClass := taskWorkerClass(task, capability)
+	if workerClass == "" {
+		return 0
+	}
+	provider := strings.ToLower(strings.TrimSpace(info.Provider))
+	agentType := strings.ToLower(strings.TrimSpace(info.Type))
+	contextBudget := taskContextBudget(task)
+	weight := taskWeight(task)
+	delta := 0.0
+
+	if strings.Contains(agentType, workerClass) {
+		delta += 18
+	}
+	if workerClass == "code" && (strings.Contains(agentType, "coding") || strings.Contains(agentType, "coder")) {
+		delta += 16
+	}
+	if workerClass == "review" && strings.Contains(agentType, "review") {
+		delta += 22
+	}
+	if workerClass == "test" && strings.Contains(agentType, "test") {
+		delta += 18
+	}
+	if workerClass == "retrieval" && (strings.Contains(agentType, "research") || strings.Contains(agentType, "analysis")) {
+		delta += 15
+	}
+	if workerClass == "merge" && (strings.Contains(agentType, "review") || strings.Contains(agentType, "analysis") || strings.Contains(agentType, "orchestrator")) {
+		delta += 18
+	}
+	if workerClass == "planner" && (strings.Contains(agentType, "plan") || strings.Contains(agentType, "analysis")) {
+		delta += 16
+	}
+
+	smallContext := contextBudget > 0 && contextBudget <= 900
+	largeContext := contextBudget >= 1800 || complexity == domain.ComplexityHigh || complexity == domain.ComplexityCritical || risk.HighRisk
+	lightWeight := weight > 0 && weight <= 1.5
+	heavyWeight := weight >= 3.5
+
+	switch workerClass {
+	case "code", "test", "retrieval", "verification":
+		switch provider {
+		case "local", "ai_kernel":
+			delta += 26
+		case "mistral", "antigravity", "mimo":
+			delta += 12
+		case "openai", "codexsale":
+			delta -= 10
+		}
+	case "review", "merge", "planner", "research":
+		if largeContext || heavyWeight {
+			switch provider {
+			case "openai", "codexsale":
+				delta += 24
+			case "mistral", "antigravity", "mimo":
+				delta += 10
+			case "local", "ai_kernel":
+				delta += 4
+			}
+		}
+	}
+
+	if smallContext {
+		switch provider {
+		case "local", "ai_kernel":
+			delta += 16
+		case "openai", "codexsale":
+			delta -= 14
+		}
+	}
+	if lightWeight && (provider == "local" || provider == "ai_kernel") {
+		delta += 12
+	}
+	if heavyWeight && largeContext {
+		switch provider {
+		case "openai", "codexsale":
+			delta += 10
+		case "local", "ai_kernel":
+			delta -= 8
+		}
+	}
+
+	return delta
+}
+
+func taskWorkerClass(task domain.Task, capability string) string {
+	if value := strings.ToLower(strings.TrimSpace(kernelString(task.RoutingHints["worker_class"]))); value != "" {
+		return value
+	}
+	if value := strings.ToLower(strings.TrimSpace(kernelString(task.ExecutionContract["worker_class"]))); value != "" {
+		return value
+	}
+	return strings.ToLower(strings.TrimSpace(capability))
+}
+
+func taskContextBudget(task domain.Task) int {
+	if value := taskHintInt(task.RoutingHints["context_budget"]); value > 0 {
+		return value
+	}
+	return taskHintInt(task.ExecutionContract["context_budget"])
+}
+
+func taskWeight(task domain.Task) float64 {
+	if value := taskHintFloat(task.RoutingHints["task_weight"]); value > 0 {
+		return value
+	}
+	return taskHintFloat(task.ExecutionContract["task_weight"])
+}
+
+func taskHintInt(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float32:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func taskHintFloat(value any) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
 func clampPolicyScore(score float64) float64 {
 	return clampRouterScore((score - 80.0) / 160.0)
 }
@@ -353,7 +557,12 @@ func clampRouterScore(score float64) float64 {
 	return score
 }
 
-func accepted(task domain.Task, plan domain.ExecutionPlan, info domain.AgentInfo, capability string, reason string) domain.TaskAcceptance {
+func accepted(task domain.Task, plan domain.ExecutionPlan, agent agents.Agent, capability string, reason string, runtime *RuntimeManager) domain.TaskAcceptance {
+	info := agent.Info()
+	modelName := info.ModelName
+	if assignedModel := strings.TrimSpace(task.AssignedModel); assignedModel != "" && candidateMatchesAssignedModel(agent, assignedModel, runtime) {
+		modelName = assignedModel
+	}
 	return domain.TaskAcceptance{
 		TaskID:                  task.ID,
 		Status:                  domain.TaskStatusAccepted,
@@ -362,7 +571,7 @@ func accepted(task domain.Task, plan domain.ExecutionPlan, info domain.AgentInfo
 		Reason:                  reason,
 		Capability:              capability,
 		Provider:                info.Provider,
-		ModelName:               info.ModelName,
+		ModelName:               modelName,
 		RequiresSecondaryReview: plan.Selection.RequiresSecondaryReview,
 		AcceptedAt:              time.Now().UTC(),
 	}

@@ -78,7 +78,18 @@ type ModelSelection struct {
 	DetectedKeywords         []string       `json:"detected_keywords,omitempty"`
 	MatchedHighRiskRules     []string       `json:"matched_high_risk_rules,omitempty"`
 	MatchedLowRiskExemptions []string       `json:"matched_low_risk_exemptions,omitempty"`
+	SupportLanes             []SupportLane  `json:"support_lanes,omitempty"`
 	SelectionTrace           map[string]any `json:"selection_trace,omitempty"`
+}
+
+type SupportLane struct {
+	Provider           string     `json:"provider"`
+	ModelName          string     `json:"model_name,omitempty"`
+	Role               string     `json:"role"`
+	MaxComplexity      Complexity `json:"max_complexity,omitempty"`
+	Capabilities       []string   `json:"capabilities,omitempty"`
+	SupportedTaskTypes []TaskType `json:"supported_task_types,omitempty"`
+	Reason             string     `json:"reason,omitempty"`
 }
 
 type Task struct {
@@ -123,11 +134,15 @@ type TaskAcceptance struct {
 }
 
 type PlanStep struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Capability   string   `json:"capability"`
-	Dependencies []string `json:"dependencies,omitempty"`
-	Files        []string `json:"files,omitempty"`
+	ID            string   `json:"id"`
+	Title         string   `json:"title"`
+	Capability    string   `json:"capability"`
+	WorkerClass   string   `json:"worker_class,omitempty"`
+	ClusterID     string   `json:"cluster_id,omitempty"`
+	ContextBudget int      `json:"context_budget,omitempty"`
+	ConflictKeys  []string `json:"conflict_keys,omitempty"`
+	Dependencies  []string `json:"dependencies,omitempty"`
+	Files         []string `json:"files,omitempty"`
 }
 
 type ExecutionPlan struct {
@@ -143,6 +158,10 @@ type PlanTaskArtifact struct {
 	TaskID            string         `json:"task_id"`
 	Title             string         `json:"title"`
 	Capability        string         `json:"capability"`
+	WorkerClass       string         `json:"worker_class,omitempty"`
+	ClusterID         string         `json:"cluster_id,omitempty"`
+	ContextBudget     int            `json:"context_budget,omitempty"`
+	ConflictKeys      []string       `json:"conflict_keys,omitempty"`
 	Provider          string         `json:"provider,omitempty"`
 	ModelName         string         `json:"model_name,omitempty"`
 	Files             []string       `json:"files,omitempty"`
@@ -150,6 +169,7 @@ type PlanTaskArtifact struct {
 	BranchID          string         `json:"branch_id,omitempty"`
 	DraftLayer        string         `json:"draft_layer,omitempty"`
 	EstimatedCost     float64        `json:"estimated_cost,omitempty"`
+	Weight            float64        `json:"weight,omitempty"`
 	ExecutionContract map[string]any `json:"execution_contract,omitempty"`
 }
 
@@ -233,6 +253,10 @@ type AgentRuntimeState struct {
 	Provider           string      `json:"provider,omitempty"`
 	Status             AgentStatus `json:"status"`
 	PriorityScore      float64     `json:"priority_score"`
+	InFlight           int         `json:"in_flight,omitempty"`
+	AgentSlotUsage     float64     `json:"agent_slot_usage,omitempty"`
+	ModelSlotUsage     float64     `json:"model_slot_usage,omitempty"`
+	GlobalSlotUsage    float64     `json:"global_slot_usage,omitempty"`
 	ErrorRate          float64     `json:"error_rate"`
 	DisabledReason     string      `json:"disabled_reason,omitempty"`
 	LastError          string      `json:"last_error,omitempty"`
@@ -254,24 +278,64 @@ type PolicyDecision struct {
 }
 
 type ProviderHealth struct {
-	Provider   string    `json:"provider"`
-	Configured bool      `json:"configured"`
-	Available  bool      `json:"available"`
-	Status     string    `json:"status"`
-	BaseURL    string    `json:"base_url,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	ObservedAt time.Time `json:"observed_at"`
+	Provider      string     `json:"provider"`
+	Configured    bool       `json:"configured"`
+	Available     bool       `json:"available"`
+	Status        string     `json:"status"`
+	BaseURL       string     `json:"base_url,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	ObservedAt    time.Time  `json:"observed_at"`
+	ProbeQueued   bool       `json:"probe_queued,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	RefreshAfter  *time.Time `json:"refresh_after,omitempty"`
+}
+
+type ProviderAPIError struct {
+	Provider     string    `json:"provider,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	Operation    string    `json:"operation,omitempty"`
+	Endpoint     string    `json:"endpoint,omitempty"`
+	EndpointKind string    `json:"endpoint_kind,omitempty"`
+	HTTPStatus   int       `json:"http_status,omitempty"`
+	UpstreamCode string    `json:"upstream_code,omitempty"`
+	UpstreamType string    `json:"upstream_type,omitempty"`
+	Message      string    `json:"message,omitempty"`
+	Retryable    bool      `json:"retryable,omitempty"`
+	Category     string    `json:"category,omitempty"`
+	RequestID    string    `json:"request_id,omitempty"`
+	ObservedAt   time.Time `json:"observed_at,omitempty"`
+	LatencyMS    int64     `json:"latency_ms,omitempty"`
 }
 
 type ProviderModelStatus struct {
-	Provider   string         `json:"provider"`
-	ModelName  string         `json:"model_name"`
-	Available  bool           `json:"available"`
-	Status     string         `json:"status"`
-	Reason     string         `json:"reason,omitempty"`
-	ObservedAt time.Time      `json:"observed_at"`
-	IsDefault  bool           `json:"is_default,omitempty"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	Provider                string            `json:"provider"`
+	ModelName               string            `json:"model_name"`
+	Available               bool              `json:"available"`
+	Status                  string            `json:"status"`
+	Reason                  string            `json:"reason,omitempty"`
+	InventoryStatus         string            `json:"inventory_status,omitempty"`
+	TransportStatus         string            `json:"transport_status,omitempty"`
+	VerificationStatus      string            `json:"verification_status,omitempty"`
+	Transport               string            `json:"transport,omitempty"`
+	ObservedAt              time.Time         `json:"observed_at"`
+	IsDefault               bool              `json:"is_default,omitempty"`
+	Metadata                map[string]any    `json:"metadata,omitempty"`
+	LastHTTPStatus          int               `json:"last_http_status,omitempty"`
+	LastProbeLatencyMS      int64             `json:"last_probe_latency_ms,omitempty"`
+	FirstSeenAt             *time.Time        `json:"first_seen_at,omitempty"`
+	VerificationStartedAt   *time.Time        `json:"verification_started_at,omitempty"`
+	LastStateChangeAt       *time.Time        `json:"last_state_change_at,omitempty"`
+	LastSuccessAt           *time.Time        `json:"last_success_at,omitempty"`
+	NextVerificationAt      *time.Time        `json:"next_verification_at,omitempty"`
+	ExpiresAt               *time.Time        `json:"expires_at,omitempty"`
+	ConsecutiveFailures     int               `json:"consecutive_failures,omitempty"`
+	ConsecutiveSuccesses    int               `json:"consecutive_successes,omitempty"`
+	RegistrationAttempts    int               `json:"registration_attempts,omitempty"`
+	PendingCycles           int               `json:"pending_cycles,omitempty"`
+	QueueStatus             string            `json:"queue_status,omitempty"`
+	QueuePosition           int               `json:"queue_position,omitempty"`
+	VerificationIntervalSec int               `json:"verification_interval_sec,omitempty"`
+	LastError               *ProviderAPIError `json:"last_error,omitempty"`
 }
 
 type ProviderCatalogSnapshot struct {

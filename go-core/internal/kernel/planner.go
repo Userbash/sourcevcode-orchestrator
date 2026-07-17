@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/domain"
@@ -23,16 +24,23 @@ func (p *Planner) Prepare(task domain.Task) (domain.Task, domain.ExecutionPlan) 
 	task.RequiredCapability = inferCapability(task)
 	selection := p.selector.Select(task)
 	task.Complexity = selection.Complexity
-	if task.AssignedProvider == "" {
+	if task.AssignedProvider == "" && !shouldUseDynamicParallelPlanRouting(task) {
 		task.AssignedProvider = selection.Provider
 	}
-	if task.AssignedModel == "" {
+	if task.AssignedModel == "" && !shouldUseDynamicParallelPlanRouting(task) {
 		task.AssignedModel = selection.ModelName
 	}
 	task.RoutingHints["required_capability"] = task.RequiredCapability
 	task.RoutingHints["sourcecraft_work"] = isSourcecraftWork(task)
 	task.RoutingHints["selected_provider"] = task.AssignedProvider
 	task.RoutingHints["selected_model"] = task.AssignedModel
+	if len(selection.SupportLanes) > 0 {
+		task.RoutingHints["support_lanes"] = selection.SupportLanes
+		task.RoutingHints["ai_kernel_helper"] = true
+	}
+	if len(selection.SelectionTrace) > 0 {
+		task.RoutingHints["selection_trace"] = cloneHints(selection.SelectionTrace)
+	}
 	if isSourcecraftWork(task) {
 		task.RoutingHints["sourcecraft_task_family"] = SourcecraftTaskFamily(task)
 		task.RoutingHints["sourcecraft_recommended_actions"] = SourcecraftRecommendedActions(task)
@@ -41,6 +49,25 @@ func (p *Planner) Prepare(task domain.Task) (domain.Task, domain.ExecutionPlan) 
 	}
 	plan := p.buildPlan(task, selection)
 	return task, plan
+}
+
+func shouldUseDynamicParallelPlanRouting(task domain.Task) bool {
+	if len(task.RoutingHints) == 0 {
+		return false
+	}
+	flag, ok := task.RoutingHints["parallel_plan"].(bool)
+	if !ok || !flag {
+		return false
+	}
+	if strings.TrimSpace(toString(task.RoutingHints["plan_step_id"])) == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(task.RequiredCapability)) {
+	case "plan", "analysis":
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Planner) buildPlan(task domain.Task, selection domain.ModelSelection) domain.ExecutionPlan {
@@ -152,32 +179,105 @@ func (p *Planner) codeSteps(task domain.Task, analyzeID string) []domain.PlanSte
 	if !parallelizable {
 		executeID := task.ID + "-implement"
 		return []domain.PlanStep{
-			{ID: executeID, Title: "implement requested changes", Capability: capability, Dependencies: []string{analyzeID}, Files: files},
-			{ID: task.ID + "-review", Title: "review code changes", Capability: "review", Dependencies: []string{executeID}, Files: files},
-			{ID: task.ID + "-test", Title: "run validation checks", Capability: "test", Dependencies: []string{task.ID + "-review"}, Files: files},
+			{ID: executeID, Title: "implement requested changes", Capability: capability, WorkerClass: workerClassForCapability(capability), ContextBudget: stepContextBudget(capability, files), ConflictKeys: append([]string(nil), files...), Dependencies: []string{analyzeID}, Files: files},
+			{ID: task.ID + "-review", Title: "review code changes", Capability: "review", WorkerClass: workerClassForCapability("review"), ContextBudget: stepContextBudget("review", files), ConflictKeys: append([]string(nil), files...), Dependencies: []string{executeID}, Files: files},
+			{ID: task.ID + "-test", Title: "run validation checks", Capability: "test", WorkerClass: workerClassForCapability("test"), ContextBudget: stepContextBudget("test", files), ConflictKeys: append([]string(nil), files...), Dependencies: []string{task.ID + "-review"}, Files: files},
 		}
 	}
-	steps := make([]domain.PlanStep, 0, len(files)+3)
-	branchIDs := make([]string, 0, len(files))
-	limit := len(files)
-	if limit > 4 {
-		limit = 4
-	}
-	for index, file := range files[:limit] {
+	clusters := clusterPlanFiles(files, maxFilesPerCodeCluster(task))
+	steps := make([]domain.PlanStep, 0, len(clusters)+3)
+	branchIDs := make([]string, 0, len(clusters))
+	for index, clusterFiles := range clusters {
 		branchID := fmt.Sprintf("%s-branch-%d", task.ID, index+1)
+		clusterID := fmt.Sprintf("%s-cluster-%d", task.ID, index+1)
 		branchIDs = append(branchIDs, branchID)
 		steps = append(steps, domain.PlanStep{
-			ID:           branchID,
-			Title:        fmt.Sprintf("implement changes for %s", file),
-			Capability:   capability,
-			Dependencies: []string{analyzeID},
-			Files:        []string{file},
+			ID:            branchID,
+			Title:         fmt.Sprintf("implement changes for %s", strings.Join(clusterFiles, ", ")),
+			Capability:    capability,
+			WorkerClass:   workerClassForCapability(capability),
+			ClusterID:     clusterID,
+			ContextBudget: stepContextBudget(capability, clusterFiles),
+			ConflictKeys:  append([]string(nil), clusterFiles...),
+			Dependencies:  []string{analyzeID},
+			Files:         clusterFiles,
 		})
 	}
 	reviewID := task.ID + "-merge-review"
 	steps = append(steps,
-		domain.PlanStep{ID: reviewID, Title: "merge and review parallel branches", Capability: "review", Dependencies: branchIDs, Files: files},
-		domain.PlanStep{ID: task.ID + "-test", Title: "run validation checks", Capability: "test", Dependencies: []string{reviewID}, Files: files},
+		domain.PlanStep{ID: reviewID, Title: "merge and review parallel branches", Capability: "review", WorkerClass: workerClassForCapability("review"), ClusterID: task.ID + "-merge", ContextBudget: stepContextBudget("review", files), ConflictKeys: append([]string(nil), files...), Dependencies: branchIDs, Files: files},
+		domain.PlanStep{ID: task.ID + "-test", Title: "run validation checks", Capability: "test", WorkerClass: workerClassForCapability("test"), ClusterID: task.ID + "-verify", ContextBudget: stepContextBudget("test", files), ConflictKeys: append([]string(nil), files...), Dependencies: []string{reviewID}, Files: files},
 	)
 	return steps
+}
+
+func maxFilesPerCodeCluster(task domain.Task) int {
+	switch task.Complexity {
+	case domain.ComplexityLow, domain.ComplexityMedium:
+		return 3
+	case domain.ComplexityHigh:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func clusterPlanFiles(files []string, maxPerCluster int) [][]string {
+	if len(files) == 0 {
+		return nil
+	}
+	if maxPerCluster <= 0 {
+		maxPerCluster = 2
+	}
+	if maxPerCluster > 3 {
+		maxPerCluster = 3
+	}
+	limit := len(files)
+	maxClusteredFiles := envInt("GO_CORE_MAX_CLUSTER_PLAN_FILES", 12)
+	if maxClusteredFiles > 0 && limit > maxClusteredFiles {
+		limit = maxClusteredFiles
+	}
+	clusters := make([][]string, 0, (limit+maxPerCluster-1)/maxPerCluster)
+	for start := 0; start < limit; start += maxPerCluster {
+		end := start + maxPerCluster
+		if end > limit {
+			end = limit
+		}
+		clusters = append(clusters, append([]string(nil), files[start:end]...))
+	}
+	return clusters
+}
+
+func workerClassForCapability(capability string) string {
+	switch strings.ToLower(strings.TrimSpace(capability)) {
+	case "plan", "analysis":
+		return "planner"
+	case "code", "sourcecraft", "fix":
+		return "code"
+	case "review", "security":
+		return "review"
+	case "test":
+		return "test"
+	case "research":
+		return "retrieval"
+	case "docs":
+		return "merge"
+	default:
+		return "general"
+	}
+}
+
+func stepContextBudget(capability string, files []string) int {
+	base := 6
+	switch workerClassForCapability(capability) {
+	case "planner", "review", "merge":
+		base = 10
+	case "test", "retrieval":
+		base = 8
+	}
+	base += len(files) * 2
+	if base > 18 {
+		return 18
+	}
+	return base
 }
