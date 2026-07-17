@@ -2,6 +2,7 @@ package ops
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -24,5 +25,16 @@ func TestDBProtectorFromEnvHonorsExplicitBackupDir(t *testing.T) {
 
 	if cfg.SnapshotDir != "/var/tmp/custom-db-backups" {
 		t.Fatalf("unexpected snapshot dir: %q", cfg.SnapshotDir)
+	}
+}
+
+func TestBuildTableSnapshotRowQueryAvoidsAggregate(t *testing.T) {
+	query := buildTableSnapshotRowQuery("go_reasoning_memory", []dbSnapshotTableColumn{{Name: "id", Kind: "scalar"}, {Name: "payload", Kind: "json"}})
+
+	if strings.Contains(query, "jsonb_agg") {
+		t.Fatalf("snapshot query must avoid jsonb_agg: %s", query)
+	}
+	if !strings.Contains(query, "SELECT jsonb_build_object(") {
+		t.Fatalf("snapshot query must select one JSON object per row: %s", query)
 	}
 }

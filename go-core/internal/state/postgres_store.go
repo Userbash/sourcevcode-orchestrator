@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,9 +27,15 @@ func NewPostgresStore(databaseURL string) (*PostgresStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(12)
-	db.SetMaxIdleConns(6)
-	db.SetConnMaxLifetime(30 * time.Minute)
+	maxOpenConns := stateEnvInt("GO_CORE_PG_MAX_OPEN_CONNS", 16)
+	maxIdleConns := stateEnvInt("GO_CORE_PG_MAX_IDLE_CONNS", maxInt(4, maxOpenConns/2))
+	if maxIdleConns > maxOpenConns {
+		maxIdleConns = maxOpenConns
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(stateEnvDuration("GO_CORE_PG_CONN_MAX_LIFETIME", 30*time.Minute))
+	db.SetConnMaxIdleTime(stateEnvDuration("GO_CORE_PG_CONN_MAX_IDLE_TIME", 10*time.Minute))
 	store := &PostgresStore{db: db, storageMode: "go_postgres_store"}
 	if err := store.ensureSchema(context.Background()); err != nil {
 		_ = db.Close()
@@ -43,7 +50,7 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS go_workflows (workflow_id TEXT PRIMARY KEY, task_json JSONB NOT NULL, plan_json JSONB NOT NULL, acceptance_json JSONB NOT NULL, result_json JSONB, updated_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS go_session_states (session_id TEXT NOT NULL, branch TEXT NOT NULL, version INTEGER NOT NULL, prompt_version TEXT NOT NULL, context_version TEXT NOT NULL, state_json JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL, storage_mode TEXT NOT NULL, PRIMARY KEY (session_id, branch))`,
 		`CREATE TABLE IF NOT EXISTS go_invalidations (id BIGSERIAL PRIMARY KEY, session_id TEXT NOT NULL, branch TEXT NOT NULL, reason TEXT NOT NULL, payload_json JSONB NOT NULL, logged_at TIMESTAMPTZ NOT NULL, storage_mode TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS go_vector_chunks (chunk_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, branch TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, text_content TEXT NOT NULL, normalized_text TEXT NOT NULL, terms_json JSONB NOT NULL, embedding_json JSONB NOT NULL, metadata_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS go_vector_chunks (chunk_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, branch TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT NOT NULL, chunk_index INTEGER NOT NULL, text_content TEXT NOT NULL, normalized_text TEXT NOT NULL, terms_json JSONB NOT NULL, embedding_json JSONB NOT NULL, embedding_vector VECTOR(64), metadata_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS go_rag_documents (document_id TEXT PRIMARY KEY, scope TEXT NOT NULL, owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, source_type TEXT NOT NULL, source_ref TEXT NOT NULL, title TEXT NOT NULL, content_text TEXT NOT NULL, content_summary TEXT NOT NULL, metadata_json JSONB NOT NULL, importance DOUBLE PRECISION NOT NULL DEFAULT 0, repo_id TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT 'default', commit_sha TEXT NOT NULL DEFAULT '', artifact_ids_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, last_accessed_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS go_rag_memories (memory_id TEXT PRIMARY KEY, memory_type TEXT NOT NULL, scope TEXT NOT NULL, owner_id TEXT NOT NULL, content_json JSONB NOT NULL, summary TEXT NOT NULL, embedding_json JSONB NOT NULL, embedding_vector VECTOR(64), metadata_json JSONB NOT NULL, confidence DOUBLE PRECISION NOT NULL DEFAULT 0, importance DOUBLE PRECISION NOT NULL DEFAULT 0, repo_id TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT 'default', commit_sha TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS go_route_memories (route_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_id TEXT NOT NULL, parent_task_id TEXT NOT NULL, root_task_id TEXT NOT NULL, task_type TEXT NOT NULL, capability TEXT NOT NULL, complexity TEXT NOT NULL, project TEXT NOT NULL, repo_path TEXT NOT NULL, repo_fingerprint TEXT NOT NULL, branch TEXT NOT NULL, agent_id TEXT NOT NULL, provider TEXT NOT NULL, model_name TEXT NOT NULL, plan_mode TEXT NOT NULL, success BOOLEAN NOT NULL, confidence DOUBLE PRECISION NOT NULL DEFAULT 0, latency_ms BIGINT NOT NULL DEFAULT 0, review_passed BOOLEAN NOT NULL DEFAULT FALSE, tests_passed BOOLEAN NOT NULL DEFAULT FALSE, cost_estimate DOUBLE PRECISION NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL, task_signature_json JSONB NOT NULL, embedding_json JSONB NOT NULL, metadata_json JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)`,
@@ -67,10 +74,47 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE go_vfs_artifacts ADD COLUMN IF NOT EXISTS content_bytes BYTEA NOT NULL DEFAULT ''::bytea`); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE go_vector_chunks ADD COLUMN IF NOT EXISTS embedding_vector VECTOR(64)`); err != nil {
+		return err
+	}
 	if err := s.ensureRAGMemoryVectorCompatibility(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureVectorIndexes(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func stateEnvInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func stateEnvDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func wrapSchemaError(err error, stmt string) error {
@@ -113,6 +157,23 @@ func (s *PostgresStore) ensureRAGMemoryVectorCompatibility(ctx context.Context) 
 	if strings.HasPrefix(formatType, "vector(") {
 		_, err = s.db.ExecContext(ctx, `ALTER TABLE go_rag_memories ALTER COLUMN embedding_vector TYPE vector USING embedding_vector::vector`)
 		return err
+	}
+	return nil
+}
+
+func (s *PostgresStore) ensureVectorIndexes(ctx context.Context) error {
+	statements := []string{
+		`CREATE INDEX IF NOT EXISTS idx_go_rag_memories_embedding_hnsw ON go_rag_memories USING hnsw (embedding_vector vector_cosine_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_go_vector_chunks_embedding_hnsw ON go_vector_chunks USING hnsw (embedding_vector vector_cosine_ops)`,
+	}
+	for _, stmt := range statements {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			message := strings.ToLower(err.Error())
+			if strings.Contains(message, "access method") || strings.Contains(message, "operator class") || strings.Contains(message, "does not exist") || strings.Contains(message, "dimensions") {
+				continue
+			}
+			return err
+		}
 	}
 	return nil
 }
@@ -295,9 +356,10 @@ func (s *PostgresStore) UpsertVectorChunks(ctx context.Context, chunks []domain.
 		if strings.TrimSpace(copyChunk.ChunkID) == "" {
 			continue
 		}
+		vectorValue := ragMemoryVectorLiteral(copyChunk.Embedding)
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO go_vector_chunks (chunk_id, session_id, branch, source, source_id, chunk_index, text_content, normalized_text, terms_json, embedding_json, metadata_json, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			INSERT INTO go_vector_chunks (chunk_id, session_id, branch, source, source_id, chunk_index, text_content, normalized_text, terms_json, embedding_json, embedding_vector, metadata_json, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 = '' THEN NULL ELSE $11::vector END, $12, $13)
 			ON CONFLICT (chunk_id) DO UPDATE
 			SET session_id = EXCLUDED.session_id,
 			    branch = EXCLUDED.branch,
@@ -308,9 +370,10 @@ func (s *PostgresStore) UpsertVectorChunks(ctx context.Context, chunks []domain.
 			    normalized_text = EXCLUDED.normalized_text,
 			    terms_json = EXCLUDED.terms_json,
 			    embedding_json = EXCLUDED.embedding_json,
+			    embedding_vector = EXCLUDED.embedding_vector,
 			    metadata_json = EXCLUDED.metadata_json,
 			    created_at = EXCLUDED.created_at`,
-			copyChunk.ChunkID, copyChunk.SessionID, copyChunk.Branch, copyChunk.Source, copyChunk.SourceID, copyChunk.ChunkIndex, copyChunk.Text, copyChunk.NormalizedText, mustJSON(copyChunk.Terms), mustJSON(copyChunk.Embedding), mustJSON(copyChunk.Metadata), copyChunk.CreatedAt,
+			copyChunk.ChunkID, copyChunk.SessionID, copyChunk.Branch, copyChunk.Source, copyChunk.SourceID, copyChunk.ChunkIndex, copyChunk.Text, copyChunk.NormalizedText, mustJSON(copyChunk.Terms), mustJSON(copyChunk.Embedding), vectorValue, mustJSON(copyChunk.Metadata), copyChunk.CreatedAt,
 		)
 		if err != nil {
 			return err

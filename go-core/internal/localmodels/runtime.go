@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	DefaultLocalModel    = "qwen2.5:32b-instruct-q4_k_m"
+	DefaultLocalModel    = ""
 	DefaultLocalEndpoint = "http://host.containers.internal:11434"
 )
 
@@ -193,9 +193,10 @@ func (r *Runtime) ListResidentModels(ctx context.Context) ([]ResidentModel, stri
 
 func (r *Runtime) Health(ctx context.Context, modelName string) Health {
 	models, endpoint, err := r.ListModels(ctx)
+	targetModel := effectiveModel(modelName, r.config.ModelName)
 	health := Health{
 		Endpoint:  endpoint,
-		ModelName: strings.TrimSpace(modelName),
+		ModelName: targetModel,
 		Status:    "unavailable",
 	}
 	if err != nil {
@@ -215,7 +216,7 @@ func (r *Runtime) Health(ctx context.Context, modelName string) Health {
 			health.ModelPresent = true
 		}
 	}
-	health.Ready = health.ModelName == "" || health.ModelPresent
+	health.Ready = targetModel == "" || health.ModelPresent
 	if !health.Ready {
 		health.Status = "degraded"
 		health.Error = "configured model is not available"

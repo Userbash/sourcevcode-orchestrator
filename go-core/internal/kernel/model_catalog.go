@@ -104,10 +104,15 @@ func (c *modelCatalog) syncProvider(provider string, models []domain.ProviderMod
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, model := range models {
-		if !model.Available {
+		if strings.TrimSpace(model.ModelName) == "" {
 			continue
 		}
-		c.add(strings.ToLower(strings.TrimSpace(provider)), model.ModelName)
+		if model.Status == "missing" || model.Status == "disabled" || model.InventoryStatus == "inventory_missing" {
+			continue
+		}
+		if model.Available || model.InventoryStatus == "inventory_verified" || model.VerificationStatus == "verifying" || model.IsDefault {
+			c.add(strings.ToLower(strings.TrimSpace(provider)), model.ModelName)
+		}
 	}
 	return c.writeLocked()
 }

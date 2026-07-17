@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +69,16 @@ func TestOpenAICompatibleAgentExecutesTask(t *testing.T) {
 	}
 	if enabled, _ := result.Output.Artifacts["runtime_tools_enabled"].(bool); !enabled {
 		t.Fatalf("expected runtime tools enabled, got %#v", result.Output.Artifacts)
+	}
+}
+
+func TestOpenAICompatibleAgentSupportsAssignedModelOverride(t *testing.T) {
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{ID: "coder", Capabilities: []string{"code"}}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: "https://example.invalid/v1", DefaultModel: "default-model",
+	})
+	overrider, ok := any(agent).(AssignedModelOverrider)
+	if !ok || !overrider.SupportsAssignedModelOverride() {
+		t.Fatal("expected OpenAICompatibleAgent to support assigned model override")
 	}
 }
 
@@ -212,6 +224,164 @@ func TestOpenAICompatibleAgentProbe(t *testing.T) {
 	health := agent.Probe(context.Background())
 	if !health.Configured || !health.Available || health.Status != "ready" {
 		t.Fatalf("unexpected health: %#v", health)
+	}
+}
+
+func TestOpenAICompatibleAgentProbeReportsRateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"slow down"}}`))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{ID: "probe"}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", DefaultModel: "model",
+	})
+	health := agent.Probe(context.Background())
+	if health.Status != "rate_limited" || health.Available {
+		t.Fatalf("unexpected health: %#v", health)
+	}
+}
+
+func TestOpenAICompatibleAgentProbeReportsDegradedOnUpstream5xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"temporary outage"}}`))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{ID: "probe"}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", DefaultModel: "model",
+	})
+	health := agent.Probe(context.Background())
+	if health.Status != "degraded" || health.Available {
+		t.Fatalf("unexpected health: %#v", health)
+	}
+}
+
+func TestOpenAICompatibleAgentProbeTreatsServiceBusyAsRateLimited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"Сервис временно перегружен. Повторите запрос через минуту.","type":"rate_limit_error","code":"service_busy"}}`))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{ID: "probe"}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", DefaultModel: "model",
+	})
+	health := agent.Probe(context.Background())
+	if health.Status != "rate_limited" || health.Available {
+		t.Fatalf("unexpected health: %#v", health)
+	}
+}
+
+func TestOpenAICompatibleAgentRetriesRateLimitedRequest(t *testing.T) {
+	t.Setenv("GO_CORE_PROVIDER_MAX_RETRIES", "1")
+	t.Setenv("GO_CORE_PROVIDER_RETRY_BASE", "1ms")
+	t.Setenv("GO_CORE_PROVIDER_RETRY_MAX_BACKOFF", "2ms")
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if requests.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"slow down"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"completion-2","choices":[{"message":{"role":"assistant","content":"ok after retry"},"finish_reason":"stop"}],"usage":{"total_tokens":8}}`))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{
+		ID: "coder", Type: "coding", Capabilities: []string{"code"},
+	}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", APIKey: "secret",
+		DefaultModel: "default-model", RequireKey: true, Timeout: time.Second,
+	})
+	result := agent.Execute(context.Background(), domain.Task{
+		ID: "task-retry", Type: domain.TaskTypeResearch, RequiredCapability: "code",
+		Input: domain.TaskInput{Description: "Retry the request if rate limited"},
+	})
+	if result.Status != domain.TaskStatusDone {
+		t.Fatalf("unexpected status: %s errors=%v", result.Status, result.Errors)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("unexpected request count: %d", got)
+	}
+}
+
+func TestOpenAICompatibleAgentLimitsConcurrentRequestsPerProviderKey(t *testing.T) {
+	t.Setenv("GO_CORE_PROVIDER_MAX_CONCURRENT_PER_KEY", "1")
+	t.Setenv("GO_CORE_PROVIDER_MAX_RETRIES", "0")
+
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			seen := maxActive.Load()
+			if current <= seen || maxActive.CompareAndSwap(seen, current) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"completion-limit","choices":[{"message":{"role":"assistant","content":"serialized"},"finish_reason":"stop"}],"usage":{"total_tokens":5}}`))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{
+		ID: "coder", Type: "coding", Capabilities: []string{"code"},
+	}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", APIKey: "secret",
+		DefaultModel: "default-model", RequireKey: true, Timeout: time.Second,
+	})
+
+	var wg sync.WaitGroup
+	errCh := make(chan string, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			taskID := "task-limit-a"
+			if idx == 1 {
+				taskID = "task-limit-b"
+			}
+			result := agent.Execute(context.Background(), domain.Task{
+				ID: taskID, Type: domain.TaskTypeCode, RequiredCapability: "code",
+				Input: domain.TaskInput{Description: "Serialize upstream requests"},
+			})
+			if result.Status != domain.TaskStatusDone {
+				errCh <- strings.Join(result.Errors, "; ")
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != "" {
+			t.Fatalf("unexpected execution error: %s", err)
+		}
+	}
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("expected max concurrent upstream requests to be 1, got %d", got)
 	}
 }
 

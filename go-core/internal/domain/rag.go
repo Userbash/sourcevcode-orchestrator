@@ -64,3 +64,35 @@ type VFSCheckpointRecord struct {
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
 }
+
+type ReasoningDecisionPoint struct {
+	Kind     string         `json:"kind"`
+	Summary  string         `json:"summary,omitempty"`
+	Outcome  string         `json:"outcome,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type ReasoningTrace struct {
+	TraceID              string                   `json:"trace_id"`
+	SessionID            string                   `json:"session_id,omitempty"`
+	TaskID               string                   `json:"task_id,omitempty"`
+	ParentTaskID         string                   `json:"parent_task_id,omitempty"`
+	AgentID              string                   `json:"agent_id,omitempty"`
+	Provider             string                   `json:"provider,omitempty"`
+	ModelName            string                   `json:"model_name,omitempty"`
+	TaskType             TaskType                 `json:"task_type,omitempty"`
+	Branch               string                   `json:"branch,omitempty"`
+	PromptSummary        string                   `json:"prompt_summary,omitempty"`
+	ReflectionSummary    string                   `json:"reflection_summary,omitempty"`
+	ResultSummary        string                   `json:"result_summary,omitempty"`
+	ReasoningMode        string                   `json:"reasoning_mode,omitempty"`
+	RetrievalUsed        bool                     `json:"retrieval_used,omitempty"`
+	VectorMemoryCount    int                      `json:"vector_memory_count,omitempty"`
+	RouteMemoryCount     int                      `json:"route_memory_count,omitempty"`
+	ReasoningMemoryCount int                      `json:"reasoning_memory_count,omitempty"`
+	LatencyMS            int64                    `json:"latency_ms,omitempty"`
+	DecisionPoints       []ReasoningDecisionPoint `json:"decision_points,omitempty"`
+	NextQuestions        []string                 `json:"next_questions,omitempty"`
+	Metadata             map[string]any           `json:"metadata,omitempty"`
+	CreatedAt            time.Time                `json:"created_at"`
+}

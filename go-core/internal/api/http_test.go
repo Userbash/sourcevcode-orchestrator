@@ -641,3 +641,109 @@ func TestTasksResponseIncludesRequestMarkers(t *testing.T) {
 		t.Fatalf("response_origin.answered_for = %v, want user", got)
 	}
 }
+
+func TestTasksRejectInvalidInputValues(t *testing.T) {
+	server := newTestServer(t)
+	testCases := []struct {
+		name      string
+		body      string
+		wantError string
+	}{
+		{
+			name:      "invalid priority",
+			body:      `{"description":"implement validation","type":"code","priority":"urgent"}`,
+			wantError: "unsupported priority",
+		},
+		{
+			name:      "invalid complexity",
+			body:      `{"description":"implement validation","type":"code","complexity":"severe"}`,
+			wantError: "unsupported complexity",
+		},
+		{
+			name:      "invalid checkpoint policy",
+			body:      `{"description":"implement validation","type":"code","checkpoint_policy":"always"}`,
+			wantError: "unsupported checkpoint_policy",
+		},
+		{
+			name:      "blank description",
+			body:      `{"description":"   ","type":"code"}`,
+			wantError: "task description is required",
+		},
+		{
+			name:      "negative review depth",
+			body:      `{"description":"implement validation","type":"code","review_depth":-1}`,
+			wantError: "review_depth must be greater than or equal to zero",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewBufferString(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected bad request, got %d: %s", response.Code, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), tc.wantError) {
+				t.Fatalf("expected error containing %q, got %s", tc.wantError, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestTasksNormalizesNestedTransportPayloads(t *testing.T) {
+	server := newTestServer(t)
+	body := bytes.NewBufferString(`{
+		"session_id":"nested-session",
+		"type":"code",
+		"input":{"description":"implement nested transport support","files":["main.go"]},
+		"context":{"project":"migration","repo_path":"."},
+		"priority":"high",
+		"complexity":"medium",
+		"checkpoint_policy":"branch",
+		"review_depth":1
+	}`)
+	request := httptest.NewRequest(http.MethodPost, "/tasks", body)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted, got %d: %s", response.Code, response.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	workflow, ok := payload["workflow"].(map[string]any)
+	if !ok {
+		t.Fatalf("workflow missing: %#v", payload)
+	}
+	task, ok := workflow["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("task missing: %#v", workflow)
+	}
+	input, ok := task["input"].(map[string]any)
+	if !ok || input["description"] != "implement nested transport support" {
+		t.Fatalf("task input mismatch: %#v", task)
+	}
+	contextPayload, ok := task["context"].(map[string]any)
+	if !ok || contextPayload["project"] != "migration" || contextPayload["repo_path"] != "." {
+		t.Fatalf("task context mismatch: %#v", task)
+	}
+	if got := task["priority"]; got != "high" {
+		t.Fatalf("task priority = %v, want high", got)
+	}
+	if got := task["complexity"]; got != "medium" {
+		t.Fatalf("task complexity = %v, want medium", got)
+	}
+	if got := task["checkpoint_policy"]; got != "branch" {
+		t.Fatalf("task checkpoint_policy = %v, want branch", got)
+	}
+	if got := task["review_depth"]; got != float64(1) {
+		t.Fatalf("task review_depth = %v, want 1", got)
+	}
+}

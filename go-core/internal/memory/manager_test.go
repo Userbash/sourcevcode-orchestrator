@@ -189,8 +189,8 @@ func TestManagerLoadMemoryContextSkipsThoughtKeysAndFlattensValidation(t *testin
 	if loaded["memory_identifier"] != "session-ctx" {
 		t.Fatalf("memory_identifier = %v, want session-ctx", loaded["memory_identifier"])
 	}
-	if disabled, _ := loaded["trained_memory_disabled_for_risk"].(bool); !disabled {
-		t.Fatal("trained_memory_disabled_for_risk = false, want true")
+	if disabled, _ := loaded["trained_memory_disabled_for_risk"].(bool); disabled {
+		t.Fatal("trained_memory_disabled_for_risk = true, want false")
 	}
 	if _, ok := loaded["cache_guard_snapshot"].(map[string]any); !ok {
 		t.Fatalf("cache_guard_snapshot missing or wrong type: %T", loaded["cache_guard_snapshot"])

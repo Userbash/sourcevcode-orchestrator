@@ -7,18 +7,17 @@ GO_CORE_DIR="$ROOT_DIR/go-core"
 AI_KERNEL_PROXY_DIR="$ROOT_DIR/scripts/ai-kernel-proxy"
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.runtime}"
 GO_CORE_IMAGE_STATE_FILE="$STATE_DIR/go-core-image.ref"
+GO_CORE_HOST_PORT_STATE_FILE="$STATE_DIR/go-core-host-port"
 
 NETWORK_NAME="${NETWORK_NAME:-hebrew-net}"
 
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-ai_bridge_db}"
 RABBITMQ_CONTAINER="${RABBITMQ_CONTAINER:-ai_bridge_rabbitmq}"
-LOCAL_LLM_CONTAINER="${LOCAL_LLM_CONTAINER:-ai_bridge_local_llm}"
 AI_KERNEL_CONTAINER="${AI_KERNEL_CONTAINER:-ai_bridge_ai_kernel}"
 GO_CORE_CONTAINER="${GO_CORE_CONTAINER:-go_core}"
 
 POSTGRES_VOLUME="${POSTGRES_VOLUME:-hebrew_pg_data}"
 RABBITMQ_VOLUME="${RABBITMQ_VOLUME:-f4e8a2ce6ed671173eddf888afcefc9489463ff48774ed94a56938d48b86a215}"
-LOCAL_LLM_VOLUME="${LOCAL_LLM_VOLUME:-hebrew_ollama_data}"
 AI_KERNEL_VOLUME="${AI_KERNEL_VOLUME:-ai_kernel_models}"
 GO_CORE_VOLUME="${GO_CORE_VOLUME:-hebrew_core_memory}"
 
@@ -38,9 +37,15 @@ AI_KERNEL_HOST_PORT="${AI_KERNEL_HOST_PORT:-}"
 GO_CORE_REPOSITORY="${GO_CORE_REPOSITORY:-localhost/go-core}"
 GO_CORE_IMAGE="${GO_CORE_IMAGE:-}"
 GO_CORE_VERSION="${GO_CORE_VERSION:-}"
+GO_CORE_CONTAINER_PORT="${GO_CORE_CONTAINER_PORT:-8010}"
+if [ "${GO_CORE_HOST_PORT+x}" = "x" ]; then
+    GO_CORE_HOST_PORT_EXPLICIT=1
+else
+    GO_CORE_HOST_PORT_EXPLICIT=0
+fi
+GO_CORE_HOST_PORT="${GO_CORE_HOST_PORT:-$GO_CORE_CONTAINER_PORT}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-docker.io/pgvector/pgvector:pg16}"
 RABBITMQ_IMAGE="${RABBITMQ_IMAGE:-docker.io/library/rabbitmq:3-management}"
-LOCAL_LLM_IMAGE="${LOCAL_LLM_IMAGE:-docker.io/ollama/ollama:latest}"
 AI_KERNEL_IMAGE="${AI_KERNEL_IMAGE:-localhost/hebrew-ai-kernel:local}"
 AI_KERNEL_PROXY_IMAGE="${AI_KERNEL_PROXY_IMAGE:-localhost/ai-kernel-proxy:local}"
 
@@ -98,6 +103,11 @@ write_go_core_target_image() {
     printf '%s\n' "$1" >"$GO_CORE_IMAGE_STATE_FILE"
 }
 
+write_go_core_host_port() {
+    ensure_state_dir
+    printf '%s\n' "$1" >"$GO_CORE_HOST_PORT_STATE_FILE"
+}
+
 read_go_core_target_image() {
     if [ -n "$GO_CORE_IMAGE" ]; then
         printf '%s\n' "$GO_CORE_IMAGE"
@@ -113,6 +123,14 @@ read_go_core_target_image() {
 read_go_core_target_version() {
     image_ref=$(read_go_core_target_image)
     printf '%s\n' "${image_ref##*:}"
+}
+
+read_go_core_host_port() {
+    if [ -f "$GO_CORE_HOST_PORT_STATE_FILE" ]; then
+        cat "$GO_CORE_HOST_PORT_STATE_FILE"
+        return 0
+    fi
+    return 1
 }
 
 ensure_network() {
@@ -136,6 +154,41 @@ remove_container_if_exists() {
     if container_exists "$1"; then
         run_podman rm -f "$1"
     fi
+}
+
+container_host_port() {
+    if ! container_exists "$GO_CORE_CONTAINER"; then
+        return 1
+    fi
+    mapping=$(run_podman port "$GO_CORE_CONTAINER" "$GO_CORE_CONTAINER_PORT/tcp" 2>/dev/null | awk 'NR==1 { print; exit }')
+    if [ -z "$mapping" ]; then
+        return 1
+    fi
+    printf '%s\n' "${mapping##*:}"
+}
+
+resolve_go_core_host_port() {
+    if port=$(container_host_port 2>/dev/null); then
+        printf '%s\n' "$port"
+        return 0
+    fi
+    if [ "$GO_CORE_HOST_PORT" = "auto" ]; then
+        if port=$(read_go_core_host_port 2>/dev/null); then
+            printf '%s\n' "$port"
+            return 0
+        fi
+        printf '%s\n' "$GO_CORE_CONTAINER_PORT"
+        return 0
+    fi
+    if [ "$GO_CORE_HOST_PORT_EXPLICIT" -eq 1 ]; then
+        printf '%s\n' "$GO_CORE_HOST_PORT"
+        return 0
+    fi
+    if port=$(read_go_core_host_port 2>/dev/null); then
+        printf '%s\n' "$port"
+        return 0
+    fi
+    printf '%s\n' "$GO_CORE_CONTAINER_PORT"
 }
 
 build_go_core() {
@@ -253,29 +306,6 @@ run_rabbitmq() {
         "$RABBITMQ_IMAGE"
 }
 
-run_local_llm() {
-    ensure_volume "$LOCAL_LLM_VOLUME"
-    remove_container_if_exists "$LOCAL_LLM_CONTAINER"
-    run_podman run -d \
-        --name "$LOCAL_LLM_CONTAINER" \
-        --network "$NETWORK_NAME" \
-        --network-alias local_llm \
-        --security-opt label=disable \
-        --device /dev/nvidia-uvm \
-        --device /dev/nvidia-uvm-tools \
-        --device /dev/nvidiactl \
-        --device /dev/nvidia0 \
-        --device /dev/dri/card2 \
-        --device /dev/dri/renderD129 \
-        -p 11434:11434 \
-        -e OLLAMA_HOST=0.0.0.0:11434 \
-        -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-        -e NVIDIA_VISIBLE_DEVICES=all \
-        -v "$LOCAL_LLM_VOLUME":/root/.ollama \
-        "$LOCAL_LLM_IMAGE" \
-        serve
-}
-
 run_ai_kernel() {
     ai_kernel_port_args=""
     if [ -n "$AI_KERNEL_HOST_PORT" ]; then
@@ -303,7 +333,7 @@ run_ai_kernel() {
                 $ai_kernel_port_args \
                 -e AI_KERNEL_HOST=0.0.0.0 \
                 -e AI_KERNEL_PORT=8012 \
-                -e AI_KERNEL_API_KEY="$AI_KERNEL_API_KEY" \
+                -e AI_KERNEL_REQUIRE_API_KEY=false \
                 -v "$AI_KERNEL_VOLUME":/models \
                 "$AI_KERNEL_IMAGE"
             ;;
@@ -312,31 +342,62 @@ run_ai_kernel() {
 
 run_go_core() {
     go_core_image=$(read_go_core_target_image)
+    if [ "$GO_CORE_HOST_PORT" = "auto" ]; then
+        host_port=$(resolve_go_core_host_port)
+        allow_retry=1
+    elif [ "$GO_CORE_HOST_PORT_EXPLICIT" -eq 1 ]; then
+        host_port="$GO_CORE_HOST_PORT"
+        allow_retry=0
+    else
+        host_port=$(resolve_go_core_host_port)
+        allow_retry=1
+    fi
     ensure_volume "$GO_CORE_VOLUME"
     remove_container_if_exists "$GO_CORE_CONTAINER"
-    run_podman run -d \
-        --name "$GO_CORE_CONTAINER" \
-        --network "$NETWORK_NAME" \
-        --network-alias go_core \
-        -p 8010:8010 \
-        --env-file "$ROOT_DIR/.env" \
-        --env-file "$ROOT_DIR/.env.bridge" \
-        -e ORCHESTRATOR_HOST=0.0.0.0 \
-        -e ORCHESTRATOR_PORT=8010 \
-        -e AI_BRIDGE_API_HOST=0.0.0.0 \
-        -e AI_BRIDGE_API_PORT=8010 \
-        -e AI_BRIDGE_MEMORY_DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgresql:5432/$POSTGRES_DB?sslmode=disable" \
-        -e AI_BRIDGE_RABBITMQ_URL="amqp://$RABBITMQ_USER:$RABBITMQ_PASSWORD@rabbitmq:5672/" \
-        -e AI_BRIDGE_LOCAL_LLM_ENDPOINT=http://local_llm:11434 \
-        -e AI_BRIDGE_LOCAL_LLM_MODELS_ENDPOINT=http://local_llm:11434/api/tags \
-        -e AI_BRIDGE_LOCAL_LLM_CHAT_COMPLETIONS_ENDPOINT=http://local_llm:11434/v1/chat/completions \
-        -e AI_KERNEL_BASE_URL=http://ai_kernel:8012/v1 \
-        -e AI_BRIDGE_AI_KERNEL_BASE_URL=http://ai_kernel:8012/v1 \
-        -e AI_BRIDGE_AI_KERNEL_MODELS_ENDPOINT=http://ai_kernel:8012/v1/models \
-        -e AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT=http://ai_kernel:8012/v1/chat/completions \
-        -e AI_KERNEL_API_KEY="$AI_KERNEL_API_KEY" \
-        -v "$GO_CORE_VOLUME":/app/db_backups \
-        "$go_core_image"
+    while :; do
+        set +e
+        run_output=$(
+            run_podman run -d \
+                --name "$GO_CORE_CONTAINER" \
+                --network "$NETWORK_NAME" \
+                --network-alias go_core \
+                -p "$host_port:$GO_CORE_CONTAINER_PORT" \
+                --env-file "$ROOT_DIR/.env" \
+                --env-file "$ROOT_DIR/.env.bridge" \
+                -e ORCHESTRATOR_HOST=0.0.0.0 \
+                -e ORCHESTRATOR_PORT="$GO_CORE_CONTAINER_PORT" \
+                -e AI_BRIDGE_API_HOST=0.0.0.0 \
+                -e AI_BRIDGE_API_PORT="$GO_CORE_CONTAINER_PORT" \
+                -e AI_BRIDGE_MEMORY_DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@postgresql:5432/$POSTGRES_DB?sslmode=disable" \
+                -e AI_BRIDGE_RABBITMQ_URL="amqp://$RABBITMQ_USER:$RABBITMQ_PASSWORD@rabbitmq:5672/" \
+                -e AI_KERNEL_BASE_URL=http://ai_kernel:8012/v1 \
+                -e AI_BRIDGE_AI_KERNEL_BASE_URL=http://ai_kernel:8012/v1 \
+                -e AI_BRIDGE_AI_KERNEL_MODELS_ENDPOINT=http://ai_kernel:8012/v1/models \
+                -e AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT=http://ai_kernel:8012/v1/chat/completions \
+                -e AI_KERNEL_REQUIRE_API_KEY=false \
+                -v "$GO_CORE_VOLUME":/app/db_backups \
+                "$go_core_image" 2>&1
+        )
+        run_status=$?
+        set -e
+        if [ "$run_status" -eq 0 ]; then
+            write_go_core_host_port "$host_port"
+            printf '%s\n' "$run_output"
+            printf 'go_core host port: %s\n' "$host_port"
+            return 0
+        fi
+        remove_container_if_exists "$GO_CORE_CONTAINER"
+        case "$run_output" in
+            *"address already in use"*)
+                if [ "$allow_retry" -eq 1 ]; then
+                    host_port=$((host_port + 1))
+                    continue
+                fi
+                ;;
+        esac
+        printf '%s\n' "$run_output" >&2
+        return "$run_status"
+    done
 }
 
 up() {
@@ -349,16 +410,16 @@ up() {
     fi
     run_postgresql
     run_rabbitmq
-    run_local_llm
     run_ai_kernel
     run_go_core
-    wait_for_http go_core http://127.0.0.1:8010/health/full 90 2
+    go_core_host_port=$(resolve_go_core_host_port)
+    wait_for_http go_core "http://127.0.0.1:$go_core_host_port/health/full" 90 2
+    printf 'go_core endpoint: http://127.0.0.1:%s\n' "$go_core_host_port"
 }
 
 down() {
     remove_container_if_exists "$GO_CORE_CONTAINER"
     remove_container_if_exists "$AI_KERNEL_CONTAINER"
-    remove_container_if_exists "$LOCAL_LLM_CONTAINER"
     remove_container_if_exists "$RABBITMQ_CONTAINER"
     remove_container_if_exists "$POSTGRES_CONTAINER"
 }
@@ -397,6 +458,7 @@ status() {
 
     desired_image=$(read_go_core_target_image)
     desired_version=$(read_go_core_target_version)
+    go_core_host_port=$(resolve_go_core_host_port)
     git_head=$(git_full_commit)
 
     echo "== go_core target =="
@@ -407,7 +469,7 @@ status() {
 
     echo "== running container =="
     if container_exists "$GO_CORE_CONTAINER"; then
-        run_podman inspect "$GO_CORE_CONTAINER" --format 'image={{.ImageName}} created={{.Created}} status={{.State.Status}} running={{.State.Running}}'
+        run_podman inspect "$GO_CORE_CONTAINER" --format "image={{.ImageName}} created={{.Created}} status={{.State.Status}} running={{.State.Running}} host_port=$go_core_host_port"
         running_image=$(run_podman inspect "$GO_CORE_CONTAINER" --format '{{.ImageName}}')
         run_podman image inspect "$running_image" --format 'image_id={{.Id}} version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}} built={{index .Config.Labels "org.opencontainers.image.created"}}'
     else
@@ -416,7 +478,7 @@ status() {
     echo
 
     echo "== health/full =="
-    if ! curl -fsS http://127.0.0.1:8010/health/full; then
+    if ! curl -fsS "http://127.0.0.1:$go_core_host_port/health/full"; then
         echo "health/full unavailable"
     fi
     echo
@@ -436,6 +498,7 @@ ps() {
 
 diagnose() {
     require_cmd curl
+    go_core_host_port=$(resolve_go_core_host_port)
     echo "== podman binary =="
     echo "$PODMAN_BIN"
     echo
@@ -446,7 +509,8 @@ diagnose() {
     run_podman network inspect "$NETWORK_NAME"
     echo
     echo "== orchestrator health =="
-    curl -sS http://127.0.0.1:8010/health/full
+    echo "http://127.0.0.1:$go_core_host_port/health/full"
+    curl -sS "http://127.0.0.1:$go_core_host_port/health/full"
     echo
 }
 
@@ -475,11 +539,12 @@ Versioning:
 
   Set GO_CORE_IMAGE=<image-ref> to deploy an existing image without rebuilding.
   Set GO_CORE_VERSION=<version-id> to force a specific version tag during build.
+  Set GO_CORE_HOST_PORT=<port> to pin the published go_core host port.
+  Set GO_CORE_HOST_PORT=auto to pick the first free host port starting from 8010.
 
 Containers:
   postgresql -> ai_bridge_db
   rabbitmq   -> ai_bridge_rabbitmq
-  local_llm  -> ai_bridge_local_llm
   ai_kernel  -> ai_bridge_ai_kernel
   go_core    -> go_core
 USAGE

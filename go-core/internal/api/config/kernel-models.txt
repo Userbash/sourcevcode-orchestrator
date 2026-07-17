@@ -1,4 +1,5 @@
 # provider:model
 # This file is maintained by go-core model registry and can be edited manually.
+ai_kernel:gemma4-12b-agentic-fable5:q4_k_m
 codexsale:claude-sonnet-4-6
 local:test-model

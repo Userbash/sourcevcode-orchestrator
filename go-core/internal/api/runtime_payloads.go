@@ -77,11 +77,16 @@ func (s *Server) providerInventory(providerFilter string, forceProbe ...bool) ma
 		capabilities := sortedKeys(accumulator.capabilities)
 		health := healthByProvider[provider]
 		statusReason := health.Error
-		if statusReason == "" && !probe {
-			statusReason = "live probe not requested"
+		if statusReason == "" {
+			switch {
+			case !probe:
+				statusReason = "live probe not requested"
+			case health.ProbeQueued:
+				statusReason = "live probe queued"
+			}
 		}
 		catalog, _ := s.orchestrator.ProviderCatalogSnapshot(provider)
-		result[provider] = map[string]any{
+		row := map[string]any{
 			"provider":       provider,
 			"status":         health.Status,
 			"configured":     health.Configured,
@@ -95,12 +100,21 @@ func (s *Server) providerInventory(providerFilter string, forceProbe ...bool) ma
 			"capabilities":   capabilities,
 			"observed_at":    health.ObservedAt,
 			"status_reason":  statusReason,
+			"probe_queued":   health.ProbeQueued,
+			"cooldown_until": health.CooldownUntil,
+			"refresh_after":  health.RefreshAfter,
 			"inventory_mode": "registry",
 			"provider_id":    catalog.ProviderID,
 			"default_model":  catalog.DefaultModel,
-			"resource_pools": buildProviderResourcePools(provider, catalog.Models),
+			"resource_pools": buildProviderCatalogResourcePools(provider, catalog.Models),
 			"catalog":        catalog,
 		}
+		if collaboration := providerCollaborationProfile(provider); collaboration != nil {
+			for key, value := range collaboration {
+				row[key] = value
+			}
+		}
+		result[provider] = row
 	}
 	return result
 }
@@ -122,14 +136,49 @@ func (s *Server) modelIndex() map[string]any {
 			existing["available"] = truthy(existing["available"]) || model.Available
 			existing["status"] = mergeModelStatus(existing["status"], model.Status)
 			mergeModelMetadata(existing, model.Metadata)
+			applyCollaborationMetadata(existing, snapshot.Provider, model.ModelName)
 			if strings.TrimSpace(model.Reason) != "" {
 				existing["status_reason"] = model.Reason
 			}
+			existing["inventory_status"] = mergeModelStatus(existing["inventory_status"], model.InventoryStatus)
+			existing["transport_status"] = mergeModelStatus(existing["transport_status"], model.TransportStatus)
+			existing["verification_status"] = mergeModelStatus(existing["verification_status"], model.VerificationStatus)
+			if strings.TrimSpace(model.Transport) != "" {
+				existing["transport"] = model.Transport
+			}
+			if model.LastHTTPStatus != 0 {
+				existing["last_http_status"] = model.LastHTTPStatus
+			}
+			if model.LastProbeLatencyMS > 0 {
+				existing["last_probe_latency_ms"] = model.LastProbeLatencyMS
+			}
+			if model.LastSuccessAt != nil {
+				existing["last_success_at"] = model.LastSuccessAt
+			}
+			if model.ConsecutiveFailures > 0 {
+				existing["consecutive_failures"] = model.ConsecutiveFailures
+			}
+			if model.ConsecutiveSuccesses > 0 {
+				existing["consecutive_successes"] = model.ConsecutiveSuccesses
+			}
+			if model.VerificationIntervalSec > 0 {
+				existing["verification_interval_sec"] = model.VerificationIntervalSec
+			}
+			if model.LastError != nil {
+				existing["last_error"] = map[string]any{
+					"category":      model.LastError.Category,
+					"message":       model.LastError.Message,
+					"retryable":     model.LastError.Retryable,
+					"http_status":   model.LastError.HTTPStatus,
+					"endpoint":      model.LastError.Endpoint,
+					"endpoint_kind": model.LastError.EndpointKind,
+					"request_id":    model.LastError.RequestID,
+					"observed_at":   model.LastError.ObservedAt,
+					"latency_ms":    model.LastError.LatencyMS,
+				}
+			}
 			if model.IsDefault {
 				existing["default_for"] = appendUniqueString(existing["default_for"], snapshot.Provider)
-			}
-			if probeStatus := metadataString(model.Metadata, "probe_status"); probeStatus != "" {
-				existing["probe_status"] = probeStatus
 			}
 			result[model.ModelName] = existing
 
@@ -155,11 +204,46 @@ func (s *Server) modelIndex() map[string]any {
 				variantExisting["available"] = truthy(variantExisting["available"]) || model.Available
 				variantExisting["status"] = mergeModelStatus(variantExisting["status"], model.Status)
 				mergeModelMetadata(variantExisting, model.Metadata)
+				applyCollaborationMetadata(variantExisting, snapshot.Provider, model.ModelName)
 				if strings.TrimSpace(model.Reason) != "" {
 					variantExisting["status_reason"] = model.Reason
 				}
-				if probeStatus := metadataString(model.Metadata, "probe_status"); probeStatus != "" {
-					variantExisting["probe_status"] = probeStatus
+				variantExisting["inventory_status"] = mergeModelStatus(variantExisting["inventory_status"], model.InventoryStatus)
+				variantExisting["transport_status"] = mergeModelStatus(variantExisting["transport_status"], model.TransportStatus)
+				variantExisting["verification_status"] = mergeModelStatus(variantExisting["verification_status"], model.VerificationStatus)
+				if strings.TrimSpace(model.Transport) != "" {
+					variantExisting["transport"] = model.Transport
+				}
+				if model.LastHTTPStatus != 0 {
+					variantExisting["last_http_status"] = model.LastHTTPStatus
+				}
+				if model.LastProbeLatencyMS > 0 {
+					variantExisting["last_probe_latency_ms"] = model.LastProbeLatencyMS
+				}
+				if model.LastSuccessAt != nil {
+					variantExisting["last_success_at"] = model.LastSuccessAt
+				}
+				if model.ConsecutiveFailures > 0 {
+					variantExisting["consecutive_failures"] = model.ConsecutiveFailures
+				}
+				if model.ConsecutiveSuccesses > 0 {
+					variantExisting["consecutive_successes"] = model.ConsecutiveSuccesses
+				}
+				if model.VerificationIntervalSec > 0 {
+					variantExisting["verification_interval_sec"] = model.VerificationIntervalSec
+				}
+				if model.LastError != nil {
+					variantExisting["last_error"] = map[string]any{
+						"category":      model.LastError.Category,
+						"message":       model.LastError.Message,
+						"retryable":     model.LastError.Retryable,
+						"http_status":   model.LastError.HTTPStatus,
+						"endpoint":      model.LastError.Endpoint,
+						"endpoint_kind": model.LastError.EndpointKind,
+						"request_id":    model.LastError.RequestID,
+						"observed_at":   model.LastError.ObservedAt,
+						"latency_ms":    model.LastError.LatencyMS,
+					}
 				}
 				result[variant.ID] = variantExisting
 			}
@@ -189,10 +273,13 @@ func (s *Server) modelIndex() map[string]any {
 func (s *Server) localModelHealth() map[string]any {
 	providerHealth := s.orchestrator.ProviderHealth(context.Background(), true)
 	available := providerHealth["local"].Available || providerHealth["ai_kernel"].Available
+	pending := providerHealth["local"].ProbeQueued || providerHealth["ai_kernel"].ProbeQueued
 	status := "unavailable"
 	reason := "no configured local provider responded to the models probe"
 	if available {
 		status, reason = "ok", ""
+	} else if pending {
+		status, reason = "pending", "local provider health probe queued"
 	}
 	var agents []domain.AgentInfo
 	for _, agent := range s.orchestrator.Agents() {
@@ -233,6 +320,8 @@ func (s *Server) aiKernelGate() map[string]any {
 	status := "unavailable"
 	if health.Available {
 		status = "ok"
+	} else if health.ProbeQueued {
+		status = "pending"
 	}
 	return map[string]any{
 		"status":     status,
@@ -240,7 +329,7 @@ func (s *Server) aiKernelGate() map[string]any {
 		"configured": health.Configured,
 		"agents":     agents,
 		"health":     health,
-		"reason":     health.Error,
+		"reason":     firstNonEmpty(health.Error, ternaryString(health.ProbeQueued, "live probe queued", "")),
 	}
 }
 
@@ -328,6 +417,33 @@ func sortedKeys(values map[string]struct{}) []string {
 	return result
 }
 
+func providerCollaborationProfile(provider string) map[string]any {
+	if !strings.EqualFold(strings.TrimSpace(provider), "ai_kernel") {
+		return nil
+	}
+	return map[string]any{
+		"collaboration_roles":    []string{"primary", "helper", "fallback", "parallel"},
+		"recommended_task_types": []string{"code", "fix", "test", "docs", "plan", "review", "research"},
+		"support_summary":        "Local kernel can offload repo-local drafting, code execution, verification loops, and fallback work for cloud-routed agents.",
+	}
+}
+
+func applyCollaborationMetadata(row map[string]any, provider string, modelName string) {
+	if row == nil {
+		return
+	}
+	profile := providerCollaborationProfile(provider)
+	if profile == nil {
+		return
+	}
+	for key, value := range profile {
+		row[key] = value
+	}
+	if strings.TrimSpace(modelName) != "" {
+		row["primary_provider"] = provider
+	}
+}
+
 func appendUniqueString(raw any, value string) []string {
 	items, _ := raw.([]string)
 	value = strings.TrimSpace(value)
@@ -342,6 +458,22 @@ func appendUniqueString(raw any, value string) []string {
 	items = append(items, value)
 	sort.Strings(items)
 	return items
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func ternaryString(condition bool, yes string, no string) string {
+	if condition {
+		return yes
+	}
+	return no
 }
 
 func displayVariants(metadata map[string]any) []displayVariant {
@@ -380,6 +512,21 @@ func displayVariants(metadata map[string]any) []displayVariant {
 		})
 	}
 	return result
+}
+
+func buildProviderCatalogResourcePools(provider string, models []domain.ProviderModelStatus) []map[string]any {
+	normalized := make([]domain.ProviderModelStatus, 0, len(models))
+	for _, model := range models {
+		copyModel := model
+		if copyModel.Status != "missing" && copyModel.Status != "disabled" && copyModel.InventoryStatus != "inventory_missing" {
+			if copyModel.InventoryStatus == "inventory_verified" || copyModel.VerificationStatus == "verifying" || copyModel.IsDefault {
+				copyModel.Available = true
+				copyModel.VerificationStatus = "confirmed"
+			}
+		}
+		normalized = append(normalized, copyModel)
+	}
+	return buildProviderResourcePools(provider, normalized)
 }
 
 func buildProviderResourcePools(provider string, models []domain.ProviderModelStatus) []map[string]any {
@@ -424,7 +571,7 @@ func buildProviderResourcePools(provider string, models []domain.ProviderModelSt
 			}
 			pool.aliases = appendUniqueSorted(pool.aliases, aliases...)
 			pool.models = appendUniqueSorted(pool.models, model.ModelName)
-			if model.Available {
+			if model.Available && strings.EqualFold(strings.TrimSpace(model.VerificationStatus), "confirmed") {
 				pool.eligible = true
 				pool.eligibleModels = appendUniqueSorted(pool.eligibleModels, model.ModelName)
 				pool.eligibleDisplayModels = appendUniqueSorted(pool.eligibleDisplayModels, displayModelNames...)
@@ -539,15 +686,30 @@ func mergeModelStatus(current any, next string) string {
 		return existing
 	}
 	rank := map[string]int{
-		"validation_failed": 50,
-		"missing":           45,
-		"disabled":          40,
-		"probe_failed":      35,
-		"unavailable":       30,
-		"degraded":          28,
-		"discovered":        25,
-		"configured":        20,
-		"ready":             10,
+		"validation_failed":      80,
+		"registration_overflow":  78,
+		"missing":                75,
+		"inventory_missing":      74,
+		"disabled":               70,
+		"transport_failed":       68,
+		"endpoint_misconfigured": 67,
+		"registration_stale":     64,
+		"transport_stale":        63,
+		"retryable_failure":      62,
+		"verification_cooldown":  60,
+		"verification_pending":   58,
+		"registration_queued":    56,
+		"verifying":              54,
+		"stale":                  52,
+		"unconfirmed":            50,
+		"transport_pending":      48,
+		"unavailable":            40,
+		"degraded":               35,
+		"inventory_verified":     30,
+		"configured":             20,
+		"transport_verified":     15,
+		"confirmed":              12,
+		"ready":                  10,
 	}
 	if rank[next] > rank[existing] {
 		return next

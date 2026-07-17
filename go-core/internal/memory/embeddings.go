@@ -39,6 +39,9 @@ func newEmbeddingClientFromEnv() *embeddingClient {
 	model := strings.TrimSpace(firstNonEmptyEnv(
 		"GO_CORE_RAG_EMBEDDING_MODEL",
 		"AI_BRIDGE_RAG_EMBEDDING_MODEL",
+		"AI_KERNEL_EMBEDDING_MODEL",
+		"AI_KERNEL_MODEL_ALIAS",
+		"AI_BRIDGE_AI_KERNEL_MODEL",
 	))
 	if model == "" {
 		return nil
@@ -46,6 +49,8 @@ func newEmbeddingClientFromEnv() *embeddingClient {
 	baseURL := normalizeEmbeddingBase(firstNonEmptyEnv(
 		"GO_CORE_RAG_EMBEDDING_BASE_URL",
 		"AI_BRIDGE_RAG_EMBEDDING_BASE_URL",
+		"AI_KERNEL_BASE_URL",
+		"AI_BRIDGE_AI_KERNEL_BASE_URL",
 		"OPENAI_BASE_URL",
 		"AI_BRIDGE_OPENAI_BASE_URL",
 	))
@@ -55,12 +60,10 @@ func newEmbeddingClientFromEnv() *embeddingClient {
 	apiKey := strings.TrimSpace(firstNonEmptyEnv(
 		"GO_CORE_RAG_EMBEDDING_API_KEY",
 		"AI_BRIDGE_RAG_EMBEDDING_API_KEY",
+		"AI_KERNEL_API_KEY",
 		"OPENAI_API_KEY",
 		"CODEX_SALE_API_KEY",
 	))
-	if apiKey == "" {
-		return nil
-	}
 	return &embeddingClient{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
@@ -71,7 +74,7 @@ func newEmbeddingClientFromEnv() *embeddingClient {
 }
 
 func (c *embeddingClient) configured() bool {
-	return c != nil && c.baseURL != "" && c.apiKey != "" && c.model != ""
+	return c != nil && c.baseURL != "" && c.model != ""
 }
 
 func (c *embeddingClient) embed(ctx context.Context, text string) ([]float64, error) {
@@ -90,7 +93,9 @@ func (c *embeddingClient) embed(ctx context.Context, text string) ([]float64, er
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if strings.TrimSpace(c.apiKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {

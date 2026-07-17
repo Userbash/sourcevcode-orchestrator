@@ -17,6 +17,9 @@ type AIKernelConfig struct {
 	ProjectRoot        string
 	ModelDir           string
 	VenvDir            string
+	ModelID            string
+	ModelFile          string
+	MMProjFile         string
 	ModelPath          string
 	MMProjPath         string
 	Host               string
@@ -25,6 +28,8 @@ type AIKernelConfig struct {
 	NCtx               string
 	NThreads           string
 	NGPULayers         string
+	EnableEmbeddings   bool
+	ReasoningProfile   string
 	ChatTemplateKwargs string
 	ServiceName        string
 	LogDir             string
@@ -32,24 +37,56 @@ type AIKernelConfig struct {
 }
 
 func AIKernelConfigFromEnv(projectRoot string) AIKernelConfig {
-	modelDir := envOrDefault("AI_KERNEL_MODEL_DIR", filepath.Join(userHome(), ".local/share/ai-kernel/models/hauhaucs-qwen36-35b-a3b-aggressive"))
+	modelAlias := envOrDefault("AI_KERNEL_MODEL_ALIAS", "gemma4-12b-agentic-fable5:q4_k_m")
+	modelID := envOrDefault("AI_KERNEL_MODEL_ID", "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF")
+	modelFile := envOrDefault("AI_KERNEL_MODEL_FILE", "gemma4-v2-Q4_K_M.gguf")
+	mmprojFile := strings.TrimSpace(envOrDefault("AI_KERNEL_MMPROJ_FILE", ""))
+	modelDir := envOrDefault("AI_KERNEL_MODEL_DIR", filepath.Join(userHome(), ".local/share/ai-kernel/models", sanitizeModelAlias(modelAlias)))
 	venvDir := envOrDefault("AI_KERNEL_VENV_DIR", filepath.Join(cacheHome(), "ai-kernel/venvs/llama-cpp"))
+	reasoningProfile := normalizeReasoningProfile(envOrDefault("AI_KERNEL_REASONING_PROFILE", "default"))
+	chatTemplateKwargs := strings.TrimSpace(os.Getenv("AI_KERNEL_CHAT_TEMPLATE_KWARGS"))
+	if chatTemplateKwargs == "" {
+		chatTemplateKwargs = defaultChatTemplateKwargs(reasoningProfile, envBool("AI_KERNEL_ENABLE_THINKING"))
+	}
+	modelPath := envOrDefault("AI_KERNEL_MODEL_PATH", filepath.Join(modelDir, modelFile))
+	mmprojPath := strings.TrimSpace(os.Getenv("AI_KERNEL_MMPROJ_PATH"))
+	if mmprojPath == "" && mmprojFile != "" {
+		mmprojPath = filepath.Join(modelDir, mmprojFile)
+	}
 	return AIKernelConfig{
 		ProjectRoot:        projectRoot,
 		ModelDir:           modelDir,
 		VenvDir:            venvDir,
-		ModelPath:          envOrDefault("AI_KERNEL_MODEL_PATH", filepath.Join(modelDir, "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf")),
-		MMProjPath:         envOrDefault("AI_KERNEL_MMPROJ_PATH", filepath.Join(modelDir, "mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf")),
+		ModelID:            modelID,
+		ModelFile:          modelFile,
+		MMProjFile:         mmprojFile,
+		ModelPath:          modelPath,
+		MMProjPath:         mmprojPath,
 		Host:               envOrDefault("AI_KERNEL_HOST", "0.0.0.0"),
 		Port:               envOrDefault("AI_KERNEL_PORT", "8012"),
-		ModelAlias:         envOrDefault("AI_KERNEL_MODEL_ALIAS", "hauhaucs-qwen36-35b-a3b-aggressive:q4_k_m"),
+		ModelAlias:         modelAlias,
 		NCtx:               envOrDefault("AI_KERNEL_N_CTX", "8192"),
 		NThreads:           envOrDefault("AI_KERNEL_N_THREADS", "16"),
 		NGPULayers:         envOrDefault("AI_KERNEL_N_GPU_LAYERS", "0"),
-		ChatTemplateKwargs: envOrDefault("AI_KERNEL_CHAT_TEMPLATE_KWARGS", `{"enable_thinking": false}`),
+		EnableEmbeddings:   envBool("AI_KERNEL_ENABLE_EMBEDDINGS"),
+		ReasoningProfile:   reasoningProfile,
+		ChatTemplateKwargs: chatTemplateKwargs,
 		ServiceName:        envOrDefault("AI_KERNEL_SERVICE_NAME", "ai-kernel.service"),
 		LogDir:             envOrDefault("AI_KERNEL_LOG_DIR", filepath.Join(stateHome(), "ai-kernel")),
 		PIDPath:            envOrDefault("AI_KERNEL_PID_PATH", "/tmp/ai-kernel-server.pid"),
+	}
+}
+
+func envBool(key string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -88,29 +125,38 @@ func (c AIKernelConfig) Provision(ctx context.Context) error {
 			return fmt.Errorf("install llama-cpp-python[server]: %s", result.Stderr)
 		}
 	}
-	if err := downloadIfMissing(c.ModelPath, "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf?download=true"); err != nil {
+	if err := downloadIfMissing(c.ModelPath, huggingFaceResolveURL(c.ModelID, c.ModelFile)); err != nil {
 		return err
 	}
-	if err := downloadIfMissing(c.MMProjPath, "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive/resolve/main/mmproj-Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-f16.gguf?download=true"); err != nil {
-		return err
+	if strings.TrimSpace(c.MMProjPath) != "" && strings.TrimSpace(c.MMProjFile) != "" {
+		if err := downloadIfMissing(c.MMProjPath, huggingFaceResolveURL(c.ModelID, c.MMProjFile)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (c AIKernelConfig) Serve(ctx context.Context, stdout io.Writer, stderr io.Writer) error {
 	python := filepath.Join(c.VenvDir, "bin/python")
-	cmd := exec.CommandContext(ctx, python, "-m", "llama_cpp.server",
+	args := []string{
+		"-m", "llama_cpp.server",
 		"--host", c.Host,
 		"--port", c.Port,
 		"--model", c.ModelPath,
 		"--model_alias", c.ModelAlias,
-		"--clip_model_path", c.MMProjPath,
 		"--chat_format", "chat_template.default",
 		"--chat_template_kwargs", c.ChatTemplateKwargs,
 		"--n_ctx", c.NCtx,
 		"--n_threads", c.NThreads,
 		"--n_gpu_layers", c.NGPULayers,
-	)
+	}
+	if strings.TrimSpace(c.MMProjPath) != "" {
+		args = append(args, "--clip_model_path", c.MMProjPath)
+	}
+	if c.EnableEmbeddings {
+		args = append(args, "--embedding")
+	}
+	cmd := exec.CommandContext(ctx, python, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = aiKernelServerEnv(os.Environ())
@@ -226,6 +272,9 @@ func downloadIfMissing(targetPath string, rawURL string) error {
 	if _, err := os.Stat(targetPath); err == nil {
 		return nil
 	}
+	if strings.TrimSpace(rawURL) == "" {
+		return fmt.Errorf("download URL is empty for %s", targetPath)
+	}
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return err
 	}
@@ -248,6 +297,45 @@ func downloadIfMissing(targetPath string, rawURL string) error {
 	defer file.Close()
 	_, err = io.Copy(file, resp.Body)
 	return err
+}
+
+func huggingFaceResolveURL(modelID string, file string) string {
+	modelID = strings.TrimSpace(strings.Trim(modelID, "/"))
+	file = strings.TrimSpace(strings.Trim(file, "/"))
+	if modelID == "" || file == "" {
+		return ""
+	}
+	return "https://huggingface.co/" + modelID + "/resolve/main/" + file + "?download=true"
+}
+
+func defaultChatTemplateKwargs(reasoningProfile string, enableThinking bool) string {
+	if enableThinking || reasoningProfile == "thinking" {
+		return `{"enable_thinking": true}`
+	}
+	return `{"enable_thinking": false}`
+}
+
+func normalizeReasoningProfile(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "thinking", "reasoning", "trace":
+		return "thinking"
+	default:
+		return "default"
+	}
+}
+
+func sanitizeModelAlias(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "model"
+	}
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-", "\t", "-", "\n", "-")
+	value = replacer.Replace(value)
+	value = strings.Trim(value, "-")
+	if value == "" {
+		return "model"
+	}
+	return value
 }
 
 func userHome() string {

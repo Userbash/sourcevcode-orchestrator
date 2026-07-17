@@ -10,7 +10,7 @@ The system is not organized as a single request-response server. It is closer to
 
 ### Command layer
 
-`go-core/cmd/orchestrator/main.go` is the operational entrypoint. It starts the HTTP server, exposes health checks, bootstraps supporting infrastructure, manages runtime-agent commands, and provides database backup and restore commands.
+`go-core/cmd/orchestrator/main.go` is the operational entrypoint. It starts the HTTP server, exposes health checks, bootstraps supporting infrastructure, manages runtime-agent commands, and provides database backup, restore, and import commands.
 
 The `serve` command can optionally ensure that infrastructure and AI stack services are available before the API starts. That makes the runtime usable as both a development daemon and a more production-like service entrypoint.
 
@@ -75,8 +75,12 @@ These packages store:
 
 - workflow state
 - route decisions
-- memory records
-- vector-oriented memory artifacts
+- session state
+- vector chunks
+- RAG documents
+- RAG memories
+- route memories
+- VFS artifacts and checkpoints
 - adaptive traces
 - degradation history
 
@@ -94,6 +98,16 @@ The runtime receives a task from an HTTP or WebSocket surface. The incoming requ
 
 The planner turns one request into a plan. Plans can contain dependent and independent steps. Independent steps are eligible for parallel execution. Dependent steps wait for prerequisites to complete.
 
+A plan artifact is now more than a task stub. It can carry:
+
+- a worker class that explains what kind of agent should run the step
+- a cluster id for grouping related work
+- a context budget for steps that should stay within a tighter context window
+- conflict keys that describe resources which should not be touched concurrently
+- a weight that lets the runtime express step importance or execution pressure
+
+That metadata is copied into execution contracts and routing hints so later stages do not have to rediscover it.
+
 ### 3. Selection
 
 The model selector builds a decision context using task metadata, risk, complexity, history, memory, retrieval hints, and provider health.
@@ -106,6 +120,11 @@ The router chooses an agent whose capability, provider, and availability fit the
 
 The current router intentionally respects an already assigned provider. This avoids the earlier failure mode where the selector chose one provider but the router sent the task to an incompatible agent.
 
+Routing can also happen in two modes now:
+
+- immediate binding, where a provider and model are chosen during planning or intake
+- deferred binding, where a plan or analysis step intentionally leaves provider and model open until execution-time routing can use the freshest inventory and capacity state
+
 ### 5. Delivery
 
 The task is delivered directly or through mailbox transport. Distributed execution produces envelopes, acknowledgements, and result handling rather than a single blocking function call.
@@ -117,6 +136,57 @@ Results update workflow state, runtime event streams, memory records, and route 
 ### 7. Finalization
 
 A workflow ends in a stable state such as `completed`, `failed`, or `dead_lettered`. The runtime keeps enough information to reconstruct the path that led there.
+
+## Parallel execution and resume behavior
+
+The planner now persists parallel-plan execution in two checkpoint forms.
+
+### Static checkpoint
+
+The static checkpoint stores the immutable definition of the plan:
+
+- root task id
+- normalized plan graph
+- serialized plan artifacts
+
+This data changes only when the plan itself changes.
+
+### Runtime checkpoint
+
+The runtime checkpoint stores mutable execution state:
+
+- pending artifact ids
+- completed artifact ids
+- collected artifact results
+- current batch number
+- execution status
+- update time
+
+This split reduces write amplification and makes resume behavior easier to reason about. The runtime can restore the plan shape from the static checkpoint and then hydrate execution progress from the runtime checkpoint.
+
+Execution itself is more incremental than before.
+
+- Ready steps are launched as soon as their prerequisites are satisfied.
+- Results are consumed continuously rather than only after a full batch barrier.
+- Runtime progress can be persisted after each completion.
+- Shared cancellation stops outstanding work quickly when one branch fails.
+
+This is the foundation for `ResumeExecutionPlan`, which reconstructs a resumable parallel workflow without rebuilding the original plan from scratch.
+
+## Conflict-aware scheduling
+
+Parallelism is no longer only dependency-aware. It is also resource-aware.
+
+Each artifact can expose conflict keys. A conflict key is a normalized identifier for a resource or coordination domain such as a repository path, a branch, or another mutable execution target.
+
+The scheduler now:
+
+- collects conflict keys from ready artifacts
+- refuses to launch two ready artifacts whose keys overlap
+- registers active keys while an artifact is running
+- frees those keys after completion
+
+This prevents the runtime from creating avoidable races when two otherwise independent tasks both modify the same branch, document set, or mutable project surface.
 
 ## Agents and roles
 
@@ -143,14 +213,48 @@ The current runtime treats those decisions as connected but distinct.
 
 The runtime maintains a model registry that refreshes provider inventories and exposes current model availability to the selector and API layer.
 
-This registry solves several operational problems:
+This registry now does more than list configured models.
+
+It tracks:
+
+- upstream inventory snapshots
+- verification freshness
+- pending verification windows
+- confirmation TTLs
+- retry cooldown windows
+- queue limits for unresolved registrations
+- transport and probe outcomes
+
+This solves several operational problems:
 
 - it reveals which providers are configured
 - it shows which models are actually discoverable upstream
 - it distinguishes missing configuration from temporary degradation
+- it prevents stale snapshots from being treated as healthy routing inputs
 - it gives the selector live candidates instead of static guesses
 
-The registry classifies provider state with explicit statuses such as `ready`, `degraded`, `unavailable`, and `not_configured`.
+The registry classifies provider state with explicit statuses such as `ready`, `degraded`, `unavailable`, `pending`, and `not_configured`.
+
+## Runtime pressure management
+
+The runtime manager now feeds live execution pressure back into routing.
+
+Capacity snapshots include:
+
+- in-flight work counts
+- agent slot usage
+- model slot usage
+- global slot usage
+
+Routing weights can now incorporate:
+
+- provider pressure
+- worker-class pressure
+- suppression state
+- live failure rate
+- slot saturation
+
+This matters because a provider that is technically healthy may still be the wrong choice when its worker class is saturated or its error rate is climbing.
 
 ## Memory-aware orchestration
 
@@ -164,8 +268,48 @@ Selection signals include:
 - trained memory summaries
 - retrieval requirements
 - budget hints and token pressure
+- reasoning trace summaries and hit counts
 
-This makes the system closer to a memory-aware scheduler than a plain provider switch.
+Retrieval is now layered. The memory manager can combine:
+
+- session-local vector chunks
+- global vector fallback
+- RAG memories
+- RAG documents
+- reasoning-trace memory derived from prior execution traces
+
+Loaded memory context can include a reasoning-memory brief in addition to ordinary knowledge snippets. This gives planning and selection logic a more structured view of what the runtime has learned from previous executions.
+
+## Reasoning traces and self-learning contracts
+
+The domain layer now includes a first-class `ReasoningTrace` contract.
+
+A reasoning trace can record:
+
+- trace, session, task, and parent ids
+- agent, provider, and model
+- task type and branch
+- prompt, reflection, and result summaries
+- reasoning mode
+- retrieval usage and memory hit counts
+- latency
+- decision points
+- follow-up questions and metadata
+
+The memory layer can persist these traces as RAG-style memory so they become searchable context for later work.
+
+The domain layer also defines self-learning interfaces for:
+
+- model discovery
+- reasoning engines
+- RAG retrieval
+- trace recording
+- code evaluation
+- preference dataset building
+- training jobs
+- hot model reload
+
+These contracts do not force one concrete learning system. They create stable boundaries so trace-driven fine-tuning and model replacement can be added without reworking the orchestration core.
 
 ## Transport model
 
@@ -186,7 +330,7 @@ The runtime binary supports practical operational commands:
 - runtime preflight
 - runtime-agent environment setup
 - database inspection, backup, and restore
+- legacy SQL and trace import
 - AI-kernel provisioning and service installation
 
 This is one of the reasons the repository is publication-ready as an application, not only as a library.
-
