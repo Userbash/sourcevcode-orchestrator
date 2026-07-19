@@ -108,11 +108,11 @@ func (r *ProviderModelRegistry) Start(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	r.Refresh(ctx)
-	if r.refreshInterval <= 0 {
-		return
-	}
 	go func() {
+		r.Refresh(ctx)
+		if r.refreshInterval <= 0 {
+			return
+		}
 		ticker := time.NewTicker(r.refreshInterval)
 		defer ticker.Stop()
 		for {
@@ -274,6 +274,39 @@ func (r *ProviderModelRegistry) needsRefreshLocked(now time.Time) bool {
 	return false
 }
 
+func registryTransportMode(cfg agents.OpenAICompatibleConfig) domain.RuntimeTransportMode {
+	if cfg.SupportsNativeStreaming() {
+		return domain.RuntimeTransportNativeStream
+	}
+	if cfg.SupportsPseudoRealtime() {
+		return domain.RuntimeTransportPseudoRealtime
+	}
+	return domain.RuntimeTransportBuffered
+}
+
+func registryMaxParallelRequests() int {
+	value := registryEnvInt("GO_CORE_PROVIDER_MAX_CONCURRENT", 0, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT")
+	if value > 0 {
+		return value
+	}
+	return registryEnvInt("GO_CORE_MAX_CONCURRENT_PER_MODEL", 1, "AI_BRIDGE_MAX_CONCURRENT_PER_MODEL")
+}
+
+func providerRuntimeCapabilitiesFromConfig(cfg agents.OpenAICompatibleConfig, connected bool, observedAt time.Time) *domain.ProviderRuntimeCapabilities {
+	streaming := cfg.SupportsNativeStreaming() || cfg.SupportsPseudoRealtime()
+	return &domain.ProviderRuntimeCapabilities{
+		Connected:            connected,
+		NativeStreaming:      cfg.SupportsNativeStreaming(),
+		ToolStreaming:        streaming,
+		PatchStreaming:       streaming,
+		TestStreaming:        streaming,
+		MaxParallelRequests:  registryMaxParallelRequests(),
+		SupportsCancellation: true,
+		TransportMode:        registryTransportMode(cfg),
+		ObservedAt:           observedAt.UTC(),
+	}
+}
+
 func (r *ProviderModelRegistry) fetchProviderSnapshot(parent context.Context, provider string, cfg agents.OpenAICompatibleConfig) domain.ProviderCatalogSnapshot {
 	now := time.Now().UTC()
 	snapshot := domain.ProviderCatalogSnapshot{
@@ -291,6 +324,7 @@ func (r *ProviderModelRegistry) fetchProviderSnapshot(parent context.Context, pr
 		DefaultModel:                cfg.DefaultModel,
 		ObservedAt:                  now,
 		RefreshIntervalSec:          int(r.refreshInterval.Seconds()),
+		RuntimeCapabilities:         providerRuntimeCapabilitiesFromConfig(cfg, false, now),
 	}
 	if !cfg.Configured() {
 		snapshot.Error = "provider credentials or endpoint are not configured"
@@ -362,6 +396,7 @@ func (r *ProviderModelRegistry) fetchProviderSnapshot(parent context.Context, pr
 	}
 
 	snapshot.Models = models
+	snapshot.RuntimeCapabilities = providerRuntimeCapabilitiesFromConfig(cfg, true, now)
 	confirmedCount := 0
 	pendingCount := 0
 	failedCount := 0
@@ -822,6 +857,7 @@ func (r *ProviderModelRegistry) validateModelViaTransport(ctx context.Context, c
 		ProviderID:   cfg.EffectiveProviderID(),
 		BaseURL:      cfg.BaseURL,
 		APIKey:       cfg.APIKey,
+		ModelName:    model,
 		TrafficClass: "probe",
 		Client:       r.httpClient(maxDuration(cfg.Timeout, r.timeout)),
 	}, http.MethodPost, url, payload, contentType, 4096)
@@ -902,6 +938,7 @@ func (r *ProviderModelRegistry) fetchProviderModelsFromSource(ctx context.Contex
 		ProviderID:   cfg.EffectiveProviderID(),
 		BaseURL:      cfg.BaseURL,
 		APIKey:       cfg.APIKey,
+		ModelName:    firstNonEmptyString(cfg.DefaultModel, provider),
 		TrafficClass: "inventory",
 		Client:       r.httpClient(maxDuration(cfg.Timeout, r.timeout)),
 	}, http.MethodGet, source.url, nil, "", 2<<20)
@@ -1105,21 +1142,88 @@ func annotateProviderModelMetadata(modelName string, metadata map[string]any) ma
 		metadata = map[string]any{}
 	}
 	family := inferModelFamily(modelName)
-	if family == "" {
-		return metadata
+	if family != "" {
+		metadata["model_family"] = family
+		metadata["resource_pool"] = family
+		aliases := familyAliases(family)
+		if len(aliases) > 0 {
+			metadata["family_aliases"] = aliases
+		}
+		pools := []string{family}
+		for _, alias := range aliases {
+			pools = appendUniqueString(pools, alias)
+		}
+		metadata["resource_pools"] = pools
 	}
-	metadata["model_family"] = family
-	metadata["resource_pool"] = family
-	aliases := familyAliases(family)
-	if len(aliases) > 0 {
-		metadata["family_aliases"] = aliases
-	}
-	pools := []string{family}
-	for _, alias := range aliases {
-		pools = appendUniqueString(pools, alias)
-	}
-	metadata["resource_pools"] = pools
+	caps := modelCapabilitiesFromMetadata(modelName, metadata)
+	metadata["streaming"] = boolValueDefault(metadata["streaming"], caps.Streaming)
+	metadata["tool_calling"] = boolValueDefault(metadata["tool_calling"], caps.ToolCalling)
+	metadata["patch_streaming"] = boolValueDefault(metadata["patch_streaming"], caps.PatchStreaming)
+	metadata["test_streaming"] = boolValueDefault(metadata["test_streaming"], caps.TestStreaming)
+	metadata["long_context"] = boolValueDefault(metadata["long_context"], caps.LongContext)
 	return metadata
+}
+
+func modelCapabilitiesFromMetadata(modelName string, metadata map[string]any) domain.ModelCapabilities {
+	caps := inferModelCapabilities(modelName)
+	if metadata == nil {
+		return caps
+	}
+	caps.Streaming = boolValueDefault(metadata["streaming"], caps.Streaming)
+	caps.ToolCalling = boolValueDefault(metadata["tool_calling"], caps.ToolCalling)
+	caps.PatchStreaming = boolValueDefault(metadata["patch_streaming"], caps.PatchStreaming)
+	caps.TestStreaming = boolValueDefault(metadata["test_streaming"], caps.TestStreaming)
+	caps.LongContext = boolValueDefault(metadata["long_context"], caps.LongContext)
+	return caps
+}
+
+func inferModelCapabilities(modelName string) domain.ModelCapabilities {
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	family := inferModelFamily(modelName)
+	caps := domain.ModelCapabilities{}
+	switch family {
+	case "claude", "gpt", "gemini", "gemma", "deepseek", "glm", "kimi", "qwen", "mistral", "llama":
+		caps.Streaming = true
+	}
+	switch family {
+	case "claude", "gpt", "gemini", "deepseek", "glm", "kimi", "qwen", "mistral":
+		caps.ToolCalling = true
+	}
+	switch family {
+	case "claude", "gpt", "gemini":
+		caps.LongContext = true
+	}
+	if strings.Contains(name, "coder") || strings.Contains(name, "codex") || strings.Contains(name, "codestral") || strings.Contains(name, "devstral") || strings.Contains(name, "antigravity") || strings.Contains(name, "mimo") || strings.Contains(name, "sol") {
+		caps.PatchStreaming = true
+		caps.TestStreaming = true
+	}
+	if caps.Streaming && !caps.PatchStreaming {
+		switch family {
+		case "mistral", "deepseek", "qwen", "gemma", "llama":
+			caps.PatchStreaming = true
+			caps.TestStreaming = true
+		}
+	}
+	return caps
+}
+
+func boolValueDefault(value any, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		trimmed := strings.TrimSpace(strings.ToLower(typed))
+		switch trimmed {
+		case "true", "1", "yes", "y", "on":
+			return true
+		case "false", "0", "no", "n", "off":
+			return false
+		}
+	}
+	return fallback
 }
 
 func inferModelFamily(modelName string) string {

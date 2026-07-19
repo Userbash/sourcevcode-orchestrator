@@ -356,6 +356,15 @@ func TestProviderModelRegistryAnnotatesClaudeFamilyMetadata(t *testing.T) {
 	if len(pools) != 2 || pools[0] != "anthropic" || pools[1] != "claude" {
 		t.Fatalf("unexpected resource pools: %#v", model.Metadata)
 	}
+	if model.Metadata["streaming"] != true {
+		t.Fatalf("expected streaming metadata in %#v", model.Metadata)
+	}
+	if model.Metadata["tool_calling"] != true {
+		t.Fatalf("expected tool_calling metadata in %#v", model.Metadata)
+	}
+	if model.Metadata["long_context"] != true {
+		t.Fatalf("expected long_context metadata in %#v", model.Metadata)
+	}
 }
 
 func TestInferModelFamilyRecognizesConfirmedProviderFamilies(t *testing.T) {
@@ -941,5 +950,43 @@ func TestProviderModelRegistryMarksQueueOverflowWhenUnregisteredModelsExceedLimi
 	}
 	if gamma.Status != "registration_overflow" || gamma.QueueStatus != "overflow" {
 		t.Fatalf("unexpected gamma overflow state: %#v", gamma)
+	}
+}
+
+func TestProviderModelRegistryStartDoesNotBlockOnInitialRefresh(t *testing.T) {
+	t.Setenv("GO_CORE_MODEL_CATALOG_PATH", filepath.Join(t.TempDir(), "kernel-models.txt"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"alpha"}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("AI_BRIDGE_MODEL_VALIDATE_MODELS", "false")
+
+	registry := NewProviderModelRegistry(map[string]agents.OpenAICompatibleConfig{
+		"ai_kernel": {
+			Provider:       "ai_kernel",
+			ProviderID:     "ai_kernel",
+			BaseURL:        server.URL + "/v1",
+			ModelsEndpoint: server.URL + "/v1/models",
+			DefaultModel:   "alpha",
+			APIKey:         "local",
+			RequireKey:     true,
+			Timeout:        time.Second,
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startedAt := time.Now()
+	registry.Start(ctx)
+	if elapsed := time.Since(startedAt); elapsed > 100*time.Millisecond {
+		t.Fatalf("Start() blocked for %s", elapsed)
 	}
 }

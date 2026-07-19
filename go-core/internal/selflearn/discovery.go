@@ -53,8 +53,8 @@ func (d *DiscoveryService) Start(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_, _ = d.Refresh(ctx)
 	go func() {
+		_, _ = d.Refresh(ctx)
 		ticker := time.NewTicker(d.config.RefreshInterval)
 		defer ticker.Stop()
 		for {

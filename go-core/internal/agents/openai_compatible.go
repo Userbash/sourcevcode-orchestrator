@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +25,15 @@ type Agent interface {
 	Info() domain.AgentInfo
 	CanAccept(domain.Task) bool
 	Execute(context.Context, domain.Task) domain.AgentResult
+}
+
+type StreamingAgent interface {
+	Agent
+	ExecuteStream(ctx context.Context, task domain.Task) (<-chan domain.AgentDelta, <-chan domain.AgentResult, error)
+}
+
+type RuntimeCapabilityReporter interface {
+	RuntimeCapabilities() domain.ProviderRuntimeCapabilities
 }
 
 type AssignedModelOverrider interface {
@@ -54,6 +65,8 @@ type OpenAICompatibleConfig struct {
 	CodexEndpoint               string
 	Timeout                     time.Duration
 	RequireKey                  bool
+	NativeStreaming             bool
+	AllowPseudoRealtime         bool
 }
 
 func (c OpenAICompatibleConfig) Configured() bool {
@@ -61,6 +74,14 @@ func (c OpenAICompatibleConfig) Configured() bool {
 		return false
 	}
 	return !c.RequireKey || strings.TrimSpace(c.APIKey) != ""
+}
+
+func (c OpenAICompatibleConfig) SupportsNativeStreaming() bool {
+	return c.NativeStreaming
+}
+
+func (c OpenAICompatibleConfig) SupportsPseudoRealtime() bool {
+	return c.AllowPseudoRealtime
 }
 
 func (c OpenAICompatibleConfig) EffectiveProviderID() string {
@@ -118,6 +139,143 @@ func (c OpenAICompatibleConfig) CodexURL() string {
 func looksLikeCodexSaleEndpoint(value string) bool {
 	trimmed := strings.TrimSpace(strings.ToLower(value))
 	return trimmed != "" && strings.Contains(trimmed, "codex.sale")
+}
+
+type realtimeMetricsRecorder struct {
+	startedAt       time.Time
+	transport       string
+	nativeStreaming bool
+	pseudoRealtime  bool
+	firstTokenAt    time.Time
+	firstToolAt     time.Time
+	firstPatchAt    time.Time
+	firstResultAt   time.Time
+	firstTestAt     time.Time
+	tokensStreamed  int
+	toolsExecuted   int
+	patchesApplied  int
+	testsExecuted   int
+}
+
+func newRealtimeMetricsRecorder(startedAt time.Time, transport string, nativeStreaming bool, pseudoRealtime bool) *realtimeMetricsRecorder {
+	return &realtimeMetricsRecorder{startedAt: startedAt, transport: transport, nativeStreaming: nativeStreaming, pseudoRealtime: pseudoRealtime}
+}
+
+func openAITransportMode(native bool, pseudo bool) domain.RuntimeTransportMode {
+	if native {
+		return domain.RuntimeTransportNativeStream
+	}
+	if pseudo {
+		return domain.RuntimeTransportPseudoRealtime
+	}
+	return domain.RuntimeTransportBuffered
+}
+
+func providerRuntimeMaxParallelRequests() int {
+	for _, key := range []string{
+		"GO_CORE_PROVIDER_MAX_CONCURRENT_PER_MODEL",
+		"AI_BRIDGE_PROVIDER_MAX_CONCURRENT_PER_MODEL",
+		"GO_CORE_PROVIDER_MAX_CONCURRENT",
+		"AI_BRIDGE_PROVIDER_MAX_CONCURRENT",
+	} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 1
+}
+
+func (r *realtimeMetricsRecorder) markToken(at time.Time) {
+	if r == nil {
+		return
+	}
+	if r.firstTokenAt.IsZero() {
+		r.firstTokenAt = at
+	}
+	r.tokensStreamed++
+}
+
+func (r *realtimeMetricsRecorder) markTool(at time.Time) {
+	if r == nil {
+		return
+	}
+	if r.firstToolAt.IsZero() {
+		r.firstToolAt = at
+	}
+	r.toolsExecuted++
+}
+
+func (r *realtimeMetricsRecorder) markPatch(at time.Time) {
+	if r == nil {
+		return
+	}
+	if r.firstPatchAt.IsZero() {
+		r.firstPatchAt = at
+	}
+	r.patchesApplied++
+}
+
+func (r *realtimeMetricsRecorder) markResult(at time.Time) {
+	if r == nil {
+		return
+	}
+	if r.firstResultAt.IsZero() {
+		r.firstResultAt = at
+	}
+}
+
+func (r *realtimeMetricsRecorder) markTest(at time.Time) {
+	if r == nil {
+		return
+	}
+	if r.firstTestAt.IsZero() {
+		r.firstTestAt = at
+	}
+	r.testsExecuted++
+}
+
+func (r *realtimeMetricsRecorder) snapshot(completedAt time.Time) map[string]any {
+	if r == nil {
+		return nil
+	}
+	metrics := map[string]any{
+		"transport":           r.transport,
+		"native_streaming":    r.nativeStreaming,
+		"pseudo_realtime":     r.pseudoRealtime,
+		"total_completion_ms": completedAt.Sub(r.startedAt).Milliseconds(),
+		"tokens_streamed":     r.tokensStreamed,
+		"tools_executed":      r.toolsExecuted,
+		"patches_applied":     r.patchesApplied,
+		"tests_executed":      r.testsExecuted,
+	}
+	if !r.firstTokenAt.IsZero() {
+		metrics["time_to_first_token_ms"] = r.firstTokenAt.Sub(r.startedAt).Milliseconds()
+	}
+	if !r.firstToolAt.IsZero() {
+		metrics["time_to_first_tool_ms"] = r.firstToolAt.Sub(r.startedAt).Milliseconds()
+	}
+	if !r.firstPatchAt.IsZero() {
+		metrics["time_to_first_patch_ms"] = r.firstPatchAt.Sub(r.startedAt).Milliseconds()
+	}
+	if !r.firstResultAt.IsZero() {
+		metrics["time_to_first_result_ms"] = r.firstResultAt.Sub(r.startedAt).Milliseconds()
+	}
+	if !r.firstTestAt.IsZero() {
+		metrics["time_to_first_test_ms"] = r.firstTestAt.Sub(r.startedAt).Milliseconds()
+	}
+	return metrics
+}
+
+func attachRealtimeMetrics(artifacts map[string]any, recorder *realtimeMetricsRecorder, completedAt time.Time) {
+	if artifacts == nil || recorder == nil {
+		return
+	}
+	artifacts["realtime_metrics"] = recorder.snapshot(completedAt)
 }
 
 func LooksLikeCodexSaleAlias(cfg OpenAICompatibleConfig) bool {
@@ -242,6 +400,23 @@ func (a *OpenAICompatibleAgent) SupportsAssignedModelOverride() bool {
 	return true
 }
 
+func (a *OpenAICompatibleAgent) RuntimeCapabilities() domain.ProviderRuntimeCapabilities {
+	native := a.config.SupportsNativeStreaming()
+	pseudo := !native && a.config.SupportsPseudoRealtime()
+	streaming := native || pseudo
+	return domain.ProviderRuntimeCapabilities{
+		Connected:            false,
+		NativeStreaming:      native,
+		ToolStreaming:        streaming,
+		PatchStreaming:       streaming,
+		TestStreaming:        streaming,
+		MaxParallelRequests:  providerRuntimeMaxParallelRequests(),
+		SupportsCancellation: true,
+		TransportMode:        openAITransportMode(native, pseudo),
+		ObservedAt:           time.Now().UTC(),
+	}
+}
+
 func (a *OpenAICompatibleAgent) CanAccept(task domain.Task) bool {
 	if !a.config.Configured() {
 		return false
@@ -257,6 +432,52 @@ func (a *OpenAICompatibleAgent) CanAccept(task domain.Task) bool {
 	return false
 }
 
+func (a *OpenAICompatibleAgent) ExecuteStream(ctx context.Context, task domain.Task) (<-chan domain.AgentDelta, <-chan domain.AgentResult, error) {
+	deltas := make(chan domain.AgentDelta, 32)
+	results := make(chan domain.AgentResult, 1)
+
+	go func() {
+		defer close(deltas)
+		defer close(results)
+
+		nativeStreaming := a.shouldUseNativeStreaming(task)
+		pseudoRealtime := !nativeStreaming && a.config.SupportsPseudoRealtime()
+		transport := string(openAITransportMode(nativeStreaming, pseudoRealtime))
+		deltas <- domain.AgentDelta{
+			TaskID:    task.ID,
+			AgentID:   a.info.ID,
+			Provider:  a.info.Provider,
+			ModelName: firstNonEmpty(task.AssignedModel, a.info.ModelName, a.config.DefaultModel),
+			Kind:      domain.AgentDeltaStarted,
+			Metadata: map[string]any{
+				"transport":            transport,
+				"native_streaming":     nativeStreaming,
+				"pseudo_realtime":      pseudoRealtime,
+				"workspace_compatible": nativeStreaming,
+			},
+			Timestamp: time.Now().UTC(),
+		}
+
+		if !nativeStreaming {
+			a.emitBufferedExecution(ctx, task, deltas, results)
+			return
+		}
+
+		result, err := a.executeNativeStream(ctx, task, deltas)
+		if err != nil {
+			if a.config.SupportsPseudoRealtime() {
+				a.emitBufferedExecution(ctx, task, deltas, results)
+				return
+			}
+			results <- result
+			return
+		}
+		results <- result
+	}()
+
+	return deltas, results, nil
+}
+
 func (a *OpenAICompatibleAgent) Execute(ctx context.Context, task domain.Task) domain.AgentResult {
 	startedAt := time.Now()
 	result := domain.AgentResult{
@@ -268,7 +489,7 @@ func (a *OpenAICompatibleAgent) Execute(ctx context.Context, task domain.Task) d
 		CompletedAt: time.Now().UTC(),
 		Output: domain.ResultOutput{Artifacts: map[string]any{
 			"runtime":   "go",
-			"transport": "openai_compatible_chat_completions",
+			"transport": string(domain.RuntimeTransportBuffered),
 		}},
 	}
 	if !a.config.Configured() {
@@ -304,7 +525,15 @@ func (a *OpenAICompatibleAgent) Execute(ctx context.Context, task domain.Task) d
 	result.Output.Summary = summary
 	result.Output.Artifacts["completion_id"] = completion.ID
 	result.Output.Artifacts["finish_reason"] = completion.Choices[0].FinishReason
-	result.Output.Artifacts["duration_ms"] = time.Since(startedAt).Milliseconds()
+	durationMS := time.Since(startedAt).Milliseconds()
+	result.Output.Artifacts["duration_ms"] = durationMS
+	result.Output.Artifacts["realtime_metrics"] = map[string]any{
+		"transport":               string(domain.RuntimeTransportBuffered),
+		"native_streaming":        false,
+		"pseudo_realtime":         false,
+		"time_to_first_result_ms": durationMS,
+		"total_completion_ms":     durationMS,
+	}
 	result.Output.Artifacts["usage"] = completion.Usage
 	result.Output.Artifacts["tool_call_count"] = callCount
 	if runtime != nil {
@@ -332,6 +561,10 @@ func (a *OpenAICompatibleAgent) Probe(ctx context.Context) domain.ProviderHealth
 	if !health.Configured {
 		health.Status = "not_configured"
 		health.Error = "provider credentials or endpoint are not configured"
+		caps := a.RuntimeCapabilities()
+		caps.Connected = false
+		caps.ObservedAt = health.ObservedAt
+		health.RuntimeCapabilities = &caps
 		return health
 	}
 	endpoint := a.config.ModelsURL()
@@ -341,6 +574,10 @@ func (a *OpenAICompatibleAgent) Probe(ctx context.Context) domain.ProviderHealth
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			health.Status = "degraded"
 		}
+		caps := a.RuntimeCapabilities()
+		caps.Connected = false
+		caps.ObservedAt = health.ObservedAt
+		health.RuntimeCapabilities = &caps
 		return health
 	}
 	if response.statusCode < 200 || response.statusCode >= 300 {
@@ -355,10 +592,18 @@ func (a *OpenAICompatibleAgent) Probe(ctx context.Context) domain.ProviderHealth
 		case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			health.Status = "degraded"
 		}
+		caps := a.RuntimeCapabilities()
+		caps.Connected = false
+		caps.ObservedAt = health.ObservedAt
+		health.RuntimeCapabilities = &caps
 		return health
 	}
 	health.Available = true
 	health.Status = "ready"
+	caps := a.RuntimeCapabilities()
+	caps.Connected = true
+	caps.ObservedAt = health.ObservedAt
+	health.RuntimeCapabilities = &caps
 	return health
 }
 
@@ -392,6 +637,7 @@ type chatCompletionRequest struct {
 	Temperature float64       `json:"temperature,omitempty"`
 	Tools       []chatTool    `json:"tools,omitempty"`
 	ToolChoice  string        `json:"tool_choice,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
 }
 
 type chatTool struct {
@@ -421,6 +667,33 @@ type chatCompletionResponse struct {
 	Choices []struct {
 		Message      chatMessage `json:"message"`
 		FinishReason string      `json:"finish_reason"`
+	} `json:"choices"`
+	Usage map[string]any `json:"usage,omitempty"`
+}
+
+type chatCompletionStreamToolCallFunctionDelta struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+type chatCompletionStreamToolCallDelta struct {
+	Index    int                                       `json:"index,omitempty"`
+	ID       string                                    `json:"id,omitempty"`
+	Type     string                                    `json:"type,omitempty"`
+	Function chatCompletionStreamToolCallFunctionDelta `json:"function,omitempty"`
+}
+
+type chatCompletionStreamDelta struct {
+	Role      string                              `json:"role,omitempty"`
+	Content   string                              `json:"content,omitempty"`
+	ToolCalls []chatCompletionStreamToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+type chatCompletionStreamChunk struct {
+	ID      string `json:"id"`
+	Choices []struct {
+		Delta        chatCompletionStreamDelta `json:"delta"`
+		FinishReason string                    `json:"finish_reason"`
 	} `json:"choices"`
 	Usage map[string]any `json:"usage,omitempty"`
 }
@@ -463,8 +736,466 @@ func failedResult(result domain.AgentResult, startedAt time.Time, err error) dom
 	result.CompletedAt = time.Now().UTC()
 	result.Errors = []string{err.Error()}
 	result.Output.Summary = err.Error()
-	result.Output.Artifacts["duration_ms"] = time.Since(startedAt).Milliseconds()
+	durationMS := time.Since(startedAt).Milliseconds()
+	result.Output.Artifacts["duration_ms"] = durationMS
+	result.Output.Artifacts["realtime_metrics"] = map[string]any{
+		"transport":               string(domain.RuntimeTransportBuffered),
+		"native_streaming":        false,
+		"pseudo_realtime":         false,
+		"time_to_first_result_ms": durationMS,
+		"total_completion_ms":     durationMS,
+	}
 	return result
+}
+
+func (a *OpenAICompatibleAgent) shouldUseNativeStreaming(task domain.Task) bool {
+	return a.config.SupportsNativeStreaming()
+}
+func (a *OpenAICompatibleAgent) emitBufferedExecution(ctx context.Context, task domain.Task, deltas chan<- domain.AgentDelta, results chan<- domain.AgentResult) {
+	result := a.Execute(ctx, task)
+	sequence := int64(1)
+	if summary := strings.TrimSpace(result.Output.Summary); summary != "" {
+		deltas <- domain.AgentDelta{
+			TaskID:    task.ID,
+			AgentID:   a.info.ID,
+			Provider:  result.Provider,
+			ModelName: result.ModelName,
+			Kind:      domain.AgentDeltaPartialResult,
+			Sequence:  sequence,
+			Content:   summary,
+			Timestamp: time.Now().UTC(),
+		}
+		sequence++
+		deltas <- domain.AgentDelta{
+			TaskID:    task.ID,
+			AgentID:   a.info.ID,
+			Provider:  result.Provider,
+			ModelName: result.ModelName,
+			Kind:      domain.AgentDeltaFinalResult,
+			Sequence:  sequence,
+			Content:   summary,
+			Timestamp: time.Now().UTC(),
+		}
+	}
+	results <- result
+}
+
+func (a *OpenAICompatibleAgent) executeNativeStream(ctx context.Context, task domain.Task, deltas chan<- domain.AgentDelta) (domain.AgentResult, error) {
+	startedAt := time.Now()
+	recorder := newRealtimeMetricsRecorder(startedAt, string(domain.RuntimeTransportNativeStream), true, a.config.SupportsPseudoRealtime())
+	result := domain.AgentResult{
+		TaskID:      task.ID,
+		AgentID:     a.info.ID,
+		Status:      domain.TaskStatusFailed,
+		Provider:    a.info.Provider,
+		ModelName:   firstNonEmpty(task.AssignedModel, a.info.ModelName, a.config.DefaultModel),
+		CompletedAt: time.Now().UTC(),
+		Output: domain.ResultOutput{Artifacts: map[string]any{
+			"runtime":   "go",
+			"transport": string(domain.RuntimeTransportNativeStream),
+		}},
+	}
+	if !a.config.Configured() {
+		return failedResult(result, startedAt, errors.New("provider is not configured")), errors.New("provider is not configured")
+	}
+
+	var runtime *workspace.Runtime
+	if toolRuntimeEnabled(task) {
+		var err error
+		runtime, err = workspace.New(task.Context.RepoPath)
+		if err != nil {
+			return failedResult(result, startedAt, err), err
+		}
+	}
+
+	var sequence int64 = 1
+	var completion chatCompletionResponse
+	var callCount int
+	var err error
+	if runtime != nil {
+		completion, callCount, err = a.executeStreamingChatCompletionLoop(ctx, task, result.ModelName, runtime, deltas, &sequence, recorder)
+	} else {
+		completion, err = a.doStreamingChatCompletionRequest(ctx, chatCompletionRequest{
+			Model:       result.ModelName,
+			Messages:    []chatMessage{{Role: "system", Content: systemPrompt(task)}, {Role: "user", Content: taskPrompt(task)}},
+			Temperature: 0.2,
+			Stream:      true,
+		}, func(token string) {
+			if token == "" {
+				return
+			}
+			recorder.markToken(time.Now().UTC())
+			deltas <- domain.AgentDelta{
+				TaskID:    task.ID,
+				AgentID:   a.info.ID,
+				Provider:  a.info.Provider,
+				ModelName: result.ModelName,
+				Kind:      domain.AgentDeltaToken,
+				Sequence:  sequence,
+				Content:   token,
+				Metadata: map[string]any{
+					"transport":        string(domain.RuntimeTransportNativeStream),
+					"native_streaming": true,
+				},
+				Timestamp: time.Now().UTC(),
+			}
+			sequence++
+		})
+	}
+	if err != nil {
+		return failedResult(result, startedAt, err), err
+	}
+	if len(completion.Choices) == 0 {
+		err = errors.New("provider returned no choices")
+		return failedResult(result, startedAt, err), err
+	}
+	summary := strings.TrimSpace(chatMessageText(completion.Choices[0].Message))
+	if summary == "" {
+		err = errors.New("provider returned an empty completion")
+		return failedResult(result, startedAt, err), err
+	}
+	recorder.markResult(time.Now().UTC())
+	deltas <- domain.AgentDelta{
+		TaskID:    task.ID,
+		AgentID:   a.info.ID,
+		Provider:  a.info.Provider,
+		ModelName: result.ModelName,
+		Kind:      domain.AgentDeltaPartialResult,
+		Sequence:  sequence,
+		Content:   summary,
+		Timestamp: time.Now().UTC(),
+	}
+	sequence++
+	deltas <- domain.AgentDelta{
+		TaskID:    task.ID,
+		AgentID:   a.info.ID,
+		Provider:  a.info.Provider,
+		ModelName: result.ModelName,
+		Kind:      domain.AgentDeltaFinalResult,
+		Sequence:  sequence,
+		Content:   summary,
+		Timestamp: time.Now().UTC(),
+	}
+	result.Status = domain.TaskStatusDone
+	result.Confidence = 0.85
+	result.CompletedAt = time.Now().UTC()
+	result.Output.Summary = summary
+	result.Output.Artifacts["completion_id"] = completion.ID
+	result.Output.Artifacts["finish_reason"] = completion.Choices[0].FinishReason
+	result.Output.Artifacts["duration_ms"] = time.Since(startedAt).Milliseconds()
+	result.Output.Artifacts["usage"] = completion.Usage
+	result.Output.Artifacts["tool_call_count"] = callCount
+	if runtime != nil {
+		filesChanged, commandsRun, testResults := runtime.Snapshot()
+		result.Output.FilesChanged = filesChanged
+		result.Output.CommandsRun = append(result.Output.CommandsRun, commandsRun...)
+		result.Output.TestResults = testResults
+		result.Output.Artifacts["workspace_root"] = runtime.Root()
+		result.Output.Artifacts["runtime_tools_enabled"] = true
+		result.Output.Artifacts["streaming_workspace"] = true
+	} else {
+		result.Output.CommandsRun = []string{"STREAM " + a.config.ChatCompletionsURL()}
+		result.Output.Artifacts["runtime_tools_enabled"] = false
+		result.Output.Artifacts["streaming_workspace"] = false
+	}
+	attachRealtimeMetrics(result.Output.Artifacts, recorder, result.CompletedAt)
+	return result, nil
+}
+
+func (a *OpenAICompatibleAgent) executeStreamingChatCompletionLoop(ctx context.Context, task domain.Task, model string, runtime *workspace.Runtime, deltas chan<- domain.AgentDelta, sequence *int64, recorder *realtimeMetricsRecorder) (chatCompletionResponse, int, error) {
+	messages := []chatMessage{
+		{Role: "system", Content: systemPrompt(task)},
+		{Role: "user", Content: taskPrompt(task)},
+	}
+	tools := workspaceTools()
+	callCount := 0
+	for iteration := 0; iteration < 8; iteration++ {
+		payload := chatCompletionRequest{
+			Model:       model,
+			Messages:    messages,
+			Temperature: 0.2,
+			Tools:       tools,
+			ToolChoice:  "auto",
+			Stream:      true,
+		}
+		completion, err := a.doStreamingChatCompletionRequest(ctx, payload, func(token string) {
+			if token == "" {
+				return
+			}
+			recorder.markToken(time.Now().UTC())
+			deltas <- domain.AgentDelta{
+				TaskID:    task.ID,
+				AgentID:   a.info.ID,
+				Provider:  a.info.Provider,
+				ModelName: model,
+				Kind:      domain.AgentDeltaToken,
+				Sequence:  *sequence,
+				Content:   token,
+				Timestamp: time.Now().UTC(),
+			}
+			*sequence = *sequence + 1
+		})
+		if err != nil {
+			return chatCompletionResponse{}, callCount, err
+		}
+		if len(completion.Choices) == 0 {
+			return chatCompletionResponse{}, callCount, errors.New("provider returned no choices")
+		}
+		message := completion.Choices[0].Message
+		if len(message.ToolCalls) == 0 {
+			return completion, callCount, nil
+		}
+		callCount += len(message.ToolCalls)
+		messages = append(messages, chatMessage{Role: "assistant", Content: message.Content, ToolCalls: message.ToolCalls})
+		for _, call := range message.ToolCalls {
+			a.emitWorkspaceToolStarted(task, model, call, deltas, sequence, recorder)
+			output, err := executeWorkspaceTool(runtime, call)
+			if err != nil {
+				output = map[string]any{"error": err.Error()}
+			}
+			a.emitWorkspaceToolFinished(task, model, call, output, deltas, sequence, recorder)
+			serialized, err := json.Marshal(output)
+			if err != nil {
+				return chatCompletionResponse{}, callCount, err
+			}
+			messages = append(messages, chatMessage{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Name:       call.Function.Name,
+				Content:    string(serialized),
+			})
+		}
+	}
+	return chatCompletionResponse{}, callCount, errors.New("tool loop exceeded max iterations")
+}
+
+func (a *OpenAICompatibleAgent) emitWorkspaceToolStarted(task domain.Task, model string, call chatToolCall, deltas chan<- domain.AgentDelta, sequence *int64, recorder *realtimeMetricsRecorder) {
+	metadata := map[string]any{"tool": call.Function.Name, "tool_call_id": call.ID}
+	recorder.markTool(time.Now().UTC())
+	arguments := parseToolArguments(call.Function.Arguments)
+	switch call.Function.Name {
+	case "write_file":
+		path := stringArg(arguments, "path")
+		content := stringArg(arguments, "content")
+		if path != "" {
+			metadata["path"] = path
+		}
+		if content != "" {
+			recorder.markPatch(time.Now().UTC())
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaPatchPreview, Sequence: *sequence, Content: content, Metadata: map[string]any{"path": path}, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaPatchChunk, Sequence: *sequence, Content: content, Metadata: map[string]any{"path": path}, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+		}
+		deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaPatchApplyStart, Sequence: *sequence, Content: path, Metadata: metadata, Timestamp: time.Now().UTC()}
+		*sequence = *sequence + 1
+	case "run_command":
+		command := strings.Join(stringSliceArg(arguments, "command"), " ")
+		if command != "" {
+			metadata["command"] = command
+		}
+		deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaCommandStarted, Sequence: *sequence, Content: command, Metadata: metadata, Timestamp: time.Now().UTC()}
+		*sequence = *sequence + 1
+		testKind := inferTestKind(stringSliceArg(arguments, "command"))
+		if testKind != "" {
+			recorder.markTest(time.Now().UTC())
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaTestStarted, Sequence: *sequence, Content: testKind, Metadata: metadata, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+		}
+	}
+	deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaToolStarted, Sequence: *sequence, Content: call.Function.Name, Metadata: metadata, Timestamp: time.Now().UTC()}
+	*sequence = *sequence + 1
+}
+
+func (a *OpenAICompatibleAgent) emitWorkspaceToolFinished(task domain.Task, model string, call chatToolCall, output map[string]any, deltas chan<- domain.AgentDelta, sequence *int64, recorder *realtimeMetricsRecorder) {
+	metadata := map[string]any{"tool": call.Function.Name, "tool_call_id": call.ID}
+	for key, value := range output {
+		metadata[key] = value
+	}
+	switch call.Function.Name {
+	case "write_file":
+		recorder.markPatch(time.Now().UTC())
+		path, _ := output["path"].(string)
+		deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaFilePatch, Sequence: *sequence, Content: path, Metadata: metadata, Timestamp: time.Now().UTC()}
+		*sequence = *sequence + 1
+		deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaPatchApplyFinish, Sequence: *sequence, Content: path, Metadata: metadata, Timestamp: time.Now().UTC()}
+		*sequence = *sequence + 1
+	case "run_command":
+		if stdout, _ := output["stdout"].(string); strings.TrimSpace(stdout) != "" {
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaToolStdout, Sequence: *sequence, Content: stdout, Metadata: metadata, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+		}
+		if stderr, _ := output["stderr"].(string); strings.TrimSpace(stderr) != "" {
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaToolStderr, Sequence: *sequence, Content: stderr, Metadata: metadata, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+		}
+		command, _ := output["command_text"].(string)
+		deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaCommandFinished, Sequence: *sequence, Content: command, Metadata: metadata, Timestamp: time.Now().UTC()}
+		*sequence = *sequence + 1
+		if kind := inferTestKindFromOutput(output); kind != "" {
+			recorder.markTest(time.Now().UTC())
+			content := kind
+			if passed, ok := output["exit_code"].(int); ok {
+				content = fmt.Sprintf("%s exit=%d", kind, passed)
+			}
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaTestCase, Sequence: *sequence, Content: content, Metadata: metadata, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+			deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaTestFinished, Sequence: *sequence, Content: kind, Metadata: metadata, Timestamp: time.Now().UTC()}
+			*sequence = *sequence + 1
+		}
+	}
+	serialized, _ := json.Marshal(output)
+	deltas <- domain.AgentDelta{TaskID: task.ID, AgentID: a.info.ID, Provider: a.info.Provider, ModelName: model, Kind: domain.AgentDeltaToolFinished, Sequence: *sequence, Content: string(serialized), Metadata: metadata, Timestamp: time.Now().UTC()}
+	*sequence = *sequence + 1
+}
+
+func parseToolArguments(raw string) map[string]any {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal([]byte(raw), &arguments); err != nil {
+		return nil
+	}
+	return arguments
+}
+
+func inferTestKind(command []string) string {
+	return inferTestKindFromOutput(map[string]any{"command": strings.Join(command, " ")})
+}
+
+func inferTestKindFromOutput(output map[string]any) string {
+	command, _ := output["command"].(string)
+	if command == "" {
+		command, _ = output["command_text"].(string)
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(command, "go test"):
+		return "go test"
+	case strings.HasPrefix(command, "pytest"):
+		return "pytest"
+	case strings.HasPrefix(command, "python -m pytest"), strings.HasPrefix(command, "python3 -m pytest"):
+		return "pytest"
+	case strings.HasPrefix(command, "npm test"):
+		return "npm test"
+	default:
+		return ""
+	}
+}
+
+func (a *OpenAICompatibleAgent) doStreamingChatCompletionRequest(ctx context.Context, payload chatCompletionRequest, emitToken func(string)) (chatCompletionResponse, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return chatCompletionResponse{}, err
+	}
+	endpoint := a.config.ChatCompletionsURL()
+	if endpoint == "" {
+		return chatCompletionResponse{}, fmt.Errorf("chat completions endpoint is not configured")
+	}
+
+	var completion chatCompletionResponse
+	err = providerhttp.DoStream(ctx, providerhttp.RequestConfig{
+		ProviderID:   a.info.Provider,
+		BaseURL:      a.config.BaseURL,
+		APIKey:       a.config.APIKey,
+		ModelName:    payload.Model,
+		TrafficClass: "primary",
+		Client:       a.client,
+	}, http.MethodPost, endpoint, body, "application/json", func(req *http.Request) {
+		req.Header.Set("Accept", "text/event-stream")
+	}, func(resp *http.Response) error {
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 16<<10), 1<<20)
+		var content strings.Builder
+		toolCallsByIndex := map[int]*chatToolCall{}
+		completion = chatCompletionResponse{Choices: []struct {
+			Message      chatMessage `json:"message"`
+			FinishReason string      `json:"finish_reason"`
+		}{{Message: chatMessage{Role: "assistant"}}}}
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				break
+			}
+			var chunk chatCompletionStreamChunk
+			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+				return fmt.Errorf("decode %s stream response: %w", a.info.Provider, err)
+			}
+			if completion.ID == "" {
+				completion.ID = chunk.ID
+			}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+			choice := chunk.Choices[0]
+			if choice.Delta.Role != "" {
+				completion.Choices[0].Message.Role = choice.Delta.Role
+			}
+			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
+				if emitToken != nil {
+					emitToken(choice.Delta.Content)
+				}
+			}
+			for _, streamedCall := range choice.Delta.ToolCalls {
+				call := toolCallsByIndex[streamedCall.Index]
+				if call == nil {
+					call = &chatToolCall{}
+					toolCallsByIndex[streamedCall.Index] = call
+				}
+				if streamedCall.ID != "" {
+					call.ID = streamedCall.ID
+				}
+				if streamedCall.Type != "" {
+					call.Type = streamedCall.Type
+				}
+				if streamedCall.Function.Name != "" {
+					call.Function.Name = streamedCall.Function.Name
+				}
+				if streamedCall.Function.Arguments != "" {
+					call.Function.Arguments += streamedCall.Function.Arguments
+				}
+			}
+			if choice.FinishReason != "" {
+				completion.Choices[0].FinishReason = choice.FinishReason
+			}
+			if len(chunk.Usage) > 0 {
+				completion.Usage = chunk.Usage
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+		completion.Choices[0].Message.Content = content.String()
+		if len(toolCallsByIndex) > 0 {
+			indexes := make([]int, 0, len(toolCallsByIndex))
+			for index := range toolCallsByIndex {
+				indexes = append(indexes, index)
+			}
+			slices.Sort(indexes)
+			completion.Choices[0].Message.ToolCalls = make([]chatToolCall, 0, len(indexes))
+			for _, index := range indexes {
+				call := toolCallsByIndex[index]
+				completion.Choices[0].Message.ToolCalls = append(completion.Choices[0].Message.ToolCalls, *call)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return chatCompletionResponse{}, err
+	}
+	return completion, nil
 }
 
 func (a *OpenAICompatibleAgent) runChatCompletionLoop(ctx context.Context, task domain.Task, model string, runtime *workspace.Runtime) (chatCompletionResponse, int, error) {
@@ -553,6 +1284,7 @@ func (a *OpenAICompatibleAgent) doChatCompletionRequest(ctx context.Context, pay
 func (a *OpenAICompatibleAgent) doProviderRequest(ctx context.Context, method, endpoint string, body []byte, contentType string, limit int64) (providerHTTPResponse, error) {
 	response, err := providerhttp.Do(ctx, providerhttp.RequestConfig{
 		ProviderID:   a.config.EffectiveProviderID(),
+		ModelName:    firstNonEmpty(a.info.ModelName, a.config.DefaultModel),
 		BaseURL:      a.config.BaseURL,
 		APIKey:       a.config.APIKey,
 		TrafficClass: "primary",
@@ -566,6 +1298,13 @@ func (a *OpenAICompatibleAgent) doProviderRequest(ctx context.Context, method, e
 		header:     response.Header,
 		body:       response.Body,
 	}, nil
+}
+
+func taskNeedsBufferedExecution(task domain.Task) bool {
+	if strings.TrimSpace(task.Context.RepoPath) != "" {
+		return true
+	}
+	return len(task.Input.Files) > 0
 }
 
 func toolRuntimeEnabled(task domain.Task) bool {
@@ -776,7 +1515,7 @@ func firstNonEmpty(values ...string) string {
 // LoadOpenAICompatibleConfigs ports provider environment aliases from Python.
 func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 	timeout := durationFromEnv("GO_CORE_PROVIDER_TIMEOUT", defaultProviderTimeout)
-	withDefaults := func(provider string, cfg OpenAICompatibleConfig) OpenAICompatibleConfig {
+	withDefaults := func(provider string, cfg OpenAICompatibleConfig, defaultNativeStreaming bool) OpenAICompatibleConfig {
 		cfg.Provider = provider
 		cfg.ProviderID = firstNonEmpty(cfg.ProviderID, provider)
 		cfg = normalizeLoopbackProviderConfig(provider, cfg)
@@ -797,6 +1536,8 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			cfg.MessagesCountTokensEndpoint = strings.TrimRight(cfg.BaseURL, "/") + "/messages/count_tokens"
 		}
 		cfg.Timeout = timeout
+		cfg.NativeStreaming = boolEnvDefault(providerEnvKey(provider, "NATIVE_STREAMING"), defaultNativeStreaming)
+		cfg.AllowPseudoRealtime = boolEnvDefault(providerEnvKey(provider, "ALLOW_PSEUDO_REALTIME"), true)
 		return cfg
 	}
 	configs := map[string]OpenAICompatibleConfig{
@@ -807,7 +1548,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			DefaultModel:            firstEnvDefault("", "AI_BRIDGE_LOCAL_LLM_MODEL", "OLLAMA_MODEL"),
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_LOCAL_LLM_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_LOCAL_LLM_CHAT_COMPLETIONS_ENDPOINT"),
-		}),
+		}, true),
 		"ai_kernel": withDefaults("ai_kernel", OpenAICompatibleConfig{
 			ProviderID:              firstEnv("AI_BRIDGE_AI_KERNEL_PROVIDER_ID", "AI_KERNEL_PROVIDER_ID"),
 			BaseURL:                 firstEnvDefault("http://127.0.0.1:8012/v1", "AI_KERNEL_BASE_URL", "AI_BRIDGE_AI_KERNEL_BASE_URL"),
@@ -816,7 +1557,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_AI_KERNEL_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_AI_KERNEL_CHAT_COMPLETIONS_ENDPOINT"),
 			RequireKey:              envBool("AI_KERNEL_REQUIRE_API_KEY", true),
-		}),
+		}, true),
 		"openai": withDefaults("openai", OpenAICompatibleConfig{
 			ProviderID:                  firstEnv("AI_BRIDGE_OPENAI_PROVIDER_ID"),
 			BaseURL:                     firstEnvDefault("https://api.openai.com/v1", "OPENAI_BASE_URL", "AI_BRIDGE_OPENAI_BASE_URL"),
@@ -829,7 +1570,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			MessagesCountTokensEndpoint: firstEnv("AI_BRIDGE_OPENAI_MESSAGES_COUNT_TOKENS_ENDPOINT"),
 			CodexEndpoint:               firstEnv("AI_BRIDGE_OPENAI_CODEX_ENDPOINT"),
 			RequireKey:                  true,
-		}),
+		}, true),
 		"codexsale": withDefaults("codexsale", OpenAICompatibleConfig{
 			ProviderID:                  firstEnvDefault("codexsale", "CODEX_SALE_PROVIDER_ID"),
 			BaseURL:                     firstEnvDefault("https://codex.sale/v1", "CODEX_SALE_BASE_URL"),
@@ -842,7 +1583,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			MessagesCountTokensEndpoint: firstEnvDefault("https://codex.sale/v1/messages/count_tokens", "CODEX_SALE_MESSAGES_COUNT_TOKENS_ENDPOINT"),
 			CodexEndpoint:               firstEnvDefault("https://codex.sale/backend-api/codex", "CODEX_SALE_CODEX_ENDPOINT"),
 			RequireKey:                  true,
-		}),
+		}, true),
 		"mistral": withDefaults("mistral", OpenAICompatibleConfig{
 			ProviderID:              firstEnv("AI_BRIDGE_MISTRAL_PROVIDER_ID"),
 			BaseURL:                 firstEnvDefault("https://api.mistral.ai/v1", "MISTRAL_BASE_URL", "AI_BRIDGE_MISTRAL_BASE_URL"),
@@ -851,7 +1592,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_MISTRAL_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_MISTRAL_CHAT_COMPLETIONS_ENDPOINT"),
 			RequireKey:              true,
-		}),
+		}, true),
 		"antigravity": withDefaults("antigravity", OpenAICompatibleConfig{
 			ProviderID:              firstEnv("AI_BRIDGE_ANTIGRAVITY_PROVIDER_ID"),
 			BaseURL:                 firstEnv("ANTIGRAVITY_BASE_URL", "AI_BRIDGE_ANTIGRAVITY_BASE_URL"),
@@ -860,7 +1601,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_ANTIGRAVITY_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_ANTIGRAVITY_CHAT_COMPLETIONS_ENDPOINT"),
 			RequireKey:              envBool("ANTIGRAVITY_REQUIRE_API_KEY", firstEnv("ANTIGRAVITY_API_KEY", "AI_BRIDGE_ANTIGRAVITY_API_KEY") != ""),
-		}),
+		}, true),
 		"mimo": withDefaults("mimo", OpenAICompatibleConfig{
 			ProviderID:              firstEnv("AI_BRIDGE_MIMO_PROVIDER_ID"),
 			BaseURL:                 firstEnv("MIMO_BASE_URL", "AI_BRIDGE_MIMO_BASE_URL"),
@@ -869,7 +1610,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			ModelsEndpoint:          firstEnv("AI_BRIDGE_MIMO_MODELS_ENDPOINT"),
 			ChatCompletionsEndpoint: firstEnv("AI_BRIDGE_MIMO_CHAT_COMPLETIONS_ENDPOINT"),
 			RequireKey:              envBool("MIMO_REQUIRE_API_KEY", envBool("AI_BRIDGE_MIMO_REQUIRE_API_KEY", envBool("AI_BRIDGE_MIMO_ENABLED", false))),
-		}),
+		}, true),
 	}
 	for key, cfg := range configs {
 		if strings.TrimSpace(cfg.BaseURL) == "" {
@@ -883,7 +1624,7 @@ func LoadOpenAICompatibleConfigs() map[string]OpenAICompatibleConfig {
 			aliasCfg.ProviderID = firstNonEmpty(codexCfg.ProviderID, aliasCfg.ProviderID, "codexsale")
 			aliasCfg.DefaultModel = firstNonEmpty(codexCfg.DefaultModel, aliasCfg.DefaultModel, "gpt-5.6-sol")
 			aliasCfg.APIKey = firstNonEmpty(codexCfg.APIKey, aliasCfg.APIKey)
-			configs["codexsale"] = withDefaults("codexsale", aliasCfg)
+			configs["codexsale"] = withDefaults("codexsale", aliasCfg, true)
 		}
 	}
 	return configs
@@ -943,6 +1684,24 @@ func normalizeV1Base(value, fallback string) string {
 		return value
 	}
 	return value + "/v1"
+}
+
+func providerEnvKey(provider, suffix string) string {
+	provider = strings.ToUpper(strings.TrimSpace(provider))
+	provider = strings.ReplaceAll(provider, "-", "_")
+	return provider + "_" + suffix
+}
+
+func boolEnvDefault(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func firstEnv(keys ...string) string {

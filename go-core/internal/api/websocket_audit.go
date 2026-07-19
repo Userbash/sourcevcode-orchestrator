@@ -13,7 +13,6 @@ type websocketAuditRecord struct {
 	RemoteAddr      string         `json:"remote_addr,omitempty"`
 	SessionID       string         `json:"session_id,omitempty"`
 	Stage           string         `json:"stage"`
-	NormalizeChat   bool           `json:"normalize_chat"`
 	AutomaticAction string         `json:"automatic_action,omitempty"`
 	Raw             string         `json:"raw,omitempty"`
 	Error           string         `json:"error,omitempty"`
@@ -54,14 +53,13 @@ func (l *websocketAuditLog) capacity() int {
 	return l.limit
 }
 
-func (s *Server) recordWebsocketAudit(path string, remoteAddr string, sessionID string, normalizeChat bool, automaticAction string, raw []byte, envelope *transport.Envelope, err error, stage string) {
+func (s *Server) recordWebsocketAudit(path string, remoteAddr string, sessionID string, automaticAction string, raw []byte, envelope *transport.Envelope, err error, stage string) {
 	record := websocketAuditRecord{
 		Timestamp:       time.Now().UTC(),
 		Path:            path,
 		RemoteAddr:      remoteAddr,
 		SessionID:       sessionID,
 		Stage:           stage,
-		NormalizeChat:   normalizeChat,
 		AutomaticAction: automaticAction,
 		Raw:             string(raw),
 	}

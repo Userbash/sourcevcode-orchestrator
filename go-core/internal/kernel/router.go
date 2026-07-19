@@ -12,12 +12,13 @@ import (
 )
 
 type Router struct {
-	registry    *Registry
-	selector    *ModelSelector
-	runtime     *RuntimeManager
-	memory      *memory.Manager
-	routeMemory memory.RouteMemoryAgent
-	retriever   memory.RetrieverAgent
+	registry     *Registry
+	selector     *ModelSelector
+	runtime      *RuntimeManager
+	memory       *memory.Manager
+	routeMemory  memory.RouteMemoryAgent
+	retriever    memory.RetrieverAgent
+	liveRealtime *LiveRealtimeMetricsCollector
 }
 
 func NewRouter(registry *Registry, selector *ModelSelector) *Router {
@@ -34,6 +35,13 @@ func (r *Router) AttachMemoryManager(manager *memory.Manager) {
 	r.memory = manager
 	r.routeMemory = manager
 	r.retriever = manager
+}
+
+func (r *Router) AttachLiveRealtimeMetrics(metrics *LiveRealtimeMetricsCollector) {
+	if r == nil {
+		return
+	}
+	r.liveRealtime = metrics
 }
 
 func (r *Router) Route(task domain.Task, plan domain.ExecutionPlan) (domain.TaskAcceptance, agents.Agent, bool) {
@@ -257,8 +265,41 @@ func (r *Router) scoreAgent(ctx context.Context, agent agents.Agent, task domain
 	historyScore := r.historyScore(ctx, info, task)
 	runtimeScore := r.runtimeScore(info, task, capability)
 	retrievalScore := r.retrievalScore(ctx, info, task, complexity)
-	finalScore := 0.43*policyScore + 0.22*historyScore + 0.22*runtimeScore + 0.13*retrievalScore
+	realtimeScore := r.realtimeQualityScore(info)
+	finalScore := 0.39*policyScore + 0.18*historyScore + 0.20*runtimeScore + 0.11*retrievalScore + 0.12*realtimeScore
 	return finalScore * 100.0
+}
+
+func (r *Router) realtimeQualityScore(info domain.AgentInfo) float64 {
+	if r == nil || r.liveRealtime == nil {
+		return 0.5
+	}
+	summary, ok := r.liveRealtime.ModelSummary(info.Provider, info.ModelName)
+	if !ok {
+		return 0.5
+	}
+	transportScore := 0.35
+	switch {
+	case summary.NativeStreamSessions > 0:
+		transportScore = 1.0
+	case summary.PseudoRealtimeSessions > 0:
+		transportScore = 0.7
+	case summary.BufferedSessions > 0:
+		transportScore = 0.25
+	}
+	ttftScore := 1.0
+	if summary.AvgTimeToFirstTokenMS > 0 {
+		ttftScore = 1.0 / (1.0 + float64(summary.AvgTimeToFirstTokenMS)/600.0)
+	}
+	completionScore := 1.0
+	if summary.AvgTotalCompletionMS > 0 {
+		completionScore = 1.0 / (1.0 + float64(summary.AvgTotalCompletionMS)/4000.0)
+	}
+	failurePenalty := 1.0 - summary.FailureRate
+	if failurePenalty < 0 {
+		failurePenalty = 0
+	}
+	return 0.35*transportScore + 0.25*ttftScore + 0.20*completionScore + 0.20*failurePenalty
 }
 
 func (r *Router) policyScore(agent agents.Agent, task domain.Task, capability string, complexity domain.Complexity, risk RiskEvaluation) float64 {

@@ -296,9 +296,9 @@ func (s *Server) buildDispatcher() *transport.Dispatcher {
 		}
 		return workflowResponsePayload(ctx, record, "websocket"), nil
 	}
-	dispatcher.RegisterSingle("chat.submit", true, submit)
 	dispatcher.RegisterSingle("sourcecraft.delegate.get", true, submit)
 	dispatcher.RegisterSingle("sourcecraft.parallel_delegate.get", true, submit)
+	dispatcher.RegisterSingle("chat.submit", true, submit)
 
 	registerEventStream := func(action, streamName string, inventory bool) {
 		dispatcher.Register(action, "stream", true, func(ctx context.Context, request transport.Envelope, emit transport.Emitter) error {
@@ -365,23 +365,19 @@ func (s *Server) buildDispatcher() *transport.Dispatcher {
 	return dispatcher
 }
 
-func (s *Server) handleControlWebSocket(w http.ResponseWriter, r *http.Request) {
-	s.handleWebSocket(w, r, false, "")
-}
-
-func (s *Server) handleChatWebSocket(w http.ResponseWriter, r *http.Request) {
-	s.handleWebSocket(w, r, true, "")
-}
-
 func (s *Server) handleRuntimeWebSocket(w http.ResponseWriter, r *http.Request) {
-	s.handleWebSocket(w, r, false, "runtime.events.subscribe")
+	s.handleWebSocket(w, r, "runtime.events.subscribe")
 }
 
 func (s *Server) handleInventoryWebSocket(w http.ResponseWriter, r *http.Request) {
-	s.handleWebSocket(w, r, false, "providers.inventory.subscribe")
+	s.handleWebSocket(w, r, "providers.inventory.subscribe")
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, normalizeChat bool, automaticAction string) {
+func (s *Server) handleChatWebSocket(w http.ResponseWriter, r *http.Request) {
+	s.handleWebSocket(w, r, "")
+}
+
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automaticAction string) {
 	session := transport.NewSession(transport.DefaultWSSubprotocols, 5*time.Second, 30*time.Second, nil, nil, nil)
 	handshake, err := session.Accept(r.Context(), r.Header)
 	if err != nil {
@@ -452,9 +448,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, normali
 			}
 			return
 		}
-		envelope, err := transport.ParseEnvelope(raw, normalizeChat)
+		envelope, err := transport.ParseEnvelope(raw)
 		if err != nil {
-			s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, normalizeChat, automaticAction, raw, nil, err, "parse_error")
+			s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, automaticAction, raw, nil, err, "parse_error")
 			_ = send(transport.ErrorEnvelope(transport.Envelope{RequestID: handshake.SessionID}, transport.ErrorCode(err), err.Error(), nil))
 			continue
 		}
@@ -464,7 +460,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, normali
 				envelope.Ack = true
 			}
 		}
-		s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, normalizeChat, automaticAction, raw, &envelope, nil, "accepted")
+		s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, automaticAction, raw, &envelope, nil, "accepted")
 		if response, handled, controlErr := session.HandleControlFrame(connectionCtx, envelope); handled {
 			if controlErr != nil {
 				_ = send(transport.ErrorEnvelope(envelope, transport.ErrorCode(controlErr), controlErr.Error(), nil))

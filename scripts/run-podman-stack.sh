@@ -184,10 +184,6 @@ resolve_go_core_host_port() {
         printf '%s\n' "$GO_CORE_HOST_PORT"
         return 0
     fi
-    if port=$(read_go_core_host_port 2>/dev/null); then
-        printf '%s\n' "$port"
-        return 0
-    fi
     printf '%s\n' "$GO_CORE_CONTAINER_PORT"
 }
 

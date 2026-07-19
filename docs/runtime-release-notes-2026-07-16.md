@@ -21,7 +21,6 @@ This release consolidates the operational scripts, introduces versioned `go_core
 ## Runtime Version Visibility
 
 - `/health/full` now returns `kernel_version` with the running `version`, `commit`, and `build_time`.
-- `/control/ws` now emits an initial `kernel.version` system frame so internal tooling can validate the live build immediately after connect.
 - `go-core/cmd/orchestrator` logs the build metadata on startup and exposes a `version` subcommand.
 
 ## Verification and Automated Checks

@@ -1,6 +1,10 @@
 package kernel
 
 import (
+	"os"
+	"strings"
+	"time"
+
 	"sourcevcode-orchestrator/go-core/internal/agents"
 	"sourcevcode-orchestrator/go-core/internal/localmodels"
 	"sourcevcode-orchestrator/go-core/internal/modules"
@@ -28,6 +32,7 @@ func NewWithStore(store state.Store) *Orchestrator {
 	orchestrator := NewOrchestrator(registry, planner, router, store, runtimeHub, inventoryHub, providerRegistry)
 	selector.AttachMemoryManager(orchestrator.memory)
 	router.AttachMemoryManager(orchestrator.memory)
+	router.AttachLiveRealtimeMetrics(orchestrator.liveRealtime)
 
 	registerModule := func(name, kind, summary string) {
 		registry.RegisterModule(modules.NewBasicModule(name, kind, map[string]any{
@@ -64,6 +69,7 @@ func NewWithStore(store state.Store) *Orchestrator {
 	registry.RegisterModule(modules.NewCodeAutomationModule())
 	orchestrator.AttachLocalModelManager(localModelManager)
 	registerDefaultAgents(registry, configs)
+	attachDefaultCodingRuntime(orchestrator)
 
 	return orchestrator
 }
@@ -100,4 +106,67 @@ func registerDefaultAgents(registry *Registry, configs map[string]agents.OpenAIC
 	registerProviderAgent(agents.AgentDescriptor{ID: "research-mimo", Type: "research", Capabilities: []string{"research", "docs"}}, configs["mimo"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "coder-antigravity", Type: "coding", Capabilities: []string{"code", "fix", "review", "test"}}, configs["antigravity"])
 	registerProviderAgent(agents.AgentDescriptor{ID: "reviewer-antigravity", Type: "review", Capabilities: []string{"review", "security"}}, configs["antigravity"])
+}
+
+func attachDefaultCodingRuntime(orchestrator *Orchestrator) {
+	if orchestrator == nil || !codingRuntimeEnabledFromEnv() {
+		return
+	}
+	backend := strings.ToLower(strings.TrimSpace(os.Getenv("GO_CORE_CODING_RUNTIME_BACKEND")))
+	if backend == "" {
+		backend = "managed"
+	}
+	switch backend {
+	case "managed", "internal", "realtime":
+		name := strings.TrimSpace(os.Getenv("GO_CORE_CODING_RUNTIME_NAME"))
+		orchestrator.AttachExternalCodingRuntime(newManagedCodingRuntime(orchestrator, managedCodingRuntimeConfig{
+			Name:             name,
+			Backend:          backend,
+			AllowedProviders: parseEnvList(os.Getenv("GO_CORE_CODING_RUNTIME_ALLOWED_PROVIDERS")),
+			PlannerTimeout:   envRuntimeDuration("GO_CORE_CODING_RUNTIME_PLANNER_TIMEOUT", 45*time.Second),
+			CoderTimeout:     envRuntimeDuration("GO_CORE_CODING_RUNTIME_CODER_TIMEOUT", 120*time.Second),
+			ReviewerTimeout:  envRuntimeDuration("GO_CORE_CODING_RUNTIME_REVIEWER_TIMEOUT", 60*time.Second),
+			TesterTimeout:    envRuntimeDuration("GO_CORE_CODING_RUNTIME_TESTER_TIMEOUT", 90*time.Second),
+			RetrievalTimeout: envRuntimeDuration("GO_CORE_CODING_RUNTIME_RETRIEVAL_TIMEOUT", 30*time.Second),
+		}))
+	}
+}
+
+func codingRuntimeEnabledFromEnv() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("GO_CORE_CODING_RUNTIME_ENABLED")))
+	switch value {
+	case "", "1", "true", "yes", "on", "enabled":
+		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return true
+	}
+}
+
+func parseEnvList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			items = append(items, trimmed)
+		}
+	}
+	return items
+}
+
+func envRuntimeDuration(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return fallback
+	}
+	return duration
 }

@@ -11,6 +11,22 @@ import (
 	"sourcevcode-orchestrator/go-core/internal/state"
 )
 
+type workflowCountOnlyStore struct {
+	state.Store
+	countCalls int
+	listCalls  int
+}
+
+func (s *workflowCountOnlyStore) WorkflowCount(ctx context.Context) (int, error) {
+	s.countCalls++
+	return s.Store.WorkflowCount(ctx)
+}
+
+func (s *workflowCountOnlyStore) ListWorkflows(ctx context.Context) ([]domain.WorkflowRecord, error) {
+	s.listCalls++
+	return s.Store.ListWorkflows(ctx)
+}
+
 func TestStateSnapshotSyncsRuntimeStateFromProviderHealth(t *testing.T) {
 	store, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
@@ -76,6 +92,13 @@ func TestStateSnapshotSyncsRuntimeStateFromProviderHealth(t *testing.T) {
 	}
 	if providerHealth["mistral"].Status != "unavailable" {
 		t.Fatalf("providerHealth[mistral].Status = %q, want unavailable", providerHealth["mistral"].Status)
+	}
+	modelCapabilities, ok := snapshot["model_capabilities"].(map[string]map[string]domain.ModelCapabilities)
+	if !ok {
+		t.Fatalf("model_capabilities = %#v, want typed map", snapshot["model_capabilities"])
+	}
+	if !modelCapabilities["mistral"]["mistral-large-latest"].Streaming {
+		t.Fatalf("expected mistral-large-latest streaming capabilities, got %#v", modelCapabilities["mistral"]["mistral-large-latest"])
 	}
 }
 
@@ -177,5 +200,70 @@ func TestProviderHealthReturnsCachedProbeStateWithoutTriggeringProbe(t *testing.
 	}
 	if reporter.count.Load() != 1 {
 		t.Fatalf("probe count = %d, want cached read without new probe", reporter.count.Load())
+	}
+}
+
+func TestStateSnapshotUsesWorkflowCountWithoutListingWorkflows(t *testing.T) {
+	baseStore, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	if err := baseStore.SaveWorkflow(context.Background(), domain.WorkflowRecord{
+		Task:      domain.Task{ID: "snapshot-workflow"},
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveWorkflow() error = %v", err)
+	}
+	store := &workflowCountOnlyStore{Store: baseStore}
+	orchestrator := NewWithStore(store)
+	defer orchestrator.Close()
+
+	snapshot := orchestrator.StateSnapshot(context.Background())
+	if got := snapshot["workflow_count"]; got != 1 {
+		t.Fatalf("workflow_count = %#v, want 1", got)
+	}
+	if store.countCalls == 0 {
+		t.Fatalf("WorkflowCount() was not called")
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("ListWorkflows() called %d times, want 0", store.listCalls)
+	}
+}
+
+func TestRefreshInventoryPublishesWorkflowSummaryWithoutListingWorkflows(t *testing.T) {
+	baseStore, err := state.NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewFileStore() error = %v", err)
+	}
+	if err := baseStore.SaveWorkflow(context.Background(), domain.WorkflowRecord{
+		Task:      domain.Task{ID: "inventory-workflow"},
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveWorkflow() error = %v", err)
+	}
+	store := &workflowCountOnlyStore{Store: baseStore}
+	orchestrator := NewWithStore(store)
+	defer orchestrator.Close()
+
+	orchestrator.RefreshInventory(context.Background())
+	events := orchestrator.InventoryEventSnapshot("workflows")
+	if len(events) == 0 {
+		t.Fatalf("expected workflow inventory event")
+	}
+	payload := events[len(events)-1].Payload
+	if got := payload["count"]; got != 1 {
+		t.Fatalf("workflow summary count = %#v, want 1", got)
+	}
+	if payload["truncated"] != true {
+		t.Fatalf("workflow summary truncated = %#v, want true", payload["truncated"])
+	}
+	if _, ok := payload["items"]; ok {
+		t.Fatalf("unexpected workflow items payload: %#v", payload)
+	}
+	if store.countCalls == 0 {
+		t.Fatalf("WorkflowCount() was not called")
+	}
+	if store.listCalls != 0 {
+		t.Fatalf("ListWorkflows() called %d times, want 0", store.listCalls)
 	}
 }

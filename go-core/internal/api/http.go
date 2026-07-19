@@ -44,6 +44,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/health/full", s.handleHealthFull)
 	s.mux.HandleFunc("/diagnostics", s.handleDiagnostics)
 	s.mux.HandleFunc("/stats", s.handleStats)
+	s.mux.HandleFunc("/metrics", s.handleMetrics)
 	s.mux.HandleFunc("/dump_memory", s.handleDumpMemory)
 	s.mux.HandleFunc("/transport/audit", s.handleTransportAudit)
 	s.mux.HandleFunc("/providers/inventory", s.handleProviderInventory)
@@ -72,7 +73,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/sourcecraft/delegate", s.handleSourcecraftDelegate)
 	s.mux.HandleFunc("/sourcecraft/parallel_delegate", s.handleSourcecraftDelegate)
 	s.mux.HandleFunc("/socraticode/context_compaction/status", s.handleSocraticodeStatus)
-	s.mux.HandleFunc("/control/ws", s.handleControlWebSocket)
 	s.mux.HandleFunc("/chat/ws", s.handleChatWebSocket)
 	s.mux.HandleFunc("/ws/runtime/events", s.handleRuntimeWebSocket)
 	s.mux.HandleFunc("/ws/providers/inventory", s.handleInventoryWebSocket)
@@ -85,6 +85,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/tasks/", s.handleTaskByID)
 	s.mux.HandleFunc("/events/runtime", s.handleRuntimeEvents)
 	s.mux.HandleFunc("/events/inventory", s.handleInventoryEvents)
+	s.mux.HandleFunc("/runtime/realtime_metrics", s.handleRealtimeMetrics)
+	s.mux.HandleFunc("/runtime/sessions/", s.handleRuntimeSessionPath)
 }
 
 func (s *Server) handleDeliveryHealth(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +420,38 @@ func (s *Server) handleRuntimeEvents(w http.ResponseWriter, r *http.Request) {
 	s.streamEvents(w, r, history, subscription.Events)
 }
 
+func (s *Server) handleRealtimeMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	workflows, err := s.orchestrator.Workflows(r.Context())
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "error": err.Error()})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "data": aggregateRealtimeMetrics(workflows)})
+}
+
+func (s *Server) handleRuntimeSessionPath(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/runtime/sessions/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] != "events" {
+		s.writeJSON(w, http.StatusNotFound, map[string]any{"error": "runtime session route not found"})
+		return
+	}
+	sessionID := strings.TrimSpace(parts[0])
+	topic := "runtime_session:" + sessionID
+	history := s.orchestrator.RuntimeEventSnapshot(topic)
+	subscription := s.orchestrator.SubscribeRuntimeEvents(topic)
+	defer subscription.Close()
+	s.streamEvents(w, r, history, subscription.Events)
+}
+
 func (s *Server) handleInventoryEvents(w http.ResponseWriter, r *http.Request) {
 	topic := strings.TrimSpace(r.URL.Query().Get("topic"))
 	history := s.orchestrator.InventoryEventSnapshot(topic)
@@ -482,7 +516,7 @@ func writeSSE(w http.ResponseWriter, event domain.StreamEvent) error {
 func (s *Server) routeManifest() []map[string]any {
 	routes := []string{
 		"/health", "/api/health", "/health/full", "/health/local_models",
-		"/diagnostics", "/stats", "/dump_memory", "/transport/audit",
+		"/diagnostics", "/stats", "/metrics", "/dump_memory", "/transport/audit",
 		"/state", "/modules", "/agents", "/tasks", "/tasks/preview_plan", "/tasks/run_plan", "/tasks/{id}", "/tasks/{id}/checkpoint", "/tasks/{id}/resume_plan",
 		"/providers/inventory", "/providers/{provider}/inventory",
 		"/providers/runtime_inventory", "/providers/{provider}/runtime_inventory",
@@ -496,9 +530,10 @@ func (s *Server) routeManifest() []map[string]any {
 		"/runtime/routing_weights", "/runtime/providers/{provider}/probe",
 		"/runtime/agents/{agent_id}/probe", "/runtime/agents/{agent_id}/suppress",
 		"/runtime/agents/{agent_id}/recover",
+		"/runtime/realtime_metrics",
 		"/sourcecraft", "/sourcecraft/delegate", "/sourcecraft/parallel_delegate",
 		"/socraticode/context_compaction/status",
-		"/events/runtime", "/events/inventory", "/control/ws", "/chat/ws",
+		"/events/runtime", "/events/inventory", "/runtime/sessions/{session_id}/events",
 		"/ws/runtime/events", "/ws/providers/inventory",
 	}
 	manifest := make([]map[string]any, 0, len(routes))

@@ -11,19 +11,6 @@ import (
 	"time"
 )
 
-func TestParseEnvelopeCompactChat(t *testing.T) {
-	envelope, err := ParseEnvelope([]byte(`{"u":"implement feature","m":"session-1","r":"req-1"}`), true)
-	if err != nil {
-		t.Fatalf("ParseEnvelope: %v", err)
-	}
-	if envelope.Type != "command" || envelope.Action != "chat.submit" || envelope.RequestID != "req-1" {
-		t.Fatalf("unexpected envelope: %#v", envelope)
-	}
-	if envelope.Data["message"] != "implement feature" || envelope.Data["session_id"] != "session-1" {
-		t.Fatalf("unexpected compact data: %#v", envelope.Data)
-	}
-}
-
 func TestParseEnvelopeErrorTaxonomy(t *testing.T) {
 	tests := []struct {
 		name string
@@ -38,7 +25,7 @@ func TestParseEnvelopeErrorTaxonomy(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := ParseEnvelope([]byte(test.raw), false)
+			_, err := ParseEnvelope([]byte(test.raw))
 			if err == nil || ErrorCode(err) != test.code {
 				t.Fatalf("expected %s, got %v (%s)", test.code, err, ErrorCode(err))
 			}

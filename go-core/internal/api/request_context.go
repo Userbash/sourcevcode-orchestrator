@@ -53,48 +53,12 @@ func inferRequestMetadata(r *http.Request) (string, string, string, string) {
 	clientKind := strings.TrimSpace(r.Header.Get("X-Client-Kind"))
 	answeredFor := strings.TrimSpace(r.Header.Get("X-Answered-For"))
 
-	switch {
-	case strings.HasPrefix(r.URL.Path, "/chat/ws"):
-		transport = valueOrDefault(transport, "websocket")
-		origin = valueOrDefault(origin, "chat_ws")
-		clientKind = valueOrDefault(clientKind, "external_chat")
-		answeredFor = valueOrDefault(answeredFor, "user")
-	case strings.HasPrefix(r.URL.Path, "/control/ws"):
-		transport = valueOrDefault(transport, "websocket")
-		origin = valueOrDefault(origin, "control_ws")
-		clientKind = valueOrDefault(clientKind, "control_client")
-		answeredFor = valueOrDefault(answeredFor, "operator")
-	case strings.HasPrefix(r.URL.Path, "/ws/runtime/events"):
-		transport = valueOrDefault(transport, "websocket")
-		origin = valueOrDefault(origin, "runtime_ws")
-		clientKind = valueOrDefault(clientKind, "runtime_stream")
-		answeredFor = valueOrDefault(answeredFor, "observer")
-	case strings.HasPrefix(r.URL.Path, "/ws/providers/inventory"):
-		transport = valueOrDefault(transport, "websocket")
-		origin = valueOrDefault(origin, "inventory_ws")
-		clientKind = valueOrDefault(clientKind, "inventory_client")
-		answeredFor = valueOrDefault(answeredFor, "observer")
-	case strings.HasPrefix(r.URL.Path, "/events/"):
-		transport = valueOrDefault(transport, "sse")
-		origin = valueOrDefault(origin, "runtime_events")
-		clientKind = valueOrDefault(clientKind, "event_stream")
-		answeredFor = valueOrDefault(answeredFor, "observer")
-	case strings.HasPrefix(r.URL.Path, "/sourcecraft/delegate"), strings.HasPrefix(r.URL.Path, "/sourcecraft/parallel_delegate"):
-		transport = valueOrDefault(transport, "http")
-		origin = valueOrDefault(origin, "sourcecraft_http")
-		clientKind = valueOrDefault(clientKind, "external_chat")
-		answeredFor = valueOrDefault(answeredFor, "user")
-	case r.URL.Path == "/health" || r.URL.Path == "/health/full" || r.URL.Path == "/api/health":
-		transport = valueOrDefault(transport, "http")
-		origin = valueOrDefault(origin, "health_http")
-		clientKind = valueOrDefault(clientKind, "http_client")
-		answeredFor = valueOrDefault(answeredFor, "observer")
-	case strings.HasPrefix(r.URL.Path, "/tasks"):
-		transport = valueOrDefault(transport, "http")
-		origin = valueOrDefault(origin, "tasks_http")
-		clientKind = valueOrDefault(clientKind, "http_client")
-		answeredFor = valueOrDefault(answeredFor, "user")
-	default:
+	if profile, ok := routeProfileForRequest(r); ok {
+		transport = valueOrDefault(transport, profile.Transport)
+		origin = valueOrDefault(origin, profile.RequestOrigin)
+		clientKind = valueOrDefault(clientKind, profile.ClientKind)
+		answeredFor = valueOrDefault(answeredFor, profile.AnsweredFor)
+	} else {
 		transport = valueOrDefault(transport, "http")
 		origin = valueOrDefault(origin, "http_api")
 		clientKind = valueOrDefault(clientKind, "http_client")

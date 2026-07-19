@@ -256,6 +256,14 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context) ([]domain.WorkflowRec
 	return records, rows.Err()
 }
 
+func (s *PostgresStore) WorkflowCount(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM go_workflows`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (s *PostgresStore) GetSessionState(ctx context.Context, sessionID string, branch string) (domain.SessionState, bool, error) {
 	var stateJSON []byte
 	state := domain.SessionState{}
