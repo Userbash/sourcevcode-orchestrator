@@ -51,6 +51,8 @@ services:
       - "5672:5672"
       - "15672:15672"
     volumes:
+      - ./infra/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:Z,ro
+      - ./infra/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:Z,ro
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test:
@@ -90,6 +92,92 @@ services:
     networks:
       - hebrew_net
 
+  loki:
+    image: docker.io/grafana/loki:3.0.0
+    container_name: ai_bridge_loki
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/local-config.yaml:Z,ro
+      - loki_data:/loki
+    mem_limit: ${LOKI_MEMORY_LIMIT:-512m}
+    mem_reservation: ${LOKI_MEMORY_RESERVATION:-256m}
+    cpus: ${LOKI_CPU_LIMIT:-1.0}
+    pids_limit: ${LOKI_PIDS_LIMIT:-128}
+    networks:
+      - hebrew_net
+
+  promtail:
+    image: docker.io/grafana/promtail:3.0.0
+    container_name: ai_bridge_promtail
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./infra/loki/promtail-config.yaml:/etc/promtail/config.yml:Z,ro
+      - ./.runtime/logs:/var/log/runtime:Z,ro
+      - promtail_data:/tmp/promtail
+    mem_limit: ${PROMTAIL_MEMORY_LIMIT:-256m}
+    mem_reservation: ${PROMTAIL_MEMORY_RESERVATION:-128m}
+    cpus: ${PROMTAIL_CPU_LIMIT:-0.75}
+    pids_limit: ${PROMTAIL_PIDS_LIMIT:-96}
+    depends_on:
+      - loki
+    networks:
+      - hebrew_net
+
+  prometheus:
+    image: docker.io/prom/prometheus:v2.54.1
+    container_name: ai_bridge_prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:Z,ro
+      - prometheus_data:/prometheus
+    mem_limit: ${PROMETHEUS_MEMORY_LIMIT:-512m}
+    mem_reservation: ${PROMETHEUS_MEMORY_RESERVATION:-256m}
+    cpus: ${PROMETHEUS_CPU_LIMIT:-1.0}
+    pids_limit: ${PROMETHEUS_PIDS_LIMIT:-128}
+    depends_on:
+      - loki
+      - promtail
+    networks:
+      - hebrew_net
+
+  grafana:
+    build:
+      context: ./infra/grafana
+    image: localhost/ai-bridge-grafana:11.1.0
+    container_name: ai_bridge_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:Z,ro
+      - grafana_data:/var/lib/grafana
+    mem_limit: ${GRAFANA_MEMORY_LIMIT:-512m}
+    mem_reservation: ${GRAFANA_MEMORY_RESERVATION:-256m}
+    cpus: ${GRAFANA_CPU_LIMIT:-1.0}
+    pids_limit: ${GRAFANA_PIDS_LIMIT:-128}
+    depends_on:
+      - loki
+      - prometheus
+    networks:
+      - hebrew_net
+
   go_core:
     image: ${GO_CORE_IMAGE:-localhost/go-core:current}
     container_name: go_core
@@ -121,14 +209,54 @@ services:
       GO_CORE_RAG_EMBEDDING_MODEL: gemma4-12b-agentic-fable5:q4_k_m
       AI_KERNEL_REQUIRE_API_KEY: "false"
       AI_BRIDGE_AI_KERNEL_MANAGE_REMOTE: "false"
+      GO_CORE_LOG_FORMAT: json
+      GO_CORE_LOG_LEVEL: info
+      GO_CORE_LOG_PATH: /var/log/go-core/orchestrator.log
+      GO_CORE_LOG_BUFFER_SIZE: "${GO_CORE_LOG_BUFFER_SIZE:-64}"
+      GO_CORE_BOOTSTRAP_SAFE_MODE: "${GO_CORE_BOOTSTRAP_SAFE_MODE:-true}"
+      GO_CORE_PG_SKIP_SCHEMA_ENSURE: "${GO_CORE_PG_SKIP_SCHEMA_ENSURE:-true}"
+      GO_CORE_PG_SKIP_VECTOR_INDEXES: "${GO_CORE_PG_SKIP_VECTOR_INDEXES:-true}"
+      GO_CORE_PG_SKIP_VECTOR_EXTENSION: "${GO_CORE_PG_SKIP_VECTOR_EXTENSION:-true}"
+      GO_CORE_PG_MAX_OPEN_CONNS: "${GO_CORE_PG_MAX_OPEN_CONNS:-2}"
+      GO_CORE_PG_MAX_IDLE_CONNS: "${GO_CORE_PG_MAX_IDLE_CONNS:-1}"
+      GO_CORE_PG_SCHEMA_TIMEOUT: "${GO_CORE_PG_SCHEMA_TIMEOUT:-20s}"
+      AI_BRIDGE_GOMAXPROCS: "${GO_CORE_GOMAXPROCS:-1}"
+      GOMEMLIMIT: "${GO_CORE_GOMEMLIMIT:-640MiB}"
+      GOGC: "${GO_CORE_GOGC:-50}"
+      GO_CORE_PROVIDER_HEALTH_WORKERS: "${GO_CORE_PROVIDER_HEALTH_WORKERS:-1}"
+      GO_CORE_PROVIDER_HEALTH_QUEUE_SIZE: "${GO_CORE_PROVIDER_HEALTH_QUEUE_SIZE:-2}"
+      GO_CORE_CPU_RESERVE: "${GO_CORE_CPU_RESERVE:-1}"
+      GO_CORE_MAX_PARALLELISM: "${GO_CORE_MAX_PARALLELISM:-1}"
+      GO_CORE_MAX_CONCURRENT_TASKS: "${GO_CORE_MAX_CONCURRENT_TASKS:-1}"
+      GO_CORE_MAX_CONCURRENT_PER_AGENT: "${GO_CORE_MAX_CONCURRENT_PER_AGENT:-1}"
+      GO_CORE_MAX_CONCURRENT_PER_MODEL: "${GO_CORE_MAX_CONCURRENT_PER_MODEL:-1}"
+      GO_CORE_SUBMIT_WORKERS: "${GO_CORE_SUBMIT_WORKERS:-1}"
+      GO_CORE_RESULT_WORKERS: "${GO_CORE_RESULT_WORKERS:-1}"
+      GO_CORE_AGENT_WORKERS: "${GO_CORE_AGENT_WORKERS:-1}"
+      GO_CORE_PROVIDER_MAX_CONCURRENT_PER_KEY: "${GO_CORE_PROVIDER_MAX_CONCURRENT_PER_KEY:-1}"
+      GO_CORE_PROVIDER_MAX_CONCURRENT_PER_MODEL: "${GO_CORE_PROVIDER_MAX_CONCURRENT_PER_MODEL:-1}"
+      GO_CORE_SELFLEARN_ENABLED: "${GO_CORE_SELFLEARN_ENABLED:-false}"
+      GO_CORE_CODING_RUNTIME_ENABLED: "${GO_CORE_CODING_RUNTIME_ENABLED:-false}"
+      GO_CORE_SUBMIT_MODE: "${GO_CORE_SUBMIT_MODE:-sync}"
+      GO_CORE_MESSAGE_BUS_BACKEND: "${GO_CORE_MESSAGE_BUS_BACKEND:-memory}"
+      AI_BRIDGE_MESSAGE_BUS_BACKEND: "${GO_CORE_MESSAGE_BUS_BACKEND:-memory}"
+      AI_BRIDGE_MEMORY_ENABLED: "${AI_BRIDGE_MEMORY_ENABLED:-false}"
     ports:
       - "8010:8010"
     volumes:
       - core_memory:/app/db_backups
+      - ./.runtime/logs/go_core:/var/log/go-core:Z
+    mem_limit: ${GO_CORE_MEMORY_LIMIT:-1024m}
+    mem_reservation: ${GO_CORE_MEMORY_RESERVATION:-512m}
+    cpus: ${GO_CORE_CPU_LIMIT:-1.5}
+    pids_limit: ${GO_CORE_PIDS_LIMIT:-256}
     depends_on:
       - postgresql
       - rabbitmq
       - ai_kernel
+      - loki
+      - promtail
+      - prometheus
     healthcheck:
       test:
         - CMD
@@ -140,6 +268,7 @@ services:
       start_period: 30s
     networks:
       - hebrew_net
+
 networks:
   hebrew_net:
     name: hebrew-net
@@ -158,3 +287,11 @@ volumes:
   core_memory:
     name: hebrew_core_memory
     external: true
+  loki_data:
+    name: ai_bridge_loki_data
+  promtail_data:
+    name: ai_bridge_promtail_data
+  prometheus_data:
+    name: ai_bridge_prometheus_data
+  grafana_data:
+    name: ai_bridge_grafana_data

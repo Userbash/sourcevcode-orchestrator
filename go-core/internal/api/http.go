@@ -1,16 +1,20 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"sourcevcode-orchestrator/go-core/internal/buildinfo"
 	"sourcevcode-orchestrator/go-core/internal/domain"
 	"sourcevcode-orchestrator/go-core/internal/kernel"
+	"sourcevcode-orchestrator/go-core/internal/observability"
 	"sourcevcode-orchestrator/go-core/internal/transport"
 )
 
@@ -35,7 +39,7 @@ func NewServer(orchestrator *kernel.Orchestrator, requiredRoutes []string) *Serv
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.withMigrationHeaders(s.withRequestContext(s.mux))
+	return s.withMigrationHeaders(s.withRequestContext(s.withAccessLog(s.mux)))
 }
 
 func (s *Server) routes() {
@@ -43,6 +47,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/health", s.handleHealth)
 	s.mux.HandleFunc("/health/full", s.handleHealthFull)
 	s.mux.HandleFunc("/diagnostics", s.handleDiagnostics)
+	s.mux.HandleFunc("/diagnostics/logs", s.handleDiagnosticLogs)
 	s.mux.HandleFunc("/stats", s.handleStats)
 	s.mux.HandleFunc("/metrics", s.handleMetrics)
 	s.mux.HandleFunc("/dump_memory", s.handleDumpMemory)
@@ -249,6 +254,19 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	layers := r.URL.Query()["layer"]
 	matrixOnly := strings.EqualFold(r.URL.Query().Get("matrix_only"), "true")
 	s.writeJSON(w, http.StatusOK, s.diagnosticsSnapshot(r.Context(), layers, matrixOnly))
+}
+
+func (s *Server) handleDiagnosticLogs(w http.ResponseWriter, r *http.Request) {
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 5000 {
+			limit = parsed
+		}
+	}
+	payload := addResponseMetadata(r.Context(), observability.Diagnostics(limit))
+	payload["status"] = "ok"
+	payload["limit"] = limit
+	s.writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleState(w http.ResponseWriter, _ *http.Request) {
@@ -629,4 +647,95 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+type accessLogResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *accessLogResponseWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *accessLogResponseWriter) Write(payload []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(payload)
+	w.bytes += n
+	return n, err
+}
+
+func (w *accessLogResponseWriter) Flush() {
+	flusher, ok := w.ResponseWriter.(http.Flusher)
+	if !ok {
+		return
+	}
+	flusher.Flush()
+}
+
+func (w *accessLogResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("wrapped response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (s *Server) withAccessLog(next http.Handler) http.Handler {
+	logger := observability.Logger("http")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &accessLogResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		meta := metadataFromContext(r.Context())
+		attrs := []any{
+			"request_id", meta.RequestID,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"query", r.URL.RawQuery,
+			"status", status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"response_bytes", recorder.bytes,
+			"remote_addr", clientRemoteAddr(r),
+			"transport", meta.Transport,
+			"request_origin", meta.RequestOrigin,
+			"client_kind", meta.ClientKind,
+			"answered_for", meta.AnsweredFor,
+		}
+		if meta.Principal != "" {
+			attrs = append(attrs, "principal", meta.Principal)
+		}
+		if status >= http.StatusInternalServerError {
+			logger.Error("http request completed", attrs...)
+		} else if status >= http.StatusBadRequest {
+			logger.Warn("http request completed", attrs...)
+		} else {
+			logger.Info("http request completed", attrs...)
+		}
+	})
+}
+
+func clientRemoteAddr(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-Ip")); realIP != "" {
+		return realIP
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }

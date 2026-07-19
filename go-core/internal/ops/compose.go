@@ -19,6 +19,11 @@ type ComposeCommand struct {
 	Args []string
 }
 
+const (
+	defaultComposeFileName = "docker-compose.yml"
+	legacyComposeFileName  = "docker-compose.ai.yml"
+)
+
 func DetectComposeCommand(ctx context.Context) (ComposeCommand, error) {
 	candidates := []ComposeCommand{
 		{Name: "podman", Args: []string{"compose"}},
@@ -39,12 +44,18 @@ func DetectComposeCommand(ctx context.Context) (ComposeCommand, error) {
 func ResolveComposeFilePath(projectRoot string, composeFile string) (string, error) {
 	resolvedFile := strings.TrimSpace(composeFile)
 	if resolvedFile == "" {
-		resolvedFile = "docker-compose.ai.yml"
+		resolvedFile = defaultComposeFileName
 	}
 	if !filepath.IsAbs(resolvedFile) {
 		resolvedFile = filepath.Join(projectRoot, resolvedFile)
 	}
 	if _, err := os.Stat(resolvedFile); err != nil {
+		if filepath.Base(resolvedFile) == legacyComposeFileName {
+			fallback := filepath.Join(projectRoot, defaultComposeFileName)
+			if _, fallbackErr := os.Stat(fallback); fallbackErr == nil {
+				return fallback, nil
+			}
+		}
 		return "", fmt.Errorf("compose file not found: %s", resolvedFile)
 	}
 	return resolvedFile, nil
@@ -65,7 +76,7 @@ func ComposeUp(ctx context.Context, projectRoot string, composeFile string, serv
 }
 
 func EnsureCoreInfra(ctx context.Context, projectRoot string, composeFile string, attempts int, delay time.Duration) error {
-	composeErr := ComposeUp(ctx, projectRoot, composeFile, "db", "rabbitmq")
+	composeErr := ComposeUp(ctx, projectRoot, composeFile, "postgresql", "rabbitmq")
 	if composeErr != nil {
 		if err := EnsureCoreInfraDirectPodman(ctx, projectRoot); err != nil {
 			return fmt.Errorf("compose startup failed: %v; direct podman fallback failed: %w", composeErr, err)
@@ -98,7 +109,7 @@ func EnsureCoreInfraDirectPodman(ctx context.Context, projectRoot string) error 
 	if err := ensureDirectPodmanPostgres(ctx, projectRoot); err != nil {
 		return err
 	}
-	if err := ensureDirectPodmanRabbitMQ(ctx); err != nil {
+	if err := ensureDirectPodmanRabbitMQ(ctx, projectRoot); err != nil {
 		return err
 	}
 	return nil
@@ -140,12 +151,14 @@ func ensureDirectPodmanPostgres(ctx context.Context, projectRoot string) error {
 	return runMust(ctx, "podman", args...)
 }
 
-func ensureDirectPodmanRabbitMQ(ctx context.Context) error {
+func ensureDirectPodmanRabbitMQ(ctx context.Context, projectRoot string) error {
 	const containerName = "ai_bridge_rabbitmq"
 	if ensureContainerRunning(ctx, containerName) {
 		return nil
 	}
 	rabbit := app.ResolveRabbitMQConnectionInfo()
+	configPath := filepath.Join(projectRoot, "infra", "rabbitmq", "rabbitmq.conf")
+	pluginsPath := filepath.Join(projectRoot, "infra", "rabbitmq", "enabled_plugins")
 	args := []string{
 		"run", "-d",
 		"--name", containerName,
@@ -154,6 +167,8 @@ func ensureDirectPodmanRabbitMQ(ctx context.Context) error {
 		"-p", "15672:15672",
 		"-e", "RABBITMQ_DEFAULT_USER=" + rabbit.User,
 		"-e", "RABBITMQ_DEFAULT_PASS=" + rabbit.Password,
+		"-v", configPath + ":/etc/rabbitmq/rabbitmq.conf:ro,z",
+		"-v", pluginsPath + ":/etc/rabbitmq/enabled_plugins:ro,z",
 		"docker.io/library/rabbitmq:3-management",
 	}
 	return runMust(ctx, "podman", args...)

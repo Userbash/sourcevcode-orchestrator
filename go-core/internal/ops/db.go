@@ -57,7 +57,7 @@ func verifyRequiredExtensions(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if !available {
-		return fmt.Errorf("pgvector is not installed on this PostgreSQL server; use the pgvector-enabled database from docker-compose.ai.yml or install pgvector packages before bootstrap")
+		return fmt.Errorf("pgvector is not installed on this PostgreSQL server; use the pgvector-enabled database from docker-compose.yml or install pgvector packages before bootstrap")
 	}
 
 	var enabled bool
