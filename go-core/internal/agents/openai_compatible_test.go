@@ -165,6 +165,262 @@ func TestOpenAICompatibleAgentUsesWorkspaceTools(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleAgentStreamsNativeChatCompletions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var request chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !request.Stream {
+			t.Fatalf("expected streaming request, got %#v", request)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk-1\",\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"chunk-1\",\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":7}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{
+		ID: "planner", Type: "planning", Capabilities: []string{"plan"},
+	}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", APIKey: "secret",
+		DefaultModel: "stream-model", RequireKey: true, Timeout: time.Second,
+		NativeStreaming:     true,
+		AllowPseudoRealtime: true,
+	})
+
+	deltas, results, err := agent.ExecuteStream(context.Background(), domain.Task{
+		ID:                 "stream-task",
+		Type:               domain.TaskTypePlan,
+		RequiredCapability: "plan",
+		Input:              domain.TaskInput{Description: "Stream a plan"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tokens []string
+	var final domain.AgentResult
+	for delta := range deltas {
+		if delta.Kind == domain.AgentDeltaToken {
+			tokens = append(tokens, delta.Content)
+		}
+	}
+	for result := range results {
+		final = result
+	}
+	if strings.Join(tokens, "") != "hello world" {
+		t.Fatalf("unexpected streamed tokens: %q", strings.Join(tokens, ""))
+	}
+	if final.Status != domain.TaskStatusDone {
+		t.Fatalf("unexpected final status: %s", final.Status)
+	}
+	if final.Output.Summary != "hello world" {
+		t.Fatalf("unexpected final summary: %q", final.Output.Summary)
+	}
+	metrics, ok := final.Output.Artifacts["realtime_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected realtime_metrics artifact, got %#v", final.Output.Artifacts)
+	}
+	if _, ok := metrics["time_to_first_token_ms"]; !ok {
+		t.Fatalf("expected time_to_first_token_ms, got %#v", metrics)
+	}
+	if _, ok := metrics["time_to_first_result_ms"]; !ok {
+		t.Fatalf("expected time_to_first_result_ms, got %#v", metrics)
+	}
+	if _, ok := metrics["total_completion_ms"]; !ok {
+		t.Fatalf("expected total_completion_ms, got %#v", metrics)
+	}
+}
+
+func TestOpenAICompatibleAgentStreamsWorkspaceToolDeltas(t *testing.T) {
+	repo := t.TempDir()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var request chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch requests.Add(1) {
+		case 1:
+			_, _ = w.Write([]byte("data: {\"id\":\"chunk-tools\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chunk-tools\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"arguments\":\"{\\\"path\\\":\\\"notes.txt\\\",\"}}]}}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chunk-tools\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"content\\\":\\\"hello from stream\\\"}\"}},{\"index\":1,\"id\":\"call-2\",\"type\":\"function\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":[\\\"pwd\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"total_tokens\":18}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		case 2:
+			_, _ = w.Write([]byte("data: {\"id\":\"chunk-final\",\"choices\":[{\"delta\":{\"content\":\"workspace updated\"},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":30}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			t.Fatalf("unexpected extra request")
+		}
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{
+		ID: "coder", Type: "coding", Capabilities: []string{"code"},
+	}, OpenAICompatibleConfig{
+		Provider: "test", BaseURL: server.URL + "/v1", APIKey: "secret",
+		DefaultModel: "stream-model", RequireKey: true, Timeout: time.Second,
+		NativeStreaming: true, AllowPseudoRealtime: true,
+	})
+
+	deltas, results, err := agent.ExecuteStream(context.Background(), domain.Task{
+		ID: "stream-workspace", Type: domain.TaskTypeCode, RequiredCapability: "code",
+		Input:   domain.TaskInput{Description: "Update workspace in realtime"},
+		Context: domain.TaskContext{RepoPath: repo},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seenKinds := map[domain.AgentDeltaKind]bool{}
+	var tokenText strings.Builder
+	for delta := range deltas {
+		seenKinds[delta.Kind] = true
+		if delta.Kind == domain.AgentDeltaToken {
+			tokenText.WriteString(delta.Content)
+		}
+	}
+	var final domain.AgentResult
+	for result := range results {
+		final = result
+	}
+
+	if !seenKinds[domain.AgentDeltaToolStarted] || !seenKinds[domain.AgentDeltaToolFinished] {
+		t.Fatalf("expected tool deltas, got %#v", seenKinds)
+	}
+	if !seenKinds[domain.AgentDeltaPatchPreview] || !seenKinds[domain.AgentDeltaPatchApplyFinish] {
+		t.Fatalf("expected patch deltas, got %#v", seenKinds)
+	}
+	if !seenKinds[domain.AgentDeltaCommandStarted] || !seenKinds[domain.AgentDeltaCommandFinished] {
+		t.Fatalf("expected command deltas, got %#v", seenKinds)
+	}
+	if tokenText.String() != "workspace updated" {
+		t.Fatalf("unexpected streamed tokens: %q", tokenText.String())
+	}
+	if final.Status != domain.TaskStatusDone || final.Output.Summary != "workspace updated" {
+		t.Fatalf("unexpected final result: %#v", final)
+	}
+	if len(final.Output.FilesChanged) != 1 || final.Output.FilesChanged[0] != "notes.txt" {
+		t.Fatalf("unexpected files changed: %#v", final.Output.FilesChanged)
+	}
+	if len(final.Output.CommandsRun) != 1 || final.Output.CommandsRun[0] != "pwd" {
+		t.Fatalf("unexpected commands run: %#v", final.Output.CommandsRun)
+	}
+	body, err := os.ReadFile(filepath.Join(repo, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "hello from stream" {
+		t.Fatalf("unexpected file contents: %q", string(body))
+	}
+	metrics, ok := final.Output.Artifacts["realtime_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected realtime_metrics artifact, got %#v", final.Output.Artifacts)
+	}
+	if _, ok := metrics["time_to_first_tool_ms"]; !ok {
+		t.Fatalf("expected time_to_first_tool_ms, got %#v", metrics)
+	}
+	if _, ok := metrics["time_to_first_patch_ms"]; !ok {
+		t.Fatalf("expected time_to_first_patch_ms, got %#v", metrics)
+	}
+	if toolsExecuted, ok := metrics["tools_executed"].(int); !ok || toolsExecuted < 1 {
+		t.Fatalf("expected tools_executed metric, got %#v", metrics)
+	}
+	if patchesApplied, ok := metrics["patches_applied"].(int); !ok || patchesApplied < 1 {
+		t.Fatalf("expected patches_applied metric, got %#v", metrics)
+	}
+}
+
+func TestOpenAICompatibleAgentFallsBackWhenNativeStreamingDisabled(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		requests++
+		var request chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Stream {
+			t.Fatalf("did not expect native streaming request, got %#v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"completion-buffered","choices":[{"message":{"role":"assistant","content":"buffered fallback"},"finish_reason":"stop"}],"usage":{"total_tokens":4}}`))
+	}))
+	defer server.Close()
+
+	agent := NewOpenAICompatibleAgent(AgentDescriptor{
+		ID: "planner", Type: "planning", Capabilities: []string{"plan"},
+	}, OpenAICompatibleConfig{
+		Provider:            "test",
+		BaseURL:             server.URL + "/v1",
+		APIKey:              "secret",
+		DefaultModel:        "stream-model",
+		RequireKey:          true,
+		Timeout:             time.Second,
+		NativeStreaming:     false,
+		AllowPseudoRealtime: true,
+	})
+
+	deltas, results, err := agent.ExecuteStream(context.Background(), domain.Task{
+		ID:                 "stream-disabled",
+		Type:               domain.TaskTypePlan,
+		RequiredCapability: "plan",
+		Input:              domain.TaskInput{Description: "Fallback to buffered execution"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var started domain.AgentDelta
+	var partials []string
+	for delta := range deltas {
+		if delta.Kind == domain.AgentDeltaStarted {
+			started = delta
+		}
+		if delta.Kind == domain.AgentDeltaPartialResult || delta.Kind == domain.AgentDeltaFinalResult {
+			partials = append(partials, delta.Content)
+		}
+	}
+
+	var final domain.AgentResult
+	for result := range results {
+		final = result
+	}
+
+	if requests != 1 {
+		t.Fatalf("unexpected request count: %d", requests)
+	}
+	if started.Metadata["transport"] != "pseudo_realtime" {
+		t.Fatalf("unexpected transport metadata: %#v", started.Metadata)
+	}
+	if native, ok := started.Metadata["native_streaming"].(bool); !ok || native {
+		t.Fatalf("unexpected native streaming metadata: %#v", started.Metadata)
+	}
+	if len(partials) != 2 || partials[0] != "buffered fallback" || partials[1] != "buffered fallback" {
+		t.Fatalf("unexpected buffered deltas: %#v", partials)
+	}
+	if final.Status != domain.TaskStatusDone || final.Output.Summary != "buffered fallback" {
+		t.Fatalf("unexpected final result: %#v", final)
+	}
+}
+
 func TestOpenAICompatibleAgentReportsProviderFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -425,6 +681,42 @@ func TestPreferredCloudProviderRespectsOverride(t *testing.T) {
 		"codexsale": {Provider: "codexsale", BaseURL: "https://codex.sale/v1", DefaultModel: "gpt-5.6-sol", APIKey: "secret", RequireKey: true},
 	}); got != "codexsale" {
 		t.Fatalf("PreferredCloudProvider()=%q want %q", got, "codexsale")
+	}
+}
+
+func TestLoadOpenAICompatibleConfigsSetsStreamingFlagsFromEnv(t *testing.T) {
+	t.Setenv("AI_BRIDGE_LOCAL_LLM_URL", "http://127.0.0.1:11434/v1")
+	t.Setenv("AI_BRIDGE_LOCAL_LLM_MODEL", "qwen2.5-coder")
+	t.Setenv("LOCAL_NATIVE_STREAMING", "false")
+	t.Setenv("LOCAL_ALLOW_PSEUDO_REALTIME", "false")
+	t.Setenv("OPENAI_NATIVE_STREAMING", "true")
+	t.Setenv("OPENAI_ALLOW_PSEUDO_REALTIME", "true")
+	t.Setenv("OPENAI_API_KEY", "secret")
+	t.Setenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+	t.Setenv("OPENAI_MODEL", "gpt-5.5")
+
+	configs := LoadOpenAICompatibleConfigs()
+
+	localCfg, ok := configs["local"]
+	if !ok {
+		t.Fatal("expected local config")
+	}
+	if localCfg.NativeStreaming {
+		t.Fatalf("expected local native streaming to be disabled: %#v", localCfg)
+	}
+	if localCfg.AllowPseudoRealtime {
+		t.Fatalf("expected local pseudo realtime to be disabled: %#v", localCfg)
+	}
+
+	openaiCfg, ok := configs["openai"]
+	if !ok {
+		t.Fatal("expected openai config")
+	}
+	if !openaiCfg.NativeStreaming {
+		t.Fatalf("expected openai native streaming to be enabled: %#v", openaiCfg)
+	}
+	if !openaiCfg.AllowPseudoRealtime {
+		t.Fatalf("expected openai pseudo realtime to be enabled: %#v", openaiCfg)
 	}
 }
 

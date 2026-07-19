@@ -285,7 +285,28 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "data": s.orchestrator.StateSnapshot(r.Context())})
+	workflows, err := s.orchestrator.Workflows(r.Context())
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]any{"status": "error", "error": err.Error()})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "data": map[string]any{"state": s.orchestrator.StateSnapshot(r.Context()), "realtime_metrics": aggregateRealtimeMetrics(workflows), "live_realtime_metrics": s.orchestrator.LiveRealtimeMetricsSnapshot()}})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	workflows, err := s.orchestrator.Workflows(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	report := buildRealtimeMetricsReport(workflows)
+	liveSnapshot := s.orchestrator.LiveRealtimeMetricsSnapshot()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(formatRealtimeMetricsPrometheus(report) + formatLiveRealtimeMetricsPrometheus(liveSnapshot)))
 }
 
 func (s *Server) handleDumpMemory(w http.ResponseWriter, r *http.Request) {
@@ -321,79 +342,18 @@ func (s *Server) handleSocraticodeStatus(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) withMigrationHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if action, subscribe := legacyControlAction(r.URL.Path); action != "" {
-			w.Header().Set("Deprecation", "true")
-			w.Header().Set("Link", "</control/ws>; rel=alternate")
-			w.Header().Set("X-Control-Transport", "websocket-primary; compatibility=http")
-			w.Header().Set("X-Control-WS-Endpoint", "/control/ws")
+		if action := migrationActionForPath(r); action != "" {
 			w.Header().Set("X-Control-WS-Action", action)
-			if subscribe != "" {
-				w.Header().Set("X-Control-WS-Subscribe", subscribe)
-			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func legacyControlAction(path string) (string, string) {
-	switch {
-	case path == "/providers/inventory":
-		return "providers.inventory.get", "providers.inventory.subscribe"
-	case path == "/providers/runtime_inventory":
-		return "providers.runtime_inventory.get", "providers.runtime_inventory.subscribe"
-	case path == "/providers/models/index":
-		return "providers.models.index.get", "providers.models.index.subscribe"
-	case strings.HasPrefix(path, "/providers/models/index/"):
-		return "providers.models.lookup.get", ""
-	case path == "/providers/ai_kernel/gate":
-		return "providers.ai_kernel.gate.get", ""
-	case path == "/providers/ai_kernel/ensure":
-		return "providers.ai_kernel.ensure", ""
-	case path == "/providers/local_llm/residents":
-		return "providers.local_llm.residents.get", ""
-	case path == "/providers/local_llm/connect":
-		return "providers.local_llm.connect", ""
-	case path == "/providers/local_llm/disconnect":
-		return "providers.local_llm.disconnect", ""
-	case path == "/providers/local_llm/warm":
-		return "providers.local_llm.warm", ""
-	case path == "/tasks/preview_plan":
-		return "tasks.plan.preview", ""
-	case path == "/tasks/run_plan":
-		return "tasks.plan.run", ""
-	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/checkpoint"):
-		return "tasks.plan.checkpoint.get", ""
-	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/resume_plan"):
-		return "tasks.plan.resume", ""
-	case path == "/runtime/routing_weights":
-		return "runtime.routing_weights.get", ""
-	case strings.HasPrefix(path, "/runtime/providers/") && strings.HasSuffix(path, "/probe"):
-		return "runtime.provider.probe", ""
-	case strings.HasPrefix(path, "/runtime/agents/") && strings.HasSuffix(path, "/probe"):
-		return "runtime.agent.probe", ""
-	case strings.HasPrefix(path, "/runtime/agents/") && strings.HasSuffix(path, "/suppress"):
-		return "runtime.agent.suppress", ""
-	case strings.HasPrefix(path, "/runtime/agents/") && strings.HasSuffix(path, "/recover"):
-		return "runtime.agent.recover", ""
-	case path == "/health/local_models":
-		return "health.local_models.get", ""
-	case path == "/sourcecraft":
-		return "sourcecraft.status.get", ""
-	case path == "/sourcecraft/delegate":
-		return "sourcecraft.delegate.get", "sourcecraft.delegate"
-	case path == "/sourcecraft/parallel_delegate":
-		return "sourcecraft.parallel_delegate.get", "sourcecraft.parallel_delegate"
-	case path == "/transport/audit":
-		return "transport.audit.get", ""
-	case path == "/diagnostics":
-		return "diagnostics.get", "diagnostics.subscribe"
-	case strings.HasSuffix(path, "/inventory"):
-		return "providers.inventory.provider.get", ""
-	case strings.HasSuffix(path, "/runtime_inventory"):
-		return "providers.runtime_inventory.provider.get", ""
-	default:
-		return "", ""
+func migrationActionForPath(r *http.Request) string {
+	if profile, ok := routeProfileForRequest(r); ok {
+		return profile.MigrationAction
 	}
+	return ""
 }
 
 func protocolErrorBody(err error) map[string]any {

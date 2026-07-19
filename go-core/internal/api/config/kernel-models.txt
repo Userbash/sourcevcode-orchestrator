@@ -3,3 +3,4 @@
 ai_kernel:gemma4-12b-agentic-fable5:q4_k_m
 codexsale:claude-sonnet-4-6
 local:test-model
+openai:gpt-5.5

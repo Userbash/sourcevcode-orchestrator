@@ -9,12 +9,16 @@ import (
 )
 
 type stubInventory struct {
-	snapshot domain.ProviderCatalogSnapshot
-	refresh  int
+	snapshot  domain.ProviderCatalogSnapshot
+	refresh   int
+	refreshFn func(context.Context)
 }
 
-func (s *stubInventory) RefreshIfStale(context.Context) {
+func (s *stubInventory) RefreshIfStale(ctx context.Context) {
 	s.refresh++
+	if s.refreshFn != nil {
+		s.refreshFn(ctx)
+	}
 }
 
 func (s *stubInventory) Snapshot(provider string) (domain.ProviderCatalogSnapshot, bool) {
@@ -70,4 +74,28 @@ func TestDiscoveryServiceRefreshFailsWhenTargetMissing(t *testing.T) {
 	if _, err := service.Refresh(context.Background()); err == nil {
 		t.Fatal("Refresh() error = nil, want target model missing error")
 	}
+}
+
+func TestDiscoveryServiceStartDoesNotBlockOnInitialRefresh(t *testing.T) {
+	block := make(chan struct{})
+	inventory := &stubInventory{
+		snapshot: domain.ProviderCatalogSnapshot{Provider: "ai_kernel"},
+		refreshFn: func(ctx context.Context) {
+			select {
+			case <-block:
+			case <-ctx.Done():
+			}
+		},
+	}
+	service := NewDiscoveryService(inventory, DiscoveryConfig{RefreshInterval: time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startedAt := time.Now()
+	service.Start(ctx)
+	if elapsed := time.Since(startedAt); elapsed > 100*time.Millisecond {
+		t.Fatalf("Start() blocked for %s", elapsed)
+	}
+
+	close(block)
 }

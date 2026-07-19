@@ -371,12 +371,9 @@ func (s *Server) sourcecraftStatus() map[string]any {
 func (s *Server) transportAudit() map[string]any {
 	return map[string]any{
 		"status":               "ok",
-		"primary_transport":    "websocket",
-		"control_ws_endpoint":  "/control/ws",
-		"chat_ws_endpoint":     "/chat/ws",
+		"primary_transport":    "http",
 		"sse_compatibility":    []string{"/events/runtime", "/events/inventory"},
 		"actions":              s.dispatcher.Actions(),
-		"supported_protocols":  []string{"chat.v1", "chat.json"},
 		"python_runtime_calls": 0,
 		"inbound_ws_audit": map[string]any{
 			"capacity": s.wsAudit.capacity(),

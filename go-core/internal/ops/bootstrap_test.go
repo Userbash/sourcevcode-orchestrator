@@ -49,7 +49,7 @@ func TestRedactCredentialURLMasksUserInfo(t *testing.T) {
 	}{
 		{name: "postgres", input: "postgresql://bridge:super-secret@127.0.0.1:5432/ai_bridge?sslmode=disable", want: "postgresql://%5Bredacted%5D@127.0.0.1:5432/ai_bridge?sslmode=disable"},
 		{name: "amqp", input: "amqp://bridge:super-secret@127.0.0.1:5672/", want: "amqp://%5Bredacted%5D@127.0.0.1:5672/"},
-		{name: "no credentials", input: "http://127.0.0.1:8000/health", want: "http://127.0.0.1:8000/health"},
+		{name: "no credentials", input: "http://127.0.0.1:8010/health", want: "http://127.0.0.1:8010/health"},
 	}
 
 	for _, tc := range tests {
@@ -76,7 +76,7 @@ func TestPrintBootstrapSummaryDoesNotLeakSecrets(t *testing.T) {
 	t.Setenv("RABBITMQ_MANAGEMENT_URL", "http://127.0.0.1:15672")
 
 	printed := captureStdout(t, func() {
-		printBootstrapSummary(BootstrapConfig{ComposeFile: "docker-compose.yml", OrchestratorPort: "8000"}, BootstrapOptions{})
+		printBootstrapSummary(BootstrapConfig{ComposeFile: "docker-compose.yml", OrchestratorPort: "8010"}, BootstrapOptions{})
 	})
 
 	blocked := []string{

@@ -288,6 +288,27 @@ type ProviderHealth struct {
 	ProbeQueued   bool       `json:"probe_queued,omitempty"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 	RefreshAfter  *time.Time `json:"refresh_after,omitempty"`
+	RuntimeCapabilities *ProviderRuntimeCapabilities `json:"runtime_capabilities,omitempty"`
+}
+
+type RuntimeTransportMode string
+
+const (
+	RuntimeTransportBuffered       RuntimeTransportMode = "buffered"
+	RuntimeTransportPseudoRealtime RuntimeTransportMode = "pseudo_realtime"
+	RuntimeTransportNativeStream   RuntimeTransportMode = "native_stream"
+)
+
+type ProviderRuntimeCapabilities struct {
+	Connected            bool                 `json:"connected"`
+	NativeStreaming      bool                 `json:"native_streaming,omitempty"`
+	ToolStreaming        bool                 `json:"tool_streaming,omitempty"`
+	PatchStreaming       bool                 `json:"patch_streaming,omitempty"`
+	TestStreaming        bool                 `json:"test_streaming,omitempty"`
+	MaxParallelRequests  int                  `json:"max_parallel_requests,omitempty"`
+	SupportsCancellation bool                 `json:"supports_cancellation,omitempty"`
+	TransportMode        RuntimeTransportMode `json:"transport_mode,omitempty"`
+	ObservedAt           time.Time            `json:"observed_at,omitempty"`
 }
 
 type ProviderAPIError struct {
@@ -338,6 +359,14 @@ type ProviderModelStatus struct {
 	LastError               *ProviderAPIError `json:"last_error,omitempty"`
 }
 
+type ModelCapabilities struct {
+	Streaming      bool `json:"streaming"`
+	ToolCalling    bool `json:"tool_calling,omitempty"`
+	PatchStreaming bool `json:"patch_streaming,omitempty"`
+	TestStreaming  bool `json:"test_streaming,omitempty"`
+	LongContext    bool `json:"long_context,omitempty"`
+}
+
 type ProviderCatalogSnapshot struct {
 	Provider                    string                `json:"provider"`
 	ProviderID                  string                `json:"provider_id,omitempty"`
@@ -356,6 +385,7 @@ type ProviderCatalogSnapshot struct {
 	Error                       string                `json:"error,omitempty"`
 	ObservedAt                  time.Time             `json:"observed_at,omitempty"`
 	RefreshIntervalSec          int                   `json:"refresh_interval_sec,omitempty"`
+	RuntimeCapabilities         *ProviderRuntimeCapabilities `json:"runtime_capabilities,omitempty"`
 }
 
 type ModuleInfo struct {
@@ -410,6 +440,86 @@ type StreamEvent struct {
 	EntityID  string         `json:"entity_id,omitempty"`
 	Timestamp time.Time      `json:"timestamp"`
 	Payload   map[string]any `json:"payload,omitempty"`
+}
+
+type AgentDeltaKind string
+
+const (
+	AgentDeltaStarted          AgentDeltaKind = "started"
+	AgentDeltaToken            AgentDeltaKind = "token"
+	AgentDeltaThoughtSummary   AgentDeltaKind = "thought_summary"
+	AgentDeltaToolCallStarted  AgentDeltaKind = "tool_call_started"
+	AgentDeltaToolCallFinished AgentDeltaKind = "tool_call_finished"
+	AgentDeltaFilePatch        AgentDeltaKind = "file_patch"
+	AgentDeltaCommandStarted   AgentDeltaKind = "command_started"
+	AgentDeltaCommandFinished  AgentDeltaKind = "command_finished"
+	AgentDeltaPartialResult    AgentDeltaKind = "partial_result"
+	AgentDeltaFinalResult      AgentDeltaKind = "final_result"
+	AgentDeltaHeartbeat        AgentDeltaKind = "heartbeat"
+	AgentDeltaError            AgentDeltaKind = "error"
+	AgentDeltaPatchPreview     AgentDeltaKind = "patch.preview"
+	AgentDeltaPatchChunk       AgentDeltaKind = "patch.chunk"
+	AgentDeltaPatchApplyStart  AgentDeltaKind = "patch.apply.started"
+	AgentDeltaPatchApplyFinish AgentDeltaKind = "patch.apply.finished"
+	AgentDeltaToolStarted      AgentDeltaKind = "tool.started"
+	AgentDeltaToolStdout       AgentDeltaKind = "tool.stdout"
+	AgentDeltaToolStderr       AgentDeltaKind = "tool.stderr"
+	AgentDeltaToolFinished     AgentDeltaKind = "tool.finished"
+	AgentDeltaTestStarted      AgentDeltaKind = "test.started"
+	AgentDeltaTestCase         AgentDeltaKind = "test.case"
+	AgentDeltaTestFinished     AgentDeltaKind = "test.finished"
+)
+
+type AgentDelta struct {
+	SessionID string         `json:"session_id,omitempty"`
+	TaskID    string         `json:"task_id"`
+	AgentID   string         `json:"agent_id,omitempty"`
+	Provider  string         `json:"provider,omitempty"`
+	ModelName string         `json:"model_name,omitempty"`
+	Kind      AgentDeltaKind `json:"kind"`
+	Sequence  int64          `json:"sequence,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+type RealtimeExecutionMetrics struct {
+	Transport           string `json:"transport,omitempty"`
+	NativeStreaming     bool   `json:"native_streaming,omitempty"`
+	PseudoRealtime      bool   `json:"pseudo_realtime,omitempty"`
+	TimeToFirstTokenMS  int64  `json:"time_to_first_token_ms,omitempty"`
+	TimeToFirstToolMS   int64  `json:"time_to_first_tool_ms,omitempty"`
+	TimeToFirstPatchMS  int64  `json:"time_to_first_patch_ms,omitempty"`
+	TimeToFirstResultMS int64  `json:"time_to_first_result_ms,omitempty"`
+	TimeToFirstTestMS   int64  `json:"time_to_first_test_ms,omitempty"`
+	TotalCompletionMS   int64  `json:"total_completion_ms,omitempty"`
+	TokensStreamed      int    `json:"tokens_streamed,omitempty"`
+	ToolsExecuted       int    `json:"tools_executed,omitempty"`
+	PatchesApplied      int    `json:"patches_applied,omitempty"`
+	TestsExecuted       int    `json:"tests_executed,omitempty"`
+}
+
+type LiveSessionState struct {
+	SessionID        string                   `json:"session_id"`
+	TaskID           string                   `json:"task_id"`
+	Mode             string                   `json:"mode,omitempty"`
+	AgentID          string                   `json:"agent_id,omitempty"`
+	Provider         string                   `json:"provider,omitempty"`
+	ModelName        string                   `json:"model_name,omitempty"`
+	Capabilities     ModelCapabilities        `json:"capabilities,omitempty"`
+	Active           bool                     `json:"active"`
+	Progress         float64                  `json:"progress,omitempty"`
+	LastDeltaKind    string                   `json:"last_delta_kind,omitempty"`
+	LastMessage      string                   `json:"last_message,omitempty"`
+	PartialOutput    string                   `json:"partial_output,omitempty"`
+	PatchPreview     string                   `json:"patch_preview,omitempty"`
+	PatchDraft       string                   `json:"patch_draft,omitempty"`
+	ActiveWorkers    []string                 `json:"active_workers,omitempty"`
+	ActiveTools      []string                 `json:"active_tools,omitempty"`
+	CompletedWorkers []string                 `json:"completed_workers,omitempty"`
+	PendingApprovals []string                 `json:"pending_approvals,omitempty"`
+	RealtimeMetrics  RealtimeExecutionMetrics `json:"realtime_metrics,omitempty"`
+	UpdatedAt        time.Time                `json:"updated_at"`
 }
 
 type VectorChunk struct {

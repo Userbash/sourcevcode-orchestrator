@@ -23,37 +23,41 @@ import (
 )
 
 type Orchestrator struct {
-	executionProfile executionProfile
-	backgroundCtx    context.Context
-	backgroundCancel context.CancelFunc
-	registry         *Registry
-	planner          *Planner
-	router           *Router
-	store            state.Store
-	runtimeHub       *realtime.Hub
-	inventoryHub     *realtime.Hub
-	localModels      *localmodels.Manager
-	messageBus       delivery.Bus
-	delivery         *delivery.Supervisor
-	memory           *memory.Manager
-	runtime          *RuntimeManager
-	adaptive         *AdaptiveRuntime
-	vfs              *vfs.Manager
-	providerRegistry *ProviderModelRegistry
-	probeManager     *providerProbeManager
-	globalSlots      chan struct{}
-	slotMu           sync.Mutex
-	agentSlots       map[string]chan struct{}
-	modelSlots       map[string]chan struct{}
-	perAgentMax      int
-	perModelMax      int
-	resultMu         sync.Mutex
-	resultWaiters    map[string][]chan domain.WorkflowRecord
-	workerPools      []*delivery.WorkerPool
-	workerPoolsMu    sync.Mutex
-	schedulerMu      sync.Mutex
-	submissionQueue  *submissionScheduler
-	selfLearn        selfLearningRuntime
+	executionProfile  executionProfile
+	backgroundCtx     context.Context
+	backgroundCancel  context.CancelFunc
+	registry          *Registry
+	planner           *Planner
+	router            *Router
+	store             state.Store
+	runtimeHub        *realtime.Hub
+	inventoryHub      *realtime.Hub
+	localModels       *localmodels.Manager
+	messageBus        delivery.Bus
+	delivery          *delivery.Supervisor
+	memory            *memory.Manager
+	runtime           *RuntimeManager
+	adaptive          *AdaptiveRuntime
+	vfs               *vfs.Manager
+	providerRegistry  *ProviderModelRegistry
+	modelCapabilities *ModelCapabilitiesRegistry
+	probeManager      *providerProbeManager
+	globalSlots       chan struct{}
+	slotMu            sync.Mutex
+	agentSlots        map[string]chan struct{}
+	modelSlots        map[string]chan struct{}
+	perAgentMax       int
+	perModelMax       int
+	resultMu          sync.Mutex
+	resultWaiters     map[string][]chan domain.WorkflowRecord
+	workerPools       []*delivery.WorkerPool
+	workerPoolsMu     sync.Mutex
+	schedulerMu       sync.Mutex
+	submissionQueue   *submissionScheduler
+	selfLearn         selfLearningRuntime
+	codingRuntime     domain.ExternalCodingRuntime
+	codingSessions    *codingRuntimeSessionMapper
+	liveRealtime      *LiveRealtimeMetricsCollector
 }
 
 type selfLearningRuntime struct {
@@ -107,24 +111,27 @@ func NewOrchestrator(
 	parallelism := profile.UsableParallelism
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	o := &Orchestrator{
-		executionProfile: profile,
-		backgroundCtx:    backgroundCtx,
-		backgroundCancel: backgroundCancel,
-		registry:         registry,
-		planner:          planner,
-		router:           router,
-		store:            store,
-		runtimeHub:       runtimeHub,
-		inventoryHub:     inventoryHub,
-		messageBus:       delivery.OpenBusFromEnv(),
-		memory:           memory.NewManager(store),
-		providerRegistry: providerRegistry,
-		probeManager:     newProviderProbeManager(backgroundCtx),
-		agentSlots:       map[string]chan struct{}{},
-		modelSlots:       map[string]chan struct{}{},
-		perAgentMax:      envInt("GO_CORE_MAX_CONCURRENT_PER_AGENT", defaultPerAgentConcurrency(parallelism)),
-		perModelMax:      envInt("GO_CORE_MAX_CONCURRENT_PER_MODEL", defaultPerModelConcurrency(parallelism)),
-		resultWaiters:    map[string][]chan domain.WorkflowRecord{},
+		executionProfile:  profile,
+		backgroundCtx:     backgroundCtx,
+		backgroundCancel:  backgroundCancel,
+		registry:          registry,
+		planner:           planner,
+		router:            router,
+		store:             store,
+		runtimeHub:        runtimeHub,
+		inventoryHub:      inventoryHub,
+		messageBus:        delivery.OpenBusFromEnv(),
+		memory:            memory.NewManager(store),
+		providerRegistry:  providerRegistry,
+		modelCapabilities: NewModelCapabilitiesRegistry(providerRegistry),
+		probeManager:      newProviderProbeManager(backgroundCtx),
+		agentSlots:        map[string]chan struct{}{},
+		modelSlots:        map[string]chan struct{}{},
+		perAgentMax:       envInt("GO_CORE_MAX_CONCURRENT_PER_AGENT", defaultPerAgentConcurrency(parallelism)),
+		perModelMax:       envInt("GO_CORE_MAX_CONCURRENT_PER_MODEL", defaultPerModelConcurrency(parallelism)),
+		resultWaiters:     map[string][]chan domain.WorkflowRecord{},
+		codingSessions:    newCodingRuntimeSessionMapper(),
+		liveRealtime:      NewLiveRealtimeMetricsCollector(),
 	}
 	if vfsManager, err := vfs.NewManager(store); err == nil {
 		o.vfs = vfsManager
@@ -153,6 +160,49 @@ func NewOrchestrator(
 	}
 	o.publishInventorySnapshot(o.backgroundCtx)
 	return o
+}
+
+func (o *Orchestrator) ModelCapabilitiesSnapshot() map[string]map[string]domain.ModelCapabilities {
+	if o == nil || o.modelCapabilities == nil {
+		return map[string]map[string]domain.ModelCapabilities{}
+	}
+	return o.modelCapabilities.Snapshot()
+}
+
+func (o *Orchestrator) LookupModelCapabilities(provider string, modelName string) domain.ModelCapabilities {
+	if o == nil || o.modelCapabilities == nil {
+		return inferModelCapabilities(modelName)
+	}
+	caps, _ := o.modelCapabilities.Lookup(provider, modelName)
+	return caps
+}
+
+func (o *Orchestrator) ObserveLiveRealtimeSession(sessionID string, provider string, modelName string, startedAt time.Time) {
+	if o == nil || o.liveRealtime == nil {
+		return
+	}
+	o.liveRealtime.ObserveSession(sessionID, provider, modelName, startedAt)
+}
+
+func (o *Orchestrator) ObserveLiveRealtimeDelta(delta domain.AgentDelta) {
+	if o == nil || o.liveRealtime == nil {
+		return
+	}
+	o.liveRealtime.ObserveDelta(delta)
+}
+
+func (o *Orchestrator) CompleteLiveRealtimeSession(sessionID string, provider string, modelName string, finishedAt time.Time, failed bool) {
+	if o == nil || o.liveRealtime == nil {
+		return
+	}
+	o.liveRealtime.CompleteSession(sessionID, provider, modelName, finishedAt, failed)
+}
+
+func (o *Orchestrator) LiveRealtimeMetricsSnapshot() LiveRealtimeMetricsSnapshot {
+	if o == nil || o.liveRealtime == nil {
+		return LiveRealtimeMetricsSnapshot{}
+	}
+	return o.liveRealtime.Snapshot()
 }
 
 func (o *Orchestrator) Close() {
@@ -590,6 +640,9 @@ func (o *Orchestrator) submitTaskSync(ctx context.Context, task domain.Task) (do
 
 	task, plan := o.planner.Prepare(task)
 	task = o.applyAdaptivePolicy(ctx, task, plan)
+	if o.shouldDelegateToCodingRuntime(task) {
+		return o.dispatchCodingRuntimeTaskSync(ctx, task, plan)
+	}
 	acceptance, agent, ok := o.router.Route(task, plan)
 	record := domain.WorkflowRecord{
 		Task:       task,
@@ -1187,6 +1240,9 @@ func (o *Orchestrator) dispatchTaskAsync(ctx context.Context, task domain.Task) 
 
 	task, plan := o.planner.Prepare(task)
 	task = o.applyAdaptivePolicy(ctx, task, plan)
+	if o.shouldDelegateToCodingRuntime(task) {
+		return o.dispatchCodingRuntimeTaskAsync(ctx, task, plan)
+	}
 	acceptance, agent, ok := o.router.Route(task, plan)
 	record.Task = task
 	record.Plan = plan
@@ -1734,7 +1790,7 @@ func (o *Orchestrator) ModuleState() map[string]any {
 }
 
 func (o *Orchestrator) StateSnapshot(ctx context.Context) map[string]any {
-	workflows, _ := o.store.ListWorkflows(ctx)
+	workflowCount, _ := o.store.WorkflowCount(ctx)
 	providerCatalogs := []domain.ProviderCatalogSnapshot{}
 	if o.providerRegistry != nil {
 		providerCatalogs = o.providerRegistry.Snapshots()
@@ -1744,21 +1800,40 @@ func (o *Orchestrator) StateSnapshot(ctx context.Context) map[string]any {
 		o.runtime.SyncProviderHealth(providerHealth)
 	}
 	return map[string]any{
-		"status":            "ready",
-		"agent_count":       len(o.registry.AgentInfos()),
-		"module_count":      len(o.registry.ModuleInfos()),
-		"workflow_count":    len(workflows),
-		"modules":           o.ModuleState(),
-		"agents":            o.registry.AgentInfos(),
-		"providers":         providerCatalogs,
-		"provider_health":   providerHealth,
-		"runtime_agents":    o.RuntimeStates(),
-		"routing_weights":   o.RuntimeRoutingWeights(),
-		"store":             o.store.Snapshot(),
-		"delivery":          o.delivery.DeliveryHealthSnapshot(),
-		"mailboxes":         o.delivery.RecordsSnapshot(),
-		"runtime_streams":   o.runtimeHub.Stats(),
-		"inventory_streams": o.inventoryHub.Stats(),
+		"status":                "ready",
+		"agent_count":           len(o.registry.AgentInfos()),
+		"module_count":          len(o.registry.ModuleInfos()),
+		"workflow_count":        workflowCount,
+		"modules":               o.ModuleState(),
+		"agents":                o.registry.AgentInfos(),
+		"providers":             providerCatalogs,
+		"provider_health":       providerHealth,
+		"model_capabilities":    o.ModelCapabilitiesSnapshot(),
+		"runtime_agents":        o.RuntimeStates(),
+		"routing_weights":       o.RuntimeRoutingWeights(),
+		"store":                 o.store.Snapshot(),
+		"delivery":              o.delivery.DeliveryHealthSnapshot(),
+		"mailboxes":             o.delivery.RecordsSnapshot(),
+		"runtime_streams":       o.runtimeHub.Stats(),
+		"inventory_streams":     o.inventoryHub.Stats(),
+		"coding_runtime":        o.codingRuntimeSnapshot(ctx),
+		"live_realtime_metrics": o.LiveRealtimeMetricsSnapshot(),
+	}
+}
+
+func (o *Orchestrator) codingRuntimeSnapshot(ctx context.Context) map[string]any {
+	if o == nil || o.codingRuntime == nil {
+		return map[string]any{"enabled": false, "attached": false, "status": "disabled"}
+	}
+	if snapshotter, ok := o.codingRuntime.(codingRuntimeSnapshotter); ok {
+		return snapshotter.Snapshot(ctx)
+	}
+	return map[string]any{
+		"enabled":  true,
+		"attached": true,
+		"status":   "attached",
+		"name":     o.codingRuntime.Name(),
+		"backend":  "external",
 	}
 }
 
@@ -1898,12 +1973,100 @@ func (o *Orchestrator) InventoryEventSnapshot(topic string) []domain.StreamEvent
 	return o.inventoryHub.Snapshot(topic)
 }
 
+func (o *Orchestrator) codingRuntimeSessionID(task domain.Task) string {
+	if raw, ok := task.ExecutionContract["coding_runtime_session_id"]; ok {
+		if sessionID := strings.TrimSpace(fmt.Sprint(raw)); sessionID != "" {
+			return sessionID
+		}
+	}
+	return strings.TrimSpace(task.SessionID)
+}
+
+func (o *Orchestrator) publishAgentDelta(task domain.Task, delta domain.AgentDelta) {
+	if delta.Timestamp.IsZero() {
+		delta.Timestamp = time.Now().UTC()
+	}
+	if delta.TaskID == "" {
+		delta.TaskID = task.ID
+	}
+	if delta.SessionID == "" {
+		delta.SessionID = o.codingRuntimeSessionID(task)
+	}
+	o.ObserveLiveRealtimeDelta(delta)
+	payload := map[string]any{
+		"task_id":     delta.TaskID,
+		"session_id":  delta.SessionID,
+		"agent_id":    delta.AgentID,
+		"provider":    delta.Provider,
+		"model_name":  delta.ModelName,
+		"delta_kind":  delta.Kind,
+		"delta":       delta,
+		"content":     delta.Content,
+		"sequence":    delta.Sequence,
+		"metadata":    delta.Metadata,
+		"occurred_at": delta.Timestamp,
+	}
+	o.publishRuntimeEvent("runtime_sessions", "model.delta", delta.TaskID, payload)
+	if delta.SessionID != "" {
+		o.publishRuntimeEvent("runtime_session:"+delta.SessionID, "model.delta", delta.TaskID, payload)
+	}
+}
+
+func (o *Orchestrator) executeStreamingAgent(ctx context.Context, task domain.Task, agent agents.StreamingAgent) domain.AgentResult {
+	failed := func(err error) domain.AgentResult {
+		message := "streaming agent execution failed"
+		if err != nil {
+			message = strings.TrimSpace(err.Error())
+		}
+		return domain.AgentResult{
+			TaskID:      task.ID,
+			AgentID:     agent.Info().ID,
+			Provider:    agent.Info().Provider,
+			ModelName:   agent.Info().ModelName,
+			Status:      domain.TaskStatusFailed,
+			CompletedAt: time.Now().UTC(),
+			Errors:      []string{message},
+			Output:      domain.ResultOutput{Summary: message},
+		}
+	}
+
+	deltas, results, err := agent.ExecuteStream(ctx, task)
+	if err != nil {
+		return failed(err)
+	}
+	var final domain.AgentResult
+	gotResult := false
+	for deltas != nil || results != nil {
+		select {
+		case <-ctx.Done():
+			return failed(ctx.Err())
+		case delta, ok := <-deltas:
+			if !ok {
+				deltas = nil
+				continue
+			}
+			o.publishAgentDelta(task, delta)
+		case result, ok := <-results:
+			if !ok {
+				results = nil
+				continue
+			}
+			final = result
+			gotResult = true
+		}
+	}
+	if gotResult {
+		return final
+	}
+	return failed(fmt.Errorf("streaming agent finished without result"))
+}
+
 func (o *Orchestrator) publishRuntimeEvent(topic string, kind string, entityID string, payload map[string]any) {
 	o.runtimeHub.Publish(topic, kind, entityID, payload)
 }
 
 func (o *Orchestrator) publishInventorySnapshot(ctx context.Context) {
-	workflows, _ := o.store.ListWorkflows(ctx)
+	workflowCount, _ := o.store.WorkflowCount(ctx)
 	o.inventoryHub.Publish("agents", "inventory.snapshot", "agents", map[string]any{
 		"items": o.registry.AgentInfos(),
 	})
@@ -1919,15 +2082,17 @@ func (o *Orchestrator) publishInventorySnapshot(ctx context.Context) {
 	})
 	o.inventoryHub.Publish("state", "inventory.snapshot", "state", map[string]any{
 		"store":           o.store.Snapshot(),
-		"workflow_count":  len(workflows),
+		"workflow_count":  workflowCount,
 		"delivery":        o.delivery.DeliveryHealthSnapshot(),
 		"mailboxes":       o.delivery.RecordsSnapshot(),
 		"runtime_agents":  o.RuntimeStates(),
 		"routing_weights": o.RuntimeRoutingWeights(),
 		"providers":       providerCatalogs,
+		"coding_runtime":  o.codingRuntimeSnapshot(ctx),
 	})
 	o.inventoryHub.Publish("workflows", "inventory.snapshot", "workflows", map[string]any{
-		"items": workflows,
+		"count":     workflowCount,
+		"truncated": true,
 	})
 }
 
@@ -1975,6 +2140,9 @@ func (o *Orchestrator) attachRuntimeContext(ctx context.Context, task domain.Tas
 func (o *Orchestrator) executeAgentWithReasoning(ctx context.Context, task domain.Task, acceptance domain.TaskAcceptance, agent agents.Agent) (domain.Task, domain.AgentResult, time.Duration) {
 	startedAt := time.Now().UTC()
 	if !o.shouldUseSelfLearningReasoning(task, acceptance, agent) {
+		if streamingAgent, ok := agent.(agents.StreamingAgent); ok {
+			return task, o.executeStreamingAgent(ctx, task, streamingAgent), time.Since(startedAt)
+		}
 		return task, agent.Execute(ctx, task), time.Since(startedAt)
 	}
 
@@ -2869,7 +3037,7 @@ func (o *Orchestrator) configureSelfLearning() {
 		runtime.datasetDir = os.TempDir()
 	}
 	if o.memory != nil {
-		runtime.retriever = selflearn.NewMemoryRAGRetriever(o.memory)
+		runtime.retriever = selflearn.NewParallelRAGRetriever(selflearn.NewMemoryRAGRetriever(o.memory))
 	}
 	runtime.exporter = selflearn.NewJSONLExporter(runtime.datasetDir)
 	if o.providerRegistry != nil {

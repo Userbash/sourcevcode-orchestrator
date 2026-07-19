@@ -18,7 +18,6 @@ var DefaultRequiredHTTPEndpoints = []string{
 	"/health/local_models",
 	"/sourcecraft",
 	"/diagnostics",
-	"/control/ws",
 }
 
 type Config struct {

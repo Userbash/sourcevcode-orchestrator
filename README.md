@@ -158,7 +158,7 @@ The runtime exposes several important entrypoints:
 - Task execution
   `/tasks`, `/tasks/preview_plan`, `/tasks/run_plan`, `/tasks/{id}`
 - WebSocket control and chat
-  `/control/ws`, `/chat/ws`
+  `/ws/runtime/events`, `/ws/providers/inventory`
 - Runtime event streams
   `/events/runtime`, `/events/inventory`, `/ws/runtime/events`, `/ws/providers/inventory`
 - Transport audit
@@ -223,7 +223,6 @@ The main internal runtime endpoint is `http://127.0.0.1:8010`.
 Internal chat:
 
 ```text
-ws://127.0.0.1:8010/chat/ws
 ```
 
 External chat proxy:
@@ -244,7 +243,6 @@ go test ./...
 The current runtime has already been exercised across the core transport path:
 
 - Health endpoint on `127.0.0.1:8010` returned `200 OK`
-- WebSocket connection to `/chat/ws` succeeded using `chat.v1`
 - Chat submission was accepted
 - The task was created and planned
 - The provider and routed agent stayed aligned after the routing fix

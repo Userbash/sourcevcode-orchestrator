@@ -15,11 +15,12 @@ import (
 )
 
 type RequestConfig struct {
-	ProviderID string
-	BaseURL    string
-	APIKey     string
+	ProviderID   string
+	BaseURL      string
+	APIKey       string
+	ModelName    string
 	TrafficClass string
-	Client     *http.Client
+	Client       *http.Client
 }
 
 type Response struct {
@@ -32,6 +33,50 @@ var requestGates sync.Map
 
 type requestGate struct {
 	slots chan struct{}
+}
+
+func DoStream(ctx context.Context, cfg RequestConfig, method, endpoint string, body []byte, contentType string, configure func(*http.Request), handle func(*http.Response) error) error {
+	if strings.TrimSpace(endpoint) == "" {
+		return fmt.Errorf("%s endpoint is not configured", strings.ToLower(method))
+	}
+	release, err := acquireRequestSlot(ctx, cfg, endpoint)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	client := cfg.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	if contentType != "" {
+		request.Header.Set("Content-Type", contentType)
+	}
+	if key := strings.TrimSpace(cfg.APIKey); key != "" {
+		request.Header.Set("Authorization", "Bearer "+key)
+	}
+	if configure != nil {
+		configure(request)
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("%s request failed: %w", strings.TrimSpace(cfg.ProviderID), err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		return providerHTTPError(response.StatusCode, body)
+	}
+	if handle == nil {
+		return nil
+	}
+	return handle(response)
 }
 
 func Do(ctx context.Context, cfg RequestConfig, method, endpoint string, body []byte, contentType string, limit int64) (Response, error) {
@@ -113,7 +158,26 @@ func Do(ctx context.Context, cfg RequestConfig, method, endpoint string, body []
 }
 
 func acquireRequestSlot(ctx context.Context, cfg RequestConfig, endpoint string) (func(), error) {
-	gate := sharedRequestGate(requestGateKey(cfg, endpoint), requestGateMaxConcurrent(cfg))
+	providerRelease, err := acquireGateSlot(ctx, sharedRequestGate(requestGateKey(cfg, endpoint), requestGateMaxConcurrent(cfg)))
+	if err != nil {
+		return nil, err
+	}
+	modelKey := requestModelGateKey(cfg, endpoint)
+	if modelKey == "" {
+		return providerRelease, nil
+	}
+	modelRelease, err := acquireGateSlot(ctx, sharedRequestGate(modelKey, requestGateMaxConcurrentPerModel(cfg)))
+	if err != nil {
+		providerRelease()
+		return nil, err
+	}
+	return func() {
+		modelRelease()
+		providerRelease()
+	}, nil
+}
+
+func acquireGateSlot(ctx context.Context, gate *requestGate) (func(), error) {
 	select {
 	case gate.slots <- struct{}{}:
 		return func() {
@@ -144,6 +208,18 @@ func requestGateKey(cfg RequestConfig, endpoint string) string {
 	return strings.ToLower(strings.TrimSpace(cfg.ProviderID)) + "|" + base + "|" + strings.TrimSpace(cfg.APIKey) + "|" + requestTrafficClass(cfg)
 }
 
+func requestModelGateKey(cfg RequestConfig, endpoint string) string {
+	modelName := strings.TrimSpace(cfg.ModelName)
+	if modelName == "" {
+		return ""
+	}
+	base := sanitizedBaseURL(cfg.BaseURL)
+	if base == "" {
+		base = sanitizedBaseURL(endpoint)
+	}
+	return strings.ToLower(strings.TrimSpace(cfg.ProviderID)) + "|" + base + "|model|" + strings.ToLower(modelName) + "|" + requestTrafficClass(cfg)
+}
+
 func requestTrafficClass(cfg RequestConfig) string {
 	trafficClass := strings.ToLower(strings.TrimSpace(cfg.TrafficClass))
 	if trafficClass == "" {
@@ -162,6 +238,19 @@ func requestGateMaxConcurrent(cfg RequestConfig) int {
 		return intFromEnv("GO_CORE_PROVIDER_MAX_CONCURRENT_HELPER_PER_KEY", 2, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT_HELPER_PER_KEY")
 	default:
 		return intFromEnv("GO_CORE_PROVIDER_MAX_CONCURRENT_PER_KEY", 1, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT_PER_KEY")
+	}
+}
+
+func requestGateMaxConcurrentPerModel(cfg RequestConfig) int {
+	switch requestTrafficClass(cfg) {
+	case "probe":
+		return intFromEnv("GO_CORE_PROVIDER_MAX_CONCURRENT_PROBE_PER_MODEL", 2, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT_PROBE_PER_MODEL")
+	case "inventory":
+		return intFromEnv("GO_CORE_PROVIDER_MAX_CONCURRENT_INVENTORY_PER_MODEL", 2, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT_INVENTORY_PER_MODEL")
+	case "helper":
+		return intFromEnv("GO_CORE_PROVIDER_MAX_CONCURRENT_HELPER_PER_MODEL", 2, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT_HELPER_PER_MODEL")
+	default:
+		return intFromEnv("GO_CORE_PROVIDER_MAX_CONCURRENT_PER_MODEL", 1, "AI_BRIDGE_PROVIDER_MAX_CONCURRENT_PER_MODEL")
 	}
 }
 

@@ -15,7 +15,6 @@ The stack currently contains:
 - `local_llm`
 - `ai_kernel`
 - `go_core`
-- `chat_gateway`
 
 The internal orchestrator service runs on port `8010`. The external chat gateway runs on port `80` and forwards traffic into the orchestrator.
 
@@ -33,7 +32,6 @@ This keeps the runtime container small and focused while still providing room fo
 
 ## Chat gateway container
 
-The external proxy is built from `scripts/chat-proxy/Dockerfile`.
 
 Its job is intentionally narrow:
 
@@ -236,7 +234,6 @@ Before pushing to GitHub or sharing containers, review:
 3. Confirm that `docs/` is the only active documentation location.
 4. Confirm that the compose stack starts with sane defaults.
 5. Confirm that `go test ./...` passes in `go-core`.
-6. Confirm that `/health` and `/chat/ws` work in a fresh container.
 7. Confirm that model inventory endpoints report expected providers.
 8. Confirm that the chat gateway forwards to the internal orchestrator correctly.
 9. Confirm that database protection paths and retention settings are safe for the target environment.

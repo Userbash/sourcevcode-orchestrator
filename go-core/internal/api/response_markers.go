@@ -9,11 +9,15 @@ import (
 func workflowResponsePayload(ctx context.Context, record domain.WorkflowRecord, transport string) map[string]any {
 	acceptance := record.Acceptance
 	meta := metadataFromContext(ctx)
+	responseClientKind := meta.ClientKind
+	if meta.RequestOrigin == "sourcecraft_http" {
+		responseClientKind = "external_chat"
+	}
 	marker := map[string]any{
 		"answered_by":       "go-core-orchestrator",
 		"answered_for":      meta.AnsweredFor,
 		"request_origin":    meta.RequestOrigin,
-		"client_kind":       meta.ClientKind,
+		"client_kind":       responseClientKind,
 		"transport":         transport,
 		"execution_mode":    "orchestrated",
 		"task_id":           record.Task.ID,

@@ -71,7 +71,7 @@ func NewProtocolFrameError(code, message string, details map[string]any) *Protoc
 	return &ProtocolError{Code: code, Message: message, Retryable: definition.Retryable, Category: definition.Category, Details: cloneMap(details)}
 }
 
-func ParseEnvelope(raw []byte, normalizeChat bool) (Envelope, error) {
+func ParseEnvelope(raw []byte) (Envelope, error) {
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return Envelope{}, NewProtocolFrameError("INVALID_JSON", "", nil)
@@ -79,9 +79,6 @@ func ParseEnvelope(raw []byte, normalizeChat bool) (Envelope, error) {
 	frame, ok := decoded.(map[string]any)
 	if !ok {
 		return Envelope{}, NewProtocolFrameError("INVALID_FRAME", "", nil)
-	}
-	if normalizeChat {
-		frame = normalizeCompactChatFrame(frame)
 	}
 	if rawTimeout, exists := frame["timeout_ms"]; exists && rawTimeout != nil {
 		timeout, valid := rawTimeout.(float64)
@@ -156,69 +153,6 @@ func ErrorEnvelope(request Envelope, code, message string, details map[string]an
 	return Envelope{Type: "error", RequestID: request.RequestID, CorrelationID: request.CorrelationID, Action: request.Action, Error: NewProtocolFrameError(code, message, details), Final: true}
 }
 
-func normalizeCompactChatFrame(frame map[string]any) map[string]any {
-	if asText(frame["type"]) != "" && asText(frame["action"]) != "" {
-		return frame
-	}
-	data, _ := frame["data"].(map[string]any)
-	data = cloneMap(data)
-	if data == nil {
-		data = make(map[string]any)
-	}
-	aliases := map[string][]string{
-		"message": {"u", "message", "text"}, "session_id": {"m", "session_id"},
-		"user_id": {"v", "user_id"}, "source": {"s", "source"},
-		"provider": {"o", "provider"}, "cost_tier": {"cost_tier", "tier"},
-		"model": {"model", "requested_model"}, "priority": {"priority"}, "complexity": {"complexity"},
-	}
-	for target, keys := range aliases {
-		if _, exists := data[target]; exists {
-			continue
-		}
-		for _, key := range keys {
-			if value, ok := frame[key]; ok && value != nil {
-				data[target] = value
-				break
-			}
-		}
-	}
-	requestID := firstText(frame, "r", "request_id")
-	if requestID == "" {
-		requestID = newSessionID()
-	}
-	correlationID := firstText(frame, "c", "correlation_id")
-	if correlationID == "" {
-		correlationID = requestID
-	}
-	return map[string]any{
-		"type": defaultText(asText(frame["type"]), "command"), "request_id": requestID,
-		"correlation_id": correlationID, "action": defaultText(asText(frame["action"]), "chat.submit"),
-		"data": data, "ack": frame["ack"], "timeout_ms": frame["timeout_ms"], "idempotency_key": frame["idempotency_key"],
-	}
-}
-
-func firstText(data map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if value := asText(data[key]); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func asText(value any) string {
-	if value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
-}
-
-func defaultText(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
 
 func ErrorCode(err error) string {
 	var protocolErr *ProtocolError

@@ -94,6 +94,12 @@ func (s *FileStore) ListWorkflows(_ context.Context) ([]domain.WorkflowRecord, e
 	return records, nil
 }
 
+func (s *FileStore) WorkflowCount(_ context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.workflows), nil
+}
+
 func (s *FileStore) SaveSessionState(
 	_ context.Context,
 	sessionID string,

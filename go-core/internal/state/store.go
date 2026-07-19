@@ -10,6 +10,7 @@ type Store interface {
 	SaveWorkflow(ctx context.Context, record domain.WorkflowRecord) error
 	GetWorkflow(ctx context.Context, workflowID string) (domain.WorkflowRecord, bool, error)
 	ListWorkflows(ctx context.Context) ([]domain.WorkflowRecord, error)
+	WorkflowCount(ctx context.Context) (int, error)
 	GetSessionState(ctx context.Context, sessionID string, branch string) (domain.SessionState, bool, error)
 	SaveSessionState(
 		ctx context.Context,
