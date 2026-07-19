@@ -1,0 +1,39 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/promtail/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: go_core
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: go_core
+          service: go_core
+          component: orchestrator
+          __path__: /var/log/runtime/go_core/*.log
+    pipeline_stages:
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            component: component
+            service: service
+            request_id: request_id
+            session_id: session_id
+            action: action
+            path: path
+            status: status
+            error: error
+      - labels:
+          level:
+          component:
+          service:
+      - timestamp:
+          source: time
+          format: RFC3339Nano

@@ -27,8 +27,15 @@ func NewPostgresStore(databaseURL string) (*PostgresStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxOpenConns := stateEnvInt("GO_CORE_PG_MAX_OPEN_CONNS", 16)
-	maxIdleConns := stateEnvInt("GO_CORE_PG_MAX_IDLE_CONNS", maxInt(4, maxOpenConns/2))
+	safeMode := stateEnvBool("GO_CORE_BOOTSTRAP_SAFE_MODE", false)
+	maxOpenFallback := 16
+	maxIdleFallback := 4
+	if safeMode {
+		maxOpenFallback = 2
+		maxIdleFallback = 1
+	}
+	maxOpenConns := stateEnvInt("GO_CORE_PG_MAX_OPEN_CONNS", maxOpenFallback)
+	maxIdleConns := stateEnvInt("GO_CORE_PG_MAX_IDLE_CONNS", maxInt(maxIdleFallback, maxOpenConns/2))
 	if maxIdleConns > maxOpenConns {
 		maxIdleConns = maxOpenConns
 	}
@@ -37,7 +44,16 @@ func NewPostgresStore(databaseURL string) (*PostgresStore, error) {
 	db.SetConnMaxLifetime(stateEnvDuration("GO_CORE_PG_CONN_MAX_LIFETIME", 30*time.Minute))
 	db.SetConnMaxIdleTime(stateEnvDuration("GO_CORE_PG_CONN_MAX_IDLE_TIME", 10*time.Minute))
 	store := &PostgresStore{db: db, storageMode: "go_postgres_store"}
-	if err := store.ensureSchema(context.Background()); err != nil {
+	if stateEnvBool("GO_CORE_PG_SKIP_SCHEMA_ENSURE", safeMode) {
+		return store, nil
+	}
+	schemaTimeout := stateEnvDuration("GO_CORE_PG_SCHEMA_TIMEOUT", 2*time.Minute)
+	if safeMode {
+		schemaTimeout = stateEnvDuration("GO_CORE_PG_SCHEMA_TIMEOUT", 20*time.Second)
+	}
+	schemaCtx, cancel := context.WithTimeout(context.Background(), schemaTimeout)
+	defer cancel()
+	if err := store.ensureSchema(schemaCtx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -46,7 +62,6 @@ func NewPostgresStore(databaseURL string) (*PostgresStore, error) {
 
 func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	statements := []string{
-		`CREATE EXTENSION IF NOT EXISTS vector`,
 		`CREATE TABLE IF NOT EXISTS go_workflows (workflow_id TEXT PRIMARY KEY, task_json JSONB NOT NULL, plan_json JSONB NOT NULL, acceptance_json JSONB NOT NULL, result_json JSONB, updated_at TIMESTAMPTZ NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS go_session_states (session_id TEXT NOT NULL, branch TEXT NOT NULL, version INTEGER NOT NULL, prompt_version TEXT NOT NULL, context_version TEXT NOT NULL, state_json JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL, storage_mode TEXT NOT NULL, PRIMARY KEY (session_id, branch))`,
 		`CREATE TABLE IF NOT EXISTS go_invalidations (id BIGSERIAL PRIMARY KEY, session_id TEXT NOT NULL, branch TEXT NOT NULL, reason TEXT NOT NULL, payload_json JSONB NOT NULL, logged_at TIMESTAMPTZ NOT NULL, storage_mode TEXT NOT NULL)`,
@@ -66,6 +81,9 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_go_route_memories_route_updated_at ON go_route_memories (agent_id, provider, model_name, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_go_vfs_checkpoints_task_updated_at ON go_vfs_checkpoints (task_id, updated_at DESC)`,
 	}
+	if !stateEnvBool("GO_CORE_PG_SKIP_VECTOR_EXTENSION", stateEnvBool("GO_CORE_BOOTSTRAP_SAFE_MODE", false)) {
+		statements = append([]string{`CREATE EXTENSION IF NOT EXISTS vector`}, statements...)
+	}
 	for _, stmt := range statements {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return wrapSchemaError(err, stmt)
@@ -80,8 +98,10 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	if err := s.ensureRAGMemoryVectorCompatibility(ctx); err != nil {
 		return err
 	}
-	if err := s.ensureVectorIndexes(ctx); err != nil {
-		return err
+	if !stateEnvBool("GO_CORE_PG_SKIP_VECTOR_INDEXES", stateEnvBool("GO_CORE_BOOTSTRAP_SAFE_MODE", false)) {
+		if err := s.ensureVectorIndexes(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -110,6 +130,21 @@ func stateEnvDuration(key string, fallback time.Duration) time.Duration {
 	return parsed
 }
 
+func stateEnvBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	case "0", "false", "no", "off", "disabled":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func maxInt(a int, b int) int {
 	if a > b {
 		return a
@@ -124,7 +159,7 @@ func wrapSchemaError(err error, stmt string) error {
 	if strings.Contains(strings.ToLower(stmt), "create extension if not exists vector") {
 		message := strings.ToLower(err.Error())
 		if strings.Contains(message, `extension "vector" is not available`) || strings.Contains(message, `could not open extension control file`) {
-			return fmt.Errorf("pgvector extension is required but not installed on the PostgreSQL server: %w; use the pgvector-enabled database from docker-compose.ai.yml or install pgvector before running CREATE EXTENSION IF NOT EXISTS vector", err)
+			return fmt.Errorf("pgvector extension is required but not installed on the PostgreSQL server: %w; use the pgvector-enabled database from docker-compose.yml or install pgvector before running CREATE EXTENSION IF NOT EXISTS vector", err)
 		}
 	}
 	return err

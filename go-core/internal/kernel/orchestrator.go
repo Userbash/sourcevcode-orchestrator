@@ -16,6 +16,7 @@ import (
 	"sourcevcode-orchestrator/go-core/internal/domain"
 	"sourcevcode-orchestrator/go-core/internal/localmodels"
 	"sourcevcode-orchestrator/go-core/internal/memory"
+	"sourcevcode-orchestrator/go-core/internal/observability"
 	"sourcevcode-orchestrator/go-core/internal/realtime"
 	"sourcevcode-orchestrator/go-core/internal/selflearn"
 	"sourcevcode-orchestrator/go-core/internal/state"
@@ -144,21 +145,25 @@ func NewOrchestrator(
 		return o.ProviderHealth(ctx, probe)
 	})
 	o.adaptive = NewAdaptiveRuntime(registry, o.runtime, o.memory)
-	if o.providerRegistry != nil {
+	if o.providerRegistry != nil && !bootstrapSafeModeEnabled() {
 		o.providerRegistry.Start(o.backgroundCtx)
 	}
-	o.configureSelfLearning()
+	if !bootstrapSafeModeEnabled() {
+		o.configureSelfLearning()
+	}
 	if o.router != nil {
 		o.router.runtime = o.runtime
 		o.router.AttachMemoryManager(o.memory)
 	}
-	if submissionModeEnabled() {
+	if !bootstrapSafeModeEnabled() && submissionModeEnabled() {
 		o.StartSubmissionWorker(o.backgroundCtx, envInt("GO_CORE_SUBMIT_WORKERS", defaultSubmitWorkers(parallelism)))
 		o.StartResultWorker(o.backgroundCtx, envInt("GO_CORE_RESULT_WORKERS", defaultResultWorkers(parallelism)))
 		o.registry.OnAgentRegistered(o.ensureAgentWorkerPool)
 		o.startAgentWorkerPools(o.backgroundCtx, envInt("GO_CORE_AGENT_WORKERS", defaultAgentWorkers(parallelism)))
 	}
-	o.publishInventorySnapshot(o.backgroundCtx)
+	if !bootstrapSafeModeEnabled() {
+		o.publishInventorySnapshot(o.backgroundCtx)
+	}
 	return o
 }
 
@@ -2063,6 +2068,22 @@ func (o *Orchestrator) executeStreamingAgent(ctx context.Context, task domain.Ta
 
 func (o *Orchestrator) publishRuntimeEvent(topic string, kind string, entityID string, payload map[string]any) {
 	o.runtimeHub.Publish(topic, kind, entityID, payload)
+	fields := []any{
+		"topic", topic,
+		"kind", kind,
+		"entity_id", entityID,
+		"payload_keys", len(payload),
+	}
+	if taskID := strings.TrimSpace(fmt.Sprint(payload["task_id"])); taskID != "" && taskID != "<nil>" {
+		fields = append(fields, "task_id", taskID)
+	}
+	if provider := strings.TrimSpace(fmt.Sprint(payload["provider"])); provider != "" && provider != "<nil>" {
+		fields = append(fields, "provider", provider)
+	}
+	if model := strings.TrimSpace(fmt.Sprint(payload["model"])); model != "" && model != "<nil>" {
+		fields = append(fields, "model", model)
+	}
+	observability.Logger("runtime_events").Debug("runtime event published", fields...)
 }
 
 func (o *Orchestrator) publishInventorySnapshot(ctx context.Context) {
@@ -2080,6 +2101,18 @@ func (o *Orchestrator) publishInventorySnapshot(ctx context.Context) {
 	o.inventoryHub.Publish("providers", "inventory.snapshot", "providers", map[string]any{
 		"items": providerCatalogs,
 	})
+	if bootstrapSafeModeEnabled() {
+		o.inventoryHub.Publish("state", "inventory.snapshot", "state", map[string]any{
+			"status":         "bootstrap_safe_mode",
+			"workflow_count": workflowCount,
+			"delivery":       o.delivery.DeliveryHealthSnapshot(),
+		})
+		o.inventoryHub.Publish("workflows", "inventory.snapshot", "workflows", map[string]any{
+			"count":     workflowCount,
+			"truncated": true,
+		})
+		return
+	}
 	o.inventoryHub.Publish("state", "inventory.snapshot", "state", map[string]any{
 		"store":           o.store.Snapshot(),
 		"workflow_count":  workflowCount,

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -19,10 +20,12 @@ import (
 	"sourcevcode-orchestrator/go-core/internal/app"
 	"sourcevcode-orchestrator/go-core/internal/buildinfo"
 	"sourcevcode-orchestrator/go-core/internal/kernel"
+	"sourcevcode-orchestrator/go-core/internal/observability"
 	"sourcevcode-orchestrator/go-core/internal/ops"
 )
 
 func main() {
+	observability.Init("go_core")
 	cfg := app.LoadConfig()
 	if len(os.Args) < 2 {
 		serve(cfg, nil)
@@ -118,10 +121,10 @@ func serve(cfg app.Config, args []string) {
 	flags := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := flags.String("addr", cfg.Addr, "listen address")
 	statePath := flags.String("state-path", cfg.StatePath, "deprecated; ignored because CORE requires database storage")
-	ensureInfra := flags.Bool("ensure-infra", false, "start PostgreSQL and RabbitMQ from docker-compose.ai.yml before serving")
+	ensureInfra := flags.Bool("ensure-infra", false, "start PostgreSQL and RabbitMQ from docker-compose.yml before serving")
 	ensureAIStack := flags.Bool("ensure-ai-stack", false, "start PostgreSQL, RabbitMQ, local_llm, and ai_kernel before serving")
-	projectRoot := flags.String("project-root", "", "repository root for env files and docker-compose.ai.yml")
-	composeFile := flags.String("compose-file", envOrDefault("GO_CORE_COMPOSE_FILE", "docker-compose.ai.yml"), "compose file used for infra startup")
+	projectRoot := flags.String("project-root", "", "repository root for env files and docker-compose.yml")
+	composeFile := flags.String("compose-file", envOrDefault("GO_CORE_COMPOSE_FILE", "docker-compose.yml"), "compose file used for infra startup")
 	_ = flags.Parse(args)
 
 	if *ensureInfra || *ensureAIStack || envBool("GO_CORE_ENSURE_INFRA") || envBool("GO_CORE_ENSURE_AI_STACK") {
@@ -152,13 +155,34 @@ func serve(cfg app.Config, args []string) {
 		}
 	}
 
+	safeMode := bootstrapSafeModeEnabled()
+	postgres := app.ResolvePostgresConnectionInfo()
+	slog.Info(
+		"go-core startup summary",
+		"version", buildinfo.String(),
+		"safe_mode", safeMode,
+		"db_configured", strings.TrimSpace(postgres.URL) != "",
+		"db_host", postgres.Host,
+		"db_port", postgres.Port,
+		"db_name", postgres.Database,
+		"db_user", postgres.User,
+		"db_protector_enabled", !safeMode,
+		"message_bus_backend", envOrDefault("GO_CORE_MESSAGE_BUS_BACKEND", "memory"),
+		"submit_mode", envOrDefault("GO_CORE_SUBMIT_MODE", "sync"),
+	)
+	if strings.TrimSpace(postgres.URL) == "" {
+		log.Fatalf("startup config: set AI_BRIDGE_MEMORY_DATABASE_URL or AI_BRIDGE_POSTGRES_USER/AI_BRIDGE_POSTGRES_PASSWORD/AI_BRIDGE_POSTGRES_HOST/AI_BRIDGE_POSTGRES_PORT/AI_BRIDGE_POSTGRES_DB")
+	}
+
 	orchestrator, err := kernel.NewDefault(*statePath)
 	if err != nil {
 		log.Fatalf("bootstrap orchestrator: %v", err)
 	}
 	protector := ops.DBProtectorFromEnv()
-	if err := protector.EnsureProtected(context.Background()); err != nil {
-		log.Fatalf("protect database: %v", err)
+	if !safeMode {
+		if err := protector.EnsureProtected(context.Background()); err != nil {
+			log.Fatalf("protect database: %v", err)
+		}
 	}
 
 	apiServer := api.NewServer(orchestrator, cfg.RequiredHTTPEndpoints)
@@ -172,11 +196,13 @@ func serve(cfg app.Config, args []string) {
 
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	protector.Start(signalCtx)
+	if !safeMode {
+		protector.Start(signalCtx)
+	}
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("go-core orchestrator %s listening on %s", buildinfo.String(), *addr)
+		slog.Info("go-core orchestrator listening", "version", buildinfo.String(), "addr", *addr)
 		serverErrors <- httpServer.ListenAndServe()
 	}()
 
@@ -186,15 +212,15 @@ func serve(cfg app.Config, args []string) {
 			log.Fatalf("serve: %v", err)
 		}
 	case <-signalCtx.Done():
-		log.Printf("go-core orchestrator shutting down")
+		slog.Info("go-core orchestrator shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			_ = httpServer.Close()
-			log.Printf("forced HTTP shutdown: %v", err)
+			slog.Warn("forced HTTP shutdown", "error", err.Error())
 		}
 		if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("HTTP server stopped with error: %v", err)
+			slog.Warn("http server stopped with error", "error", err.Error())
 		}
 	}
 }
@@ -242,7 +268,7 @@ func healthcheck(cfg app.Config) error {
 func bootstrap(args []string) error {
 	flags := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	projectRoot := flags.String("project-root", "", "repository root")
-	composeFile := flags.String("compose-file", envOrDefault("GO_CORE_COMPOSE_FILE", "docker-compose.ai.yml"), "compose file used for PostgreSQL and RabbitMQ startup")
+	composeFile := flags.String("compose-file", envOrDefault("GO_CORE_COMPOSE_FILE", "docker-compose.yml"), "compose file used for PostgreSQL and RabbitMQ startup")
 	model := flags.String("model", os.Getenv("AI_BRIDGE_LOCAL_LLM_MODEL"), "ollama model to pull")
 	skipLocalLLM := flags.Bool("skip-local-llm", false, "skip local ollama startup")
 	skipAIKernel := flags.Bool("skip-ai-kernel", false, "skip ai-kernel provisioning/startup")
@@ -390,6 +416,15 @@ func detectContainerRuntime() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("container runtime unavailable: neither podman nor docker found in PATH")
+}
+
+func bootstrapSafeModeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GO_CORE_BOOTSTRAP_SAFE_MODE"))) {
+	case "1", "true", "yes", "on", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 func envBool(key string) bool {

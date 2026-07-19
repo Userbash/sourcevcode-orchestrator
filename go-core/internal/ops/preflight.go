@@ -83,8 +83,8 @@ func classifyPreflight(report *PreflightReport) {
 	}
 	report.NextSteps = []string{
 		"If running on Bazzite, Silverblue, Fedora CoreOS, or another immutable host, prefer an unconfined or privileged container profile instead of tuning kernel.unprivileged_userns_clone.",
-		"Retry with: podman compose -f docker-compose.ai.yml -f docker-compose.ai.unconfined.override.yml up",
-		"If podman compose is unavailable, retry with: podman-compose -f docker-compose.ai.yml -f docker-compose.ai.unconfined.override.yml up",
+		"Retry with: podman compose -f docker-compose.yml up",
+		"If podman compose is unavailable, retry with: podman-compose -f docker-compose.yml up",
 		"For podman run, use --security-opt seccomp=unconfined --security-opt label=disable --userns=host and add --privileged if bwrap remains blocked.",
 		"If the host exposes kernel.unprivileged_userns_clone, run sysctl on it; if it returns 0, set it to 1 and reload sysctl before retrying.",
 		"Verify the runtime with: bwrap --ro-bind / / true",

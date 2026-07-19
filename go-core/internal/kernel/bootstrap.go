@@ -63,6 +63,10 @@ func NewWithStore(store state.Store) *Orchestrator {
 	registerModule("memory_control", "memory", "Native Go session memory persistence and runtime context ported from Python memory control flows")
 	registerModule("validation_memory_gate", "validation", "Native Go cache guard, invalidation log and validation context ported from Python validation gate")
 
+	if bootstrapSafeModeEnabled() {
+		return orchestrator
+	}
+
 	localModelRuntime := localmodels.NewRuntime(localmodels.ConfigFromEnv())
 	localModelManager := localmodels.NewManager(localModelRuntime)
 	registry.RegisterModule(localModelManager)

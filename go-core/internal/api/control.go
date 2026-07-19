@@ -13,6 +13,7 @@ import (
 	"sourcevcode-orchestrator/go-core/internal/agents"
 	"sourcevcode-orchestrator/go-core/internal/buildinfo"
 	"sourcevcode-orchestrator/go-core/internal/domain"
+	"sourcevcode-orchestrator/go-core/internal/observability"
 	"sourcevcode-orchestrator/go-core/internal/transport"
 )
 
@@ -99,6 +100,13 @@ func (s *Server) buildDispatcher() *transport.Dispatcher {
 	})
 	dispatcher.RegisterSingle("diagnostics.get", false, func(ctx context.Context, request transport.Envelope) (map[string]any, error) {
 		return s.diagnosticsSnapshot(ctx, stringSliceField(request.Data, "layers"), boolField(request.Data, "matrix_only")), nil
+	})
+	dispatcher.RegisterSingle("diagnostics.logs.get", false, func(_ context.Context, request transport.Envelope) (map[string]any, error) {
+		limit := intField(request.Data, "limit")
+		if limit <= 0 {
+			limit = 200
+		}
+		return observability.Diagnostics(limit), nil
 	})
 	dispatcher.RegisterSingle("runtime.routing_weights.get", false, func(_ context.Context, _ transport.Envelope) (map[string]any, error) {
 		return map[string]any{"status": "ok", "data": s.orchestrator.RuntimeRoutingWeights()}, nil
@@ -378,22 +386,29 @@ func (s *Server) handleChatWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automaticAction string) {
+	logger := observability.Logger("websocket")
+	meta := metadataFromContext(r.Context())
 	session := transport.NewSession(transport.DefaultWSSubprotocols, 5*time.Second, 30*time.Second, nil, nil, nil)
 	handshake, err := session.Accept(r.Context(), r.Header)
 	if err != nil {
+		logger.Warn("websocket handshake rejected", "request_id", meta.RequestID, "path", r.URL.Path, "remote_addr", clientRemoteAddr(r), "error", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	conn, err := transport.UpgradeWebSocket(w, r, handshake.Subprotocol)
 	if err != nil {
+		logger.Error("websocket upgrade failed", "request_id", meta.RequestID, "path", r.URL.Path, "remote_addr", clientRemoteAddr(r), "subprotocol", handshake.Subprotocol, "error", err.Error())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer conn.Close()
 	defer session.Close(context.Background())
 
+	logger.Info("websocket connection opened", "request_id", meta.RequestID, "session_id", handshake.SessionID, "path", r.URL.Path, "remote_addr", clientRemoteAddr(r), "subprotocol", handshake.Subprotocol, "automatic_action", automaticAction, "request_origin", meta.RequestOrigin, "client_kind", meta.ClientKind)
+
 	connectionCtx, cancelConnection := context.WithCancel(r.Context())
 	defer cancelConnection()
+	defer logger.Info("websocket connection closed", "request_id", meta.RequestID, "session_id", handshake.SessionID, "path", r.URL.Path)
 	go func() {
 		<-connectionCtx.Done()
 		_ = conn.Close()
@@ -416,6 +431,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automat
 			"subprotocol":    handshake.Subprotocol,
 		},
 	}); err != nil {
+		logger.Error("websocket kernel.version send failed", "request_id", meta.RequestID, "session_id", handshake.SessionID, "error", err.Error())
 		return
 	}
 
@@ -428,6 +444,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automat
 				return
 			case <-ticker.C:
 				if err := send(session.HeartbeatEnvelope()); err != nil {
+					logger.Warn("websocket heartbeat failed", "request_id", meta.RequestID, "session_id", handshake.SessionID, "error", err.Error())
 					cancelConnection()
 					return
 				}
@@ -444,12 +461,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automat
 		raw, err := conn.ReadMessage(connectionCtx)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && connectionCtx.Err() == nil {
+				logger.Warn("websocket read failed", "request_id", meta.RequestID, "session_id", handshake.SessionID, "error", err.Error())
 				_ = send(transport.ErrorEnvelope(transport.Envelope{RequestID: handshake.SessionID}, "INVALID_FRAME", err.Error(), nil))
 			}
 			return
 		}
 		envelope, err := transport.ParseEnvelope(raw)
 		if err != nil {
+			logger.Warn("websocket frame parse failed", "request_id", meta.RequestID, "session_id", handshake.SessionID, "path", r.URL.Path, "error", err.Error())
 			s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, automaticAction, raw, nil, err, "parse_error")
 			_ = send(transport.ErrorEnvelope(transport.Envelope{RequestID: handshake.SessionID}, transport.ErrorCode(err), err.Error(), nil))
 			continue
@@ -460,9 +479,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automat
 				envelope.Ack = true
 			}
 		}
+		logger.Info("websocket frame accepted", "request_id", meta.RequestID, "session_id", handshake.SessionID, "envelope_request_id", envelope.RequestID, "action", envelope.Action, "type", envelope.Type, "ack", envelope.Ack)
 		s.recordWebsocketAudit(r.URL.Path, r.RemoteAddr, handshake.SessionID, automaticAction, raw, &envelope, nil, "accepted")
 		if response, handled, controlErr := session.HandleControlFrame(connectionCtx, envelope); handled {
 			if controlErr != nil {
+				logger.Warn("websocket control frame failed", "request_id", meta.RequestID, "session_id", handshake.SessionID, "envelope_request_id", envelope.RequestID, "action", envelope.Action, "error", controlErr.Error())
 				_ = send(transport.ErrorEnvelope(envelope, transport.ErrorCode(controlErr), controlErr.Error(), nil))
 			} else {
 				_ = send(response)
@@ -474,8 +495,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request, automat
 }
 
 func (s *Server) startDispatch(ctx context.Context, session *transport.Session, request transport.Envelope, send transport.Emitter) {
+	logger := observability.Logger("dispatcher")
+	meta := metadataFromContext(ctx)
 	requestCtx, cancel := context.WithCancel(ctx)
 	if err := session.TrackRequest(request.RequestID, cancel); err != nil {
+		logger.Warn("dispatch request rejected", "request_id", meta.RequestID, "envelope_request_id", request.RequestID, "action", request.Action, "type", request.Type, "error", err.Error())
 		_ = send(transport.ErrorEnvelope(request, "CONFLICT", err.Error(), nil))
 		cancel()
 		return
@@ -484,10 +508,15 @@ func (s *Server) startDispatch(ctx context.Context, session *transport.Session, 
 		_, _ = session.RegisterSubscription(ctx, transport.SubscriptionBinding{ID: request.RequestID, Topic: request.Action})
 	}
 	go func() {
+		logger.Info("dispatch started", "request_id", meta.RequestID, "envelope_request_id", request.RequestID, "action", request.Action, "type", request.Type)
 		defer cancel()
 		defer session.FinishRequest(request.RequestID)
 		defer session.RemoveSubscription(request.RequestID)
-		_ = s.dispatcher.Dispatch(requestCtx, request, send)
+		if err := s.dispatcher.Dispatch(requestCtx, request, send); err != nil {
+			logger.Error("dispatch failed", "request_id", meta.RequestID, "envelope_request_id", request.RequestID, "action", request.Action, "type", request.Type, "error", err.Error())
+			return
+		}
+		logger.Info("dispatch completed", "request_id", meta.RequestID, "envelope_request_id", request.RequestID, "action", request.Action, "type", request.Type)
 	}()
 }
 
