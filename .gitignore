@@ -145,6 +145,12 @@ secrets/
 go-core/.gomodcache/
 go-core/orchestrator
 
+# Go rewrite build and test artifacts
+rewrite/orchestrator
+rewrite/.gocache/
+rewrite/coverage.out
+rewrite/coverage.html
+
 /.gomodcache/
 /.runtime/
 /.artifacts/
